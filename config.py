@@ -79,10 +79,10 @@ ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORTS_MAP = {
     # Brasil
     71:  "soccer_brazil_campeonato",            # Brasileirão A
-    72:  None,                                  # Brasileirão B
-    73:  None,                                  # Copa do Brasil
-    475: None,                                  # Paulistão
-    479: None,                                  # Carioca
+    72:  None,                                  # Brasileirão B (não tem na Odds API)
+    73:  None,                                  # Copa do Brasil (não tem na Odds API)
+    475: None,                                  # Paulistão (não tem)
+    479: None,                                  # Carioca (não tem)
 
     # Europa — Top 5
     39:  "soccer_epl",                          # Premier League
@@ -97,17 +97,17 @@ ODDS_SPORTS_MAP = {
     # América do Sul
     13:  "soccer_conmebol_copa_libertadores",   # Libertadores
     11:  "soccer_conmebol_copa_sudamericana",   # Sul-Americana
-    128: None,                                  # Argentina Primera
-    239: None,                                  # Colômbia Primera A
-    265: None,                                  # Chile Primera
+    128: "soccer_argentina_primera_division",   # Argentina Primera
+    239: None,                                  # Colômbia Primera A (não tem na Odds API)
+    265: "soccer_chile_campeonato",             # Chile Primera
 
     # América do Norte
     253: "soccer_usa_mls",                      # MLS
     262: "soccer_mexico_ligamx",                # Liga MX
     # Ásia / Oceania
-    98:  None,                                  # J-League
+    98:  "soccer_japan_j_league",               # J-League
 
-    307: None,                                  # Saudi Pro League
+    307: "soccer_saudi_arabia_pro_league",      # Saudi Pro League
     188: "soccer_australia_aleague",            # A-League
     # Seleções
     1:   "soccer_fifa_world_cup",               # Copa do Mundo
