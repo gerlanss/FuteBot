@@ -1,0 +1,12 @@
+# FuteBot - Arquivos de ambiente e cache
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Dados locais (não versionados)
+data/futebot.db
+data/futebot.db-wal
+data/futebot.db-shm
+data/models/*.json

@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Buscar Time{% endblock %}
+
+{% block content %}
+<h2 class="mb-4"><i class="bi bi-search text-primary"></i> Buscar Time</h2>
+
+<form method="GET" action="{{ url_for('search_team') }}" class="mb-4">
+    <div class="input-group input-group-lg">
+        <span class="input-group-text bg-dark border-primary"><i class="bi bi-search"></i></span>
+        <input type="text" name="q" class="form-control border-primary"
+               placeholder="Nome do time (ex: Corinthians, Real Madrid)" value="{{ query }}" autofocus>
+        <button class="btn btn-primary" type="submit">Buscar</button>
+    </div>
+</form>
+
+{% if query %}
+    {% if times %}
+        <p class="text-muted mb-3">{{ times|length }} resultado(s) para "<strong>{{ query }}</strong>"</p>
+        {% for item in times %}
+        {% set t = item.get('team', {}) %}
+        {% set v = item.get('venue', {}) %}
+        <div class="card mb-3 bg-dark border-secondary">
+            <div class="card-body">
+                <div class="row align-items-center">
+                    <div class="col-auto">
+                        {% if t.get('logo') %}
+                            <img src="{{ t['logo'] }}" alt="{{ t.get('name','') }}" style="width:64px;height:64px;object-fit:contain;">
+                        {% endif %}
+                    </div>
+                    <div class="col">
+                        <h5 class="mb-1">
+                            {{ t.get('name', '?') }}
+                            {% if t.get('code') %}
+                                <small class="text-muted">({{ t['code'] }})</small>
+                            {% endif %}
+                        </h5>
+                        <p class="mb-0 text-muted small">
+                            <i class="bi bi-geo-alt me-1"></i>{{ t.get('country', '-') }}
+                            {% if t.get('founded') %} | Fundado em {{ t['founded'] }}{% endif %}
+                            {% if v.get('name') %} | <i class="bi bi-building me-1"></i>{{ v['name'] }}{% endif %}
+                            {% if v.get('capacity') %} ({{ "{:,}".format(v['capacity']) }}){% endif %}
+                        </p>
+                    </div>
+                    <div class="col-auto">
+                        <a href="{{ url_for('team_detail', team_id=t.get('id', 0)) }}" class="btn btn-outline-primary btn-sm">
+                            <i class="bi bi-bar-chart me-1"></i>Stats
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    {% else %}
+        <div class="alert alert-warning">
+            <i class="bi bi-exclamation-triangle me-2"></i>Nenhum time encontrado para "<strong>{{ query }}</strong>".
+        </div>
+    {% endif %}
+{% endif %}
+{% endblock %}

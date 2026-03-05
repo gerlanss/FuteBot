@@ -1,0 +1,212 @@
+{% extends "base.html" %}
+{% block title %}{{ fixture.get('fixture', {}).get('id', 'Partida') }} — Stats{% endblock %}
+
+{% block content %}
+{% set fx = fixture.get('fixture', {}) %}
+{% set teams = fixture.get('teams', {}) %}
+{% set g = fixture.get('goals', {}) %}
+{% set sc = fixture.get('score', {}) %}
+{% set lg = fixture.get('league', {}) %}
+
+<!-- Cabeçalho da partida -->
+<div class="card bg-dark border-success mb-4">
+    <div class="card-body text-center">
+        <small class="text-muted">
+            {{ lg.get('name', '') }} — {{ lg.get('round', '') }} | {{ fx.get('date', '')[:10] }}
+        </small>
+        <div class="d-flex justify-content-center align-items-center gap-4 my-3">
+            <div class="text-end" style="min-width:150px;">
+                <img src="{{ teams.get('home', {}).get('logo', '') }}" style="width:48px;height:48px;" class="me-2">
+                <span class="fs-5 fw-bold">{{ teams.get('home', {}).get('name', '?') }}</span>
+            </div>
+            <div>
+                <span class="badge bg-dark fs-3 px-4">{{ g.get('home', '-') }} x {{ g.get('away', '-') }}</span>
+            </div>
+            <div class="text-start" style="min-width:150px;">
+                <span class="fs-5 fw-bold">{{ teams.get('away', {}).get('name', '?') }}</span>
+                <img src="{{ teams.get('away', {}).get('logo', '') }}" style="width:48px;height:48px;" class="ms-2">
+            </div>
+        </div>
+        <small class="text-muted">
+            HT: {{ sc.get('halftime', {}).get('home', '-') }} x {{ sc.get('halftime', {}).get('away', '-') }}
+            | {{ fx.get('venue', {}).get('name', '') }}
+            | Árbitro: {{ fx.get('referee', '-') }}
+        </small>
+    </div>
+</div>
+
+<!-- Tabs -->
+<ul class="nav nav-tabs" role="tablist">
+    <li class="nav-item">
+        <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-stats">
+            <i class="bi bi-bar-chart me-1"></i>Estatísticas
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-events">
+            <i class="bi bi-list-ul me-1"></i>Eventos
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-lineups">
+            <i class="bi bi-people me-1"></i>Escalações
+        </button>
+    </li>
+</ul>
+
+<div class="tab-content mt-3">
+
+    <!-- ═══ STATS ═══ -->
+    <div class="tab-pane fade show active" id="tab-stats">
+        {% if stats and stats|length >= 2 %}
+            {% set home_stats = {} %}
+            {% set away_stats = {} %}
+            {% for s in stats[0].get('statistics', []) %}
+                {% set _ = home_stats.update({s['type']: s['value']}) %}
+            {% endfor %}
+            {% for s in stats[1].get('statistics', []) %}
+                {% set _ = away_stats.update({s['type']: s['value']}) %}
+            {% endfor %}
+
+            {% set stat_labels = [
+                ('Ball Possession', 'Posse de Bola', 'info'),
+                ('Total Shots', 'Chutes Totais', 'light'),
+                ('Shots on Goal', 'Chutes ao Gol', 'success'),
+                ('Shots off Goal', 'Chutes pra Fora', 'secondary'),
+                ('Blocked Shots', 'Chutes Bloqueados', 'secondary'),
+                ('Corner Kicks', 'Escanteios', 'warning'),
+                ('Fouls', 'Faltas', 'danger'),
+                ('Yellow Cards', 'Cartões Amarelos', 'warning'),
+                ('Red Cards', 'Cartões Vermelhos', 'danger'),
+                ('Offsides', 'Impedimentos', 'secondary'),
+                ('Goalkeeper Saves', 'Defesas do Goleiro', 'info'),
+                ('Total passes', 'Total de Passes', 'light'),
+                ('Passes accurate', 'Passes Certos', 'success'),
+                ('Passes %', 'Precisão de Passes', 'success'),
+                ('expected_goals', 'xG (Gols Esperados)', 'warning'),
+            ] %}
+
+            {% for key, label, color in stat_labels %}
+                {% set h_val = home_stats.get(key, '-') %}
+                {% set a_val = away_stats.get(key, '-') %}
+                {% if h_val != '-' or a_val != '-' %}
+                <div class="row align-items-center mb-2">
+                    <div class="col-4 text-end">
+                        <span class="badge bg-{{ color }} fs-6" style="min-width:60px;">{{ h_val if h_val is not none else '-' }}</span>
+                    </div>
+                    <div class="col-4 text-center">
+                        <small class="text-muted">{{ label }}</small>
+                    </div>
+                    <div class="col-4 text-start">
+                        <span class="badge bg-{{ color }} fs-6" style="min-width:60px;">{{ a_val if a_val is not none else '-' }}</span>
+                    </div>
+                </div>
+                {% endif %}
+            {% endfor %}
+        {% else %}
+            <div class="alert alert-info">Sem estatísticas disponíveis para esta partida.</div>
+        {% endif %}
+    </div>
+
+    <!-- ═══ EVENTOS ═══ -->
+    <div class="tab-pane fade" id="tab-events">
+        {% if eventos %}
+        <div class="table-responsive">
+            <table class="table table-dark table-sm">
+                <thead><tr><th>Min</th><th>Time</th><th>Jogador</th><th>Tipo</th><th>Detalhe</th></tr></thead>
+                <tbody>
+                    {% for ev in eventos %}
+                    <tr>
+                        <td>
+                            <span class="badge bg-secondary">{{ ev.get('time', {}).get('elapsed', '?') }}'
+                            {% if ev.get('time', {}).get('extra') %}+{{ ev['time']['extra'] }}{% endif %}
+                            </span>
+                        </td>
+                        <td>
+                            <img src="{{ ev.get('team', {}).get('logo', '') }}" style="width:18px;height:18px;">
+                        </td>
+                        <td>
+                            {{ ev.get('player', {}).get('name', '-') }}
+                            {% if ev.get('assist', {}).get('name') %}
+                                <small class="text-muted">({{ ev['assist']['name'] }})</small>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% set tipo = ev.get('type', '') %}
+                            {% if tipo == 'Goal' %}
+                                <i class="bi bi-circle-fill text-success"></i>
+                            {% elif tipo == 'Card' %}
+                                {% if 'Yellow' in ev.get('detail', '') %}
+                                    <i class="bi bi-square-fill text-warning"></i>
+                                {% else %}
+                                    <i class="bi bi-square-fill text-danger"></i>
+                                {% endif %}
+                            {% elif tipo == 'subst' %}
+                                <i class="bi bi-arrow-left-right text-info"></i>
+                            {% else %}
+                                {{ tipo }}
+                            {% endif %}
+                        </td>
+                        <td><small>{{ ev.get('detail', '-') }}</small></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+            <div class="alert alert-info">Sem eventos disponíveis.</div>
+        {% endif %}
+    </div>
+
+    <!-- ═══ ESCALAÇÕES ═══ -->
+    <div class="tab-pane fade" id="tab-lineups">
+        {% if escalacoes %}
+        <div class="row g-4">
+            {% for lineup in escalacoes %}
+            <div class="col-md-6">
+                <div class="card bg-dark border-secondary">
+                    <div class="card-header d-flex align-items-center gap-2">
+                        <img src="{{ lineup.get('team', {}).get('logo', '') }}" style="width:24px;height:24px;">
+                        <strong>{{ lineup.get('team', {}).get('name', '?') }}</strong>
+                        <span class="badge bg-success ms-auto">{{ lineup.get('formation', '?') }}</span>
+                    </div>
+                    <div class="card-body p-2">
+                        <h6 class="small text-success">Titulares</h6>
+                        {% for p in lineup.get('startXI', []) %}
+                            <div class="d-flex justify-content-between border-bottom border-secondary py-1 px-2">
+                                <span>
+                                    <span class="badge bg-secondary me-1">{{ p.get('player', {}).get('number', '-') }}</span>
+                                    {{ p.get('player', {}).get('name', '-') }}
+                                </span>
+                                <small class="text-muted">{{ p.get('player', {}).get('pos', '') }}</small>
+                            </div>
+                        {% endfor %}
+
+                        <h6 class="small text-warning mt-3">Reservas</h6>
+                        {% for p in lineup.get('substitutes', []) %}
+                            <div class="d-flex justify-content-between border-bottom border-secondary py-1 px-2">
+                                <span>
+                                    <span class="badge bg-secondary me-1">{{ p.get('player', {}).get('number', '-') }}</span>
+                                    <small>{{ p.get('player', {}).get('name', '-') }}</small>
+                                </span>
+                                <small class="text-muted">{{ p.get('player', {}).get('pos', '') }}</small>
+                            </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+            <div class="alert alert-info">Sem escalações disponíveis.</div>
+        {% endif %}
+    </div>
+
+</div>
+
+<div class="mt-4">
+    <button onclick="history.back()" class="btn btn-outline-secondary btn-sm">
+        <i class="bi bi-arrow-left me-1"></i>Voltar
+    </button>
+</div>
+{% endblock %}

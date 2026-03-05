@@ -1,0 +1,69 @@
+/* ══════════════════════════════════════════════
+   FuteBot — Estilos customizados
+   Complementa Bootstrap 5 (tema dark)
+   ══════════════════════════════════════════════ */
+
+/* Corpo */
+body {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+main {
+    flex: 1;
+}
+
+/* Cards */
+.card {
+    transition: border-color 0.2s;
+}
+
+.card:hover {
+    border-color: #198754 !important;
+}
+
+/* Tabelas — scrollbar sutil */
+pre::-webkit-scrollbar,
+.table-responsive::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+pre::-webkit-scrollbar-thumb,
+.table-responsive::-webkit-scrollbar-thumb {
+    background: #495057;
+    border-radius: 3px;
+}
+
+/* Badge de placar */
+.badge.bg-dark {
+    font-family: 'Courier New', monospace;
+    letter-spacing: 1px;
+}
+
+/* Escudos na busca */
+.card img[alt] {
+    transition: transform 0.2s;
+}
+
+.card img[alt]:hover {
+    transform: scale(1.05);
+}
+
+/* Navbar active */
+.nav-link.active,
+.nav-link:hover {
+    color: #fff !important;
+}
+
+/* Atalhos no explorador */
+.badge.bg-secondary {
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+.badge.bg-secondary:hover {
+    background-color: #ffc107 !important;
+    color: #000 !important;
+}

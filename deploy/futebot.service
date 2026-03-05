@@ -1,0 +1,41 @@
+# ──────────────────────────────────────────────
+# FuteBot — Serviço principal (Bot Telegram + Scheduler)
+#
+# Instalação:
+#   sudo cp /opt/futebot/deploy/futebot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable futebot
+#   sudo systemctl start futebot
+#
+# Logs:
+#   sudo journalctl -u futebot -f
+# ──────────────────────────────────────────────
+
+[Unit]
+Description=FuteBot - Bot Telegram + Scheduler de apostas EV
+After=network.target
+
+[Service]
+Type=simple
+User=futebot
+Group=futebot
+WorkingDirectory=/opt/futebot
+EnvironmentFile=/opt/futebot/.env
+ExecStart=/opt/futebot/venv/bin/python bot.py
+
+# Reiniciar automaticamente se crashar
+Restart=always
+RestartSec=10
+
+# Limite de memória (VPS 4GB — bot usa ~500MB com modelos)
+MemoryMax=1G
+
+# Timeout generoso para bootstrap (download + treino pode demorar)
+TimeoutStartSec=300
+
+# Logs via journald
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

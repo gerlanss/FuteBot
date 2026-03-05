@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}Início{% endblock %}
+
+{% block content %}
+<div class="text-center mb-4">
+    <h1 class="display-5 fw-bold text-success">
+        <i class="bi bi-trophy-fill"></i> FuteBot
+    </h1>
+    <p class="lead text-muted">
+        Estatísticas de futebol com API-Football — chutes, gols, posse, cartões e muito mais.
+    </p>
+</div>
+
+<div class="row g-4 justify-content-center">
+    <div class="col-md-3">
+        <div class="card h-100 border-primary">
+            <div class="card-body text-center">
+                <i class="bi bi-search text-primary fs-1"></i>
+                <h5 class="card-title mt-3">Buscar Time</h5>
+                <p class="card-text text-muted small">
+                    Pesquise por nome, veja stats completas, jogos e elenco.
+                </p>
+                <a href="{{ url_for('search_team') }}" class="btn btn-outline-primary btn-sm">Buscar</a>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card h-100 border-success">
+            <div class="card-body text-center">
+                <i class="bi bi-table text-success fs-1"></i>
+                <h5 class="card-title mt-3">Classificação</h5>
+                <p class="card-text text-muted small">
+                    Tabela completa do Brasileirão e outras ligas.
+                </p>
+                <a href="{{ url_for('standings_page') }}" class="btn btn-outline-success btn-sm">Ver Tabela</a>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card h-100 border-warning">
+            <div class="card-body text-center">
+                <i class="bi bi-bar-chart-fill text-warning fs-1"></i>
+                <h5 class="card-title mt-3">Stats de Partida</h5>
+                <p class="card-text text-muted small">
+                    Chutes, posse, cartões, xG — tudo de cada jogo.
+                </p>
+                <a href="{{ url_for('search_team') }}" class="btn btn-outline-warning btn-sm">Via Time</a>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card h-100 border-info">
+            <div class="card-body text-center">
+                <i class="bi bi-code-slash text-info fs-1"></i>
+                <h5 class="card-title mt-3">Explorador API</h5>
+                <p class="card-text text-muted small">
+                    Teste qualquer endpoint e veja o JSON bruto.
+                </p>
+                <a href="{{ url_for('explorer') }}" class="btn btn-outline-info btn-sm">Explorar</a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Info da conta -->
+{% if conta %}
+<div class="card mt-5 bg-dark border-secondary">
+    <div class="card-header"><i class="bi bi-person-badge me-1"></i> Sua Conta API-Football</div>
+    <div class="card-body">
+        <div class="row text-center">
+            <div class="col-md-3">
+                <h6 class="text-muted">Plano</h6>
+                <span class="badge bg-info fs-6">{{ conta.get('subscription', {}).get('plan', '?') }}</span>
+            </div>
+            <div class="col-md-3">
+                <h6 class="text-muted">Requests Hoje</h6>
+                {% set req = conta.get('requests', {}) %}
+                <span class="fs-5 fw-bold text-{{ 'danger' if req.get('current', 0) > 80 else 'success' }}">
+                    {{ req.get('current', 0) }}
+                </span>
+                <span class="text-muted">/ {{ req.get('limit_day', 100) }}</span>
+            </div>
+            <div class="col-md-3">
+                <h6 class="text-muted">Temporadas</h6>
+                <span>{{ config.TRAIN_SEASONS|min }} – {{ config.TRAIN_SEASONS|max }}</span>
+            </div>
+            <div class="col-md-3">
+                <h6 class="text-muted">Expira</h6>
+                <span>{{ conta.get('subscription', {}).get('end', '?')[:10] }}</span>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}

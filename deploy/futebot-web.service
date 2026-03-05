@@ -1,0 +1,43 @@
+# ──────────────────────────────────────────────
+# FuteBot Web — Dashboard Flask via Gunicorn
+#
+# Instalação:
+#   sudo cp /opt/futebot/deploy/futebot-web.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable futebot-web
+#   sudo systemctl start futebot-web
+#
+# Logs:
+#   sudo journalctl -u futebot-web -f
+# ──────────────────────────────────────────────
+
+[Unit]
+Description=FuteBot Web - Dashboard Flask (Gunicorn)
+After=network.target
+
+[Service]
+Type=notify
+User=futebot
+Group=futebot
+WorkingDirectory=/opt/futebot
+EnvironmentFile=/opt/futebot/.env
+ExecStart=/opt/futebot/venv/bin/gunicorn \
+    --bind 127.0.0.1:5000 \
+    --workers 2 \
+    --timeout 120 \
+    --access-logfile - \
+    --error-logfile - \
+    app:app
+
+# Reiniciar automaticamente se crashar
+Restart=always
+RestartSec=5
+
+# Limite — dashboard é leve
+MemoryMax=512M
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
