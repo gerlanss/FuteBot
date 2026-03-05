@@ -203,31 +203,10 @@ class Scheduler:
             else:
                 print("   ✅ Todas as stats já baixadas")
 
-            # Auto-treinar se:
-            #   a) Modelo não existe e dados suficientes, OU
-            #   b) Stats pendentes zeradas (download completo) e dataset cresceu >30%
-            #      em relação ao último treino — garante retreino com dados novos
-            modelos_existem = all(
-                Trainer.modelo_existe(m) for m in ["resultado_1x2", "over_under_25", "btts"]
-            )
-
-            # Atualizar contagem real pós-download
-            resumo_pos = self.db.resumo()
-            com_stats_pos = resumo_pos.get("fixtures_com_stats", 0)
-            pendentes_pos = resumo_pos.get("fixtures_ft", 0) - com_stats_pos
-
-            if not modelos_existem and com_stats_pos >= MIN_FIXTURES_TREINO:
-                print(f"\n   🤖 Modelo não existe, {com_stats_pos} jogos disponíveis — treinando...")
-                self._job_retreinar()
-            elif modelos_existem and pendentes_pos == 0 and pendentes > 0:
-                # Acabou de completar todas as stats — retreinar com dataset completo
-                print(f"\n   🤖 Download completo! {com_stats_pos:,} jogos com stats — retreinando...")
-                self._enviar_telegram(
-                    f"📦 Download de stats finalizado!\n"
-                    f"   {com_stats_pos:,} jogos com stats\n"
-                    f"🤖 Iniciando retreino automático..."
-                )
-                self._job_retreinar()
+            # Retreino é APENAS mensal (1º domingo do mês via _job_retreinar).
+            # O bulk download NÃO dispara retreino automático — os modelos
+            # per-league já existem em data/models/league_*/ e são atualizados
+            # mensalmente pelo job dedicado.
 
         except Exception as e:
             print(f"❌ Erro no bulk: {e}")
