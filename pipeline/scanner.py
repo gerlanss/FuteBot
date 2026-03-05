@@ -719,29 +719,61 @@ class Scanner:
         melhor_casa = ""
         odd_pinnacle = 0.0
 
+        # Coleta todas as linhas disponíveis para fallback (totals)
+        linhas_disponiveis = {}  # {bookmaker_key: {point: price}}
+
         for bk in jogo.get("bookmakers", []):
             for mkt in bk.get("markets", []):
                 if mkt.get("key") != market_key:
                     continue
                 for oc in mkt.get("outcomes", []):
-                    # Filtrar por point quando necessário (totals)
-                    if point is not None and oc.get("point") != point:
-                        continue
-
                     nome = oc.get("name", "")
                     price = oc.get("price", 0)
 
                     if nome != outcome:
                         continue
 
-                    # Pinnacle tem prioridade
-                    if bk.get("key") == "pinnacle":
-                        odd_pinnacle = price
+                    oc_point = oc.get("point")
 
-                    # Rastrear melhor odd geral
-                    if price > melhor_odd:
-                        melhor_odd = price
-                        melhor_casa = bk.get("title", bk.get("key", ""))
+                    # Match exato de point
+                    if point is not None and oc_point == point:
+                        if bk.get("key") == "pinnacle":
+                            odd_pinnacle = price
+                        if price > melhor_odd:
+                            melhor_odd = price
+                            melhor_casa = bk.get("title", bk.get("key", ""))
+
+                    # Sem point (h2h, btts) — match direto
+                    elif point is None:
+                        if bk.get("key") == "pinnacle":
+                            odd_pinnacle = price
+                        if price > melhor_odd:
+                            melhor_odd = price
+                            melhor_casa = bk.get("title", bk.get("key", ""))
+
+                    # Guardar linhas para fallback (totals com point diferente)
+                    if point is not None and oc_point is not None:
+                        bk_key = bk.get("key", "")
+                        if bk_key not in linhas_disponiveis:
+                            linhas_disponiveis[bk_key] = {}
+                        linhas_disponiveis[bk_key][oc_point] = (price, bk.get("title", bk_key))
+
+        # Se não encontrou a linha exata, usar linha mais próxima da Pinnacle
+        if odd_pinnacle == 0 and melhor_odd == 0 and linhas_disponiveis:
+            # Priorizar Pinnacle
+            for bk_key in ["pinnacle"] + list(linhas_disponiveis.keys()):
+                if bk_key not in linhas_disponiveis:
+                    continue
+                pts = linhas_disponiveis[bk_key]
+                # Encontrar a linha mais próxima do point desejado
+                closest = min(pts.keys(), key=lambda p: abs(p - point))
+                price, casa = pts[closest]
+                if bk_key == "pinnacle":
+                    odd_pinnacle = price
+                    break
+                elif price > melhor_odd:
+                    melhor_odd = price
+                    melhor_casa = casa
 
         # Retornar Pinnacle se disponível, senão melhor alternativa
         if odd_pinnacle > 0:
