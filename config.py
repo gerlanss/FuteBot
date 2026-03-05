@@ -103,7 +103,7 @@ ODDS_SPORTS_MAP = {
 
     # América do Norte
     253: "soccer_usa_mls",                      # MLS
-    262: None,                                  # Liga MX
+    262: "soccer_mexico_ligamx",                # Liga MX
     # Ásia / Oceania
     98:  None,                                  # J-League
 
@@ -126,9 +126,9 @@ MAX_JOGOS_ODDS = 10           # Máximo de jogos para buscar odds (economia de c
 EV_THRESHOLD = 0.03           # EV mínimo para considerar oportunidade (3%)
 
 # Casa de apostas preferida (key do The Odds API)
-# Prioriza odds dessa casa; se indisponível, usa melhor alternativa com aviso
-PREFERRED_BOOKMAKER = "bet365"
-PREFERRED_BOOKMAKER_LABEL = "Bet365"
+# Pinnacle: odds sharp de referência, melhor cobertura na API, opera no Brasil
+PREFERRED_BOOKMAKER = "pinnacle"
+PREFERRED_BOOKMAKER_LABEL = "Pinnacle"
 SCAN_HORA = "07:00"           # Horário do scan diário
 RESULTADOS_HORA = "06:00"     # Horário da coleta de resultados
 RETREINO_DIA = "sun"           # Dia do retreino mensal (domingo — termina antes do scanner de segunda)

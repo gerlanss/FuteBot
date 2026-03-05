@@ -7,14 +7,14 @@ Execução diária (automática via scheduler ou manual):
   3. Expandir mercados (cada previsão gera N tips por mercado)
   4. Filtrar pelo Strategy Gate (liga × mercado × confiança)
   5. Validar via DeepSeek LLM (segundo par de olhos)
-  6. Registrar tips aprovadas no banco + enviar Telegram
+  6. Registrar tips aprovadas no banco
+  6b. Enriquecer tips com odds Pinnacle + calcular EV
+  7. Enviar Telegram com odds de referência e EV
 
-Fluxo sem EV/odds:
-  O bot não depende mais da Odds API (The Odds API) para funcionar.
-  Em vez de calcular EV (prob × odd − 1), o pipeline usa:
-    - Confiança do modelo XGBoost (probabilidade calibrada)
-    - Strategy Gate cross-validado (accuracy histórica por liga×mercado×banda)
-    - DeepSeek como filtro qualitativo (lesões, classificação, contexto)
+Fluxo de EV (Pinnacle como referência):
+  Após aprovar tips, busca odds Pinnacle apenas das ligas envolvidas.
+  EV = (prob_modelo × odd_pinnacle) - 1. Exibido como informação, não filtra.
+  Custo: ~2 créditos/liga (h2h+totals) × ~3-6 ligas/dia = 6-12 créditos/dia.
 
 Uso:
   from pipeline.scanner import Scanner
@@ -25,6 +25,7 @@ Uso:
 from datetime import datetime, timedelta
 from config import LEAGUES, TIMEZONE
 from config import ROI_PAUSE_THRESHOLD, ROI_PAUSE_MIN_BETS
+from config import ODDS_SPORTS_MAP, PREFERRED_BOOKMAKER, PREFERRED_BOOKMAKER_LABEL
 from data.database import Database
 from services.apifootball import raw_request
 from models.predictor import Predictor
@@ -115,13 +116,41 @@ _LEAGUE_NOME = {v["id"]: v["nome"] for v in LEAGUES.values()}
 # ──────────────────────────────────────────────
 # Configuração de combos (acumuladas)
 # Combina tips de jogos DIFERENTES para multiplicar odds.
-# Sem odds reais por enquanto — usa confiança composta.
+# Usa odds Pinnacle reais quando disponíveis.
 # ──────────────────────────────────────────────
 COMBO_MAX_TOTAL = 5           # Máximo de combos total (duplas + triplas)
 COMBO_DUPLAS_MAX = 4          # Teto de duplas (limitado por COMBO_MAX_TOTAL)
 COMBO_TRIPLAS_MAX = 3         # Teto de triplas (limitado por COMBO_MAX_TOTAL)
 COMBO_PROB_MIN = 0.45         # Confiança composta mínima (produto das probs)
 COMBO_TIP_PROB_MIN = 0.62     # Prob mínima individual para entrar em combo
+
+
+# ──────────────────────────────────────────────
+# Mapeamento mercado_id → parâmetros da Odds API
+# Permite traduzir cada tip do FuteBot para extrair a odd correta
+# da Pinnacle (ou qualquer bookmaker) via The Odds API.
+# Formato: mercado_id → (market_key, outcome, point)
+# ──────────────────────────────────────────────
+_MERCADO_ODDS_MAP = {
+    # 1x2 Full Time — market_key='h2h', outcome=nome do time ou 'Draw'
+    "h2h_home":  ("h2h", "HOME", None),
+    "h2h_draw":  ("h2h", "Draw", None),
+    "h2h_away":  ("h2h", "AWAY", None),
+    # Over/Under — market_key='totals', outcome='Over'/'Under', point=linha
+    "over15":    ("totals", "Over",  1.5),
+    "under15":   ("totals", "Under", 1.5),
+    "over25":    ("totals", "Over",  2.5),
+    "under25":   ("totals", "Under", 2.5),
+    "over35":    ("totals", "Over",  3.5),
+    "under35":   ("totals", "Under", 3.5),
+    # BTTS — market_key='btts', outcome='Yes'/'No'
+    "btts_yes":  ("btts", "Yes", None),
+    "btts_no":   ("btts", "No",  None),
+    # 1x2 Primeiro Tempo — market_key='h2h_h1'
+    "ht_home":   ("h2h_h1", "HOME", None),
+    "ht_draw":   ("h2h_h1", "Draw", None),
+    "ht_away":   ("h2h_h1", "AWAY", None),
+}
 
 
 class Scanner:
@@ -255,8 +284,12 @@ class Scanner:
             print(f"   ✂️ Cortando de {len(tips_aprovadas)} para {MAX_TIPS_DIA} tips (limite diário)")
             tips_aprovadas = tips_aprovadas[:MAX_TIPS_DIA]
 
-        # ─── ETAPA 6: Salvar no banco ───
-        print("\n💾 Etapa 6: Salvando tips aprovadas...")
+        # ─── ETAPA 6: Enriquecer tips com odds Pinnacle + EV ───
+        print("\n📊 Etapa 6: Buscando odds Pinnacle...")
+        tips_aprovadas = self._enriquecer_odds(tips_aprovadas)
+
+        # ─── ETAPA 6b: Salvar no banco ───
+        print("\n💾 Etapa 6b: Salvando tips aprovadas...")
         _treino = self.db.ultimo_treino()
         versao_atual = _treino["modelo_versao"] if _treino else "v1"
 
@@ -273,9 +306,9 @@ class Scanner:
                 "prob_over25": tip.get("prob_over25"),
                 "prob_btts": tip.get("prob_btts_yes"),
                 "mercado": tip["mercado"],
-                "odd_usada": None,          # Sem odds neste fluxo
-                "ev_percent": None,         # Sem EV neste fluxo
-                "bookmaker": "",
+                "odd_usada": tip.get("odd_pinnacle"),
+                "ev_percent": tip.get("ev_percent"),
+                "bookmaker": tip.get("odd_fonte", ""),
                 "modelo_versao": versao_atual,
                 "features": tip.get("features", {}),
             })
@@ -546,6 +579,174 @@ class Scanner:
 
         # Confiança fora de qualquer faixa ativa — bloquear
         return False
+
+    # ══════════════════════════════════════════════
+    #  ETAPA 6: Enriquecer tips com odds Pinnacle + EV
+    # ══════════════════════════════════════════════
+
+    def _enriquecer_odds(self, tips: list[dict]) -> list[dict]:
+        """
+        Busca odds da Pinnacle (via The Odds API) para as ligas das tips
+        aprovadas e enriquece cada tip com odd de referência e EV.
+
+        Só busca odds de ligas que têm mapeamento no ODDS_SPORTS_MAP.
+        Custo: ~2 créditos por liga (h2h + totals).
+
+        Campos adicionados em cada tip:
+          - odd_pinnacle: odd decimal da Pinnacle (ou None se indisponível)
+          - ev_percent: EV em % = (prob × odd - 1) × 100 (ou None)
+          - odd_fonte: nome do bookmaker que forneceu a odd
+        """
+        from services.odds_api import buscar_odds_liga
+
+        if not tips:
+            return tips
+
+        # 1. Identificar ligas únicas das tips aprovadas
+        ligas_tips = {t.get("league_id") for t in tips if t.get("league_id")}
+        ligas_com_odds = {lid for lid in ligas_tips if ODDS_SPORTS_MAP.get(lid)}
+        ligas_sem_odds = ligas_tips - ligas_com_odds
+
+        if ligas_sem_odds:
+            nomes = [_LEAGUE_NOME.get(lid, str(lid)) for lid in ligas_sem_odds]
+            print(f"   ⚠️ Sem cobertura Odds API: {', '.join(nomes)}")
+
+        if not ligas_com_odds:
+            print("   📭 Nenhuma liga com cobertura — tips sem odds")
+            return tips
+
+        # 2. Buscar odds de cada liga (h2h + totals, apenas eu para economizar)
+        # Cache: {sport_key: [jogos_com_odds]}
+        cache_odds = {}
+        for lid in ligas_com_odds:
+            sport_key = ODDS_SPORTS_MAP[lid]
+            if sport_key in cache_odds:
+                continue
+            try:
+                jogos = buscar_odds_liga(sport_key, markets="h2h,totals", regions="eu")
+                cache_odds[sport_key] = jogos
+                print(f"   ✅ {_LEAGUE_NOME.get(lid, sport_key)}: {len(jogos)} jogos com odds")
+            except Exception as e:
+                print(f"   ❌ {_LEAGUE_NOME.get(lid, sport_key)}: erro ao buscar odds — {e}")
+                cache_odds[sport_key] = []
+
+        # 3. Para cada tip, encontrar o jogo e extrair a odd
+        enriquecidas = 0
+        for tip in tips:
+            lid = tip.get("league_id")
+            sport_key = ODDS_SPORTS_MAP.get(lid)
+            if not sport_key or sport_key not in cache_odds:
+                continue
+
+            jogos = cache_odds[sport_key]
+            jogo = self._match_jogo_odds(
+                jogos, tip.get("home_name", ""), tip.get("away_name", "")
+            )
+            if not jogo:
+                continue
+
+            # Extrair odd para este mercado específico
+            odd, fonte = self._extrair_odd_mercado(jogo, tip)
+            if odd and odd > 1.0:
+                tip["odd_pinnacle"] = round(odd, 2)
+                tip["odd_fonte"] = fonte
+                # EV = (prob_modelo × odd) - 1, em %
+                prob = tip.get("prob_modelo", 0)
+                tip["ev_percent"] = round((prob * odd - 1) * 100, 1)
+                enriquecidas += 1
+
+        print(f"   📊 {enriquecidas}/{len(tips)} tips enriquecidas com odds")
+        return tips
+
+    @staticmethod
+    def _match_jogo_odds(jogos: list[dict], home: str, away: str) -> dict | None:
+        """
+        Encontra um jogo na lista de odds por nome dos times (fuzzy match).
+        Usa busca parcial case-insensitive com palavras >3 chars.
+        """
+        home_lower = home.lower()
+        away_lower = away.lower()
+
+        for jogo in jogos:
+            jh = jogo.get("home_team", "").lower()
+            ja = jogo.get("away_team", "").lower()
+
+            # Match por palavras significativas (>3 chars)
+            home_words = [w for w in home_lower.split() if len(w) > 3]
+            away_words = [w for w in away_lower.split() if len(w) > 3]
+
+            # Fallback: se não tem palavras >3, usa todas
+            if not home_words:
+                home_words = home_lower.split()
+            if not away_words:
+                away_words = away_lower.split()
+
+            home_match = any(w in jh for w in home_words)
+            away_match = any(w in ja for w in away_words)
+
+            if home_match and away_match:
+                return jogo
+
+        return None
+
+    @staticmethod
+    def _extrair_odd_mercado(jogo: dict, tip: dict) -> tuple[float, str]:
+        """
+        Extrai a odd de um mercado específico do jogo, priorizando Pinnacle.
+
+        Usa _MERCADO_ODDS_MAP para traduzir o mercado_id do FuteBot
+        nos parâmetros da Odds API (market_key, outcome, point).
+
+        Retorna (odd, nome_bookmaker) ou (0, '') se não encontrar.
+        """
+        mercado_id = tip.get("mercado", "")
+        mapping = _MERCADO_ODDS_MAP.get(mercado_id)
+        if not mapping:
+            return 0, ""
+
+        market_key, outcome, point = mapping
+        home_team = jogo.get("home_team", "")
+        away_team = jogo.get("away_team", "")
+
+        # Resolver HOME/AWAY para nomes reais
+        if outcome == "HOME":
+            outcome = home_team
+        elif outcome == "AWAY":
+            outcome = away_team
+
+        # Prioridade: Pinnacle → melhor alternativa
+        melhor_odd = 0.0
+        melhor_casa = ""
+        odd_pinnacle = 0.0
+
+        for bk in jogo.get("bookmakers", []):
+            for mkt in bk.get("markets", []):
+                if mkt.get("key") != market_key:
+                    continue
+                for oc in mkt.get("outcomes", []):
+                    # Filtrar por point quando necessário (totals)
+                    if point is not None and oc.get("point") != point:
+                        continue
+
+                    nome = oc.get("name", "")
+                    price = oc.get("price", 0)
+
+                    if nome != outcome:
+                        continue
+
+                    # Pinnacle tem prioridade
+                    if bk.get("key") == "pinnacle":
+                        odd_pinnacle = price
+
+                    # Rastrear melhor odd geral
+                    if price > melhor_odd:
+                        melhor_odd = price
+                        melhor_casa = bk.get("title", bk.get("key", ""))
+
+        # Retornar Pinnacle se disponível, senão melhor alternativa
+        if odd_pinnacle > 0:
+            return odd_pinnacle, "Pinnacle"
+        return melhor_odd, melhor_casa
 
     # ══════════════════════════════════════════════
     #  ETAPA 7: Geração de combos (acumuladas)
@@ -822,14 +1023,26 @@ class Scanner:
                     f"{hora_str}{data_info}\n"
                 )
 
-                # Tips do jogo (cada uma em 1 linha com emoji, nomes copiáveis separados)
+                # Tips do jogo (cada uma com emoji, nomes copiáveis, odd Pinnacle e EV)
                 for tip in fix_tips:
                     prob = tip.get("prob_modelo", 0)
                     emoji = "🔥" if prob > 0.70 else "⚡" if prob > 0.55 else "📊"
                     desc = tip.get("descricao", tip.get("mercado", "?"))
                     home = primeira.get("home_name", "?")
                     away = primeira.get("away_name", "?")
-                    bloco += f"   {emoji} <code>{home}</code> vs <code>{away}</code> → {desc} — {prob:.0%}\n"
+
+                    # Linha principal: nomes copiáveis + mercado + confiança
+                    linha = f"   {emoji} <code>{home}</code> vs <code>{away}</code> → {desc} — {prob:.0%}"
+
+                    # Odd Pinnacle + EV (se disponível)
+                    odd_p = tip.get("odd_pinnacle")
+                    ev = tip.get("ev_percent")
+                    if odd_p:
+                        ev_str = f" | EV: {ev:+.0f}%" if ev is not None else ""
+                        fonte = tip.get("odd_fonte", "Pinnacle")
+                        linha += f"\n   💰 Odd {fonte}: <b>{odd_p:.2f}</b>{ev_str}"
+
+                    bloco += linha + "\n"
 
                     # Parecer LLM (curto, abaixo da tip)
                     llm = tip.get("llm_validacao")
@@ -847,24 +1060,48 @@ class Scanner:
         if combos:
             bloco_combo = "🎰 <b>Combos sugeridos</b>\n"
             bloco_combo += "─" * 24 + "\n"
-            bloco_combo += "<i>Combine tips de jogos diferentes para odds maiores</i>\n"
 
             for i, combo in enumerate(combos, 1):
                 tipo_label = "Dupla" if combo["tipo"] == "dupla" else "Tripla"
                 prob_c = combo["prob_composta"]
                 emoji_c = "🔥" if prob_c > 0.55 else "⚡" if prob_c > 0.45 else "📊"
 
-                bloco_combo += f"\n{emoji_c} <b>{tipo_label} #{i}</b> — {prob_c:.0%}\n"
+                # Odd composta real (produto das odds Pinnacle)
+                odd_composta = 1.0
+                todas_com_odd = True
+                for t in combo["tips"]:
+                    odd_t = t.get("odd_pinnacle")
+                    if odd_t and odd_t > 1.0:
+                        odd_composta *= odd_t
+                    else:
+                        todas_com_odd = False
+
+                # Header do combo com odd composta
+                if todas_com_odd and odd_composta > 1.0:
+                    ev_combo = (prob_c * odd_composta - 1) * 100
+                    bloco_combo += (
+                        f"\n{emoji_c} <b>{tipo_label} #{i}</b> — "
+                        f"Odd: <b>{odd_composta:.2f}</b> | "
+                        f"Prob: {prob_c:.0%} | EV: {ev_combo:+.0f}%\n"
+                    )
+                else:
+                    bloco_combo += f"\n{emoji_c} <b>{tipo_label} #{i}</b> — {prob_c:.0%}\n"
 
                 for t in combo["tips"]:
                     home = t.get("home_name", "?")
                     away = t.get("away_name", "?")
                     desc = t.get("descricao", t.get("mercado", "?"))
                     prob_t = t.get("prob_modelo", 0)
-                    # Nomes copiáveis separados
-                    bloco_combo += (
-                        f"   • <code>{home}</code> vs <code>{away}</code> → {desc} ({prob_t:.0%})\n"
-                    )
+                    odd_t = t.get("odd_pinnacle")
+
+                    # Nomes copiáveis + mercado + prob + odd
+                    linha_combo = f"   • <code>{home}</code> vs <code>{away}</code> → {desc} ({prob_t:.0%})"
+                    if odd_t:
+                        linha_combo += f" @ {odd_t:.2f}"
+                    bloco_combo += linha_combo + "\n"
+
+            # Link genérico Pinnacle para facilitar acesso
+            bloco_combo += "\n🔗 <a href=\"https://www.pinnacle.com/pt/soccer\">Abrir Pinnacle → Futebol</a>"
 
             msgs.append(bloco_combo.rstrip())
 
