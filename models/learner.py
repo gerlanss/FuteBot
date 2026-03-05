@@ -479,12 +479,19 @@ class Learner:
         # Converter sqlite3.Row para dict (evita erro com .get())
         rows = [dict(r) for r in raw_rows]
 
+        # Formatar data em DD/MM para exibição
+        try:
+            _dt = datetime.strptime(data, "%Y-%m-%d")
+            data_br = _dt.strftime("%d/%m")
+        except ValueError:
+            data_br = data
+
         if not rows:
-            return f"📋 Nenhum resultado para {data}"
+            return f"📋 Nenhum resultado para {data_br}"
 
         lines = [
             "━━━━━━━━━━━━━━━━━━━━━━━━━",
-            f"📋 <b>RESULTADOS — {data}</b>",
+            f"📋 <b>RESULTADOS — {data_br}</b>",
             "━━━━━━━━━━━━━━━━━━━━━━━━━",
             "",
         ]

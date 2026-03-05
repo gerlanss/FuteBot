@@ -234,7 +234,12 @@ class Scheduler:
             self._enviar_telegram(f"❌ Erro no bulk download:\n{e}")
 
     def _job_coletar(self):
-        """Job: coleta resultados e resolve previsões."""
+        """Job: coleta resultados e resolve previsões.
+
+        Coleta dados e resolve previsões silenciosamente.
+        O relatório de resultados é enviado pelo _job_relatorio (22h)
+        ou pelo _job_check_ao_vivo quando todos os jogos terminam.
+        """
         print(f"\n{'='*60}")
         print(f"📥 JOB: Coleta de resultados — {datetime.now()}")
         print(f"{'='*60}")
@@ -242,10 +247,9 @@ class Scheduler:
         try:
             collector = Collector(self.db)
             resultado = collector.executar()
-
-            # Enviar relatório via Telegram
-            msg = collector.formatar_relatorio(resultado)
-            self._enviar_telegram(msg)
+            # Relatório não é enviado aqui — sai às 22h ou no check ao vivo
+            print(f"   ✅ Coleta concluída: {resultado.get('fixtures_atualizados', 0)} fixtures, "
+                  f"{resultado.get('stats_baixadas', 0)} stats")
 
         except Exception as e:
             print(f"❌ Erro na coleta: {e}")
@@ -271,7 +275,13 @@ class Scheduler:
             self._enviar_telegram(f"❌ Erro no scanner:\n{e}")
 
     def _job_relatorio(self):
-        """Job: relatório noturno de performance + saúde do modelo."""
+        """Job: relatório noturno — resultados do dia + saúde do modelo.
+
+        Às 22h envia:
+          1. Resultados dos jogos de HOJE (não de ontem)
+          2. Relatório de performance geral
+          3. Saúde do modelo + alertas de degradação
+        """
         print(f"\n{'='*60}")
         print(f"📋 JOB: Relatório noturno — {datetime.now()}")
         print(f"{'='*60}")
@@ -279,11 +289,17 @@ class Scheduler:
         try:
             learner = Learner(self.db)
 
-            # Relatório de performance
+            # 1. Resultados do dia (jogos de HOJE)
+            hoje = datetime.now().strftime("%Y-%m-%d")
+            resultado_dia = learner.relatorio_resultado_dia(hoje)
+            if "Nenhum resultado" not in resultado_dia:
+                self._enviar_telegram(resultado_dia)
+
+            # 2. Relatório de performance geral
             msg = learner.relatorio_diario()
             self._enviar_telegram(msg)
 
-            # Relatório de saúde do modelo (guard rails)
+            # 3. Saúde do modelo (guard rails)
             saude_msg = learner.relatorio_saude()
             self._enviar_telegram(saude_msg)
 
@@ -499,22 +515,34 @@ class Scheduler:
 
             # Enviar notificações agrupadas (se houver)
             if notificacoes:
-                header = "⚽ *Resultados ao vivo*\n\n"
+                header = "⚽ <b>Resultados ao vivo</b>\n\n"
                 corpo = "\n\n".join(notificacoes)
 
-                # Resumo rápido — sem lucro (odds desativadas)
+                # Resumo rápido
                 total_check = acertos + erros
                 if total_check > 0:
                     pct = acertos / total_check * 100
                     emoji_total = "🟢" if pct >= 55 else "🔴" if pct < 40 else "🟡"
                     resumo = (
-                        f"\n\n{emoji_total} *Parcial:* "
+                        f"\n\n{emoji_total} <b>Parcial:</b> "
                         f"{acertos}/{total_check} acertos ({pct:.0f}%)"
                     )
                 else:
                     resumo = ""
 
                 self._enviar_telegram(header + corpo + resumo)
+
+                # Se todas as previsões do dia foram resolvidas, enviar RESUMO DO DIA
+                pendentes_hoje = [
+                    p for p in self.db.predictions_pendentes()
+                    if p.get("date", "")[:10] == hoje
+                ]
+                if not pendentes_hoje:
+                    print("   📋 Todas as previsões do dia resolvidas — enviando resumo")
+                    learner = Learner(self.db)
+                    resumo_dia = learner.relatorio_resultado_dia(hoje)
+                    if "Nenhum resultado" not in resumo_dia:
+                        self._enviar_telegram(resumo_dia)
             else:
                 print("   📭 Nenhum jogo finalizado neste ciclo")
 
