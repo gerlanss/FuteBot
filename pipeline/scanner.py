@@ -284,9 +284,10 @@ class Scanner:
             print(f"   ✂️ Cortando de {len(tips_aprovadas)} para {MAX_TIPS_DIA} tips (limite diário)")
             tips_aprovadas = tips_aprovadas[:MAX_TIPS_DIA]
 
-        # ─── ETAPA 6: Enriquecer tips com odds Pinnacle + EV ───
-        print("\n📊 Etapa 6: Buscando odds Pinnacle...")
-        tips_aprovadas = self._enriquecer_odds(tips_aprovadas)
+        # ─── ETAPA 6: Odds manuais (via botão ✏️ Odd no Telegram) ───
+        # Etapa 6 desativada: odds são inseridas manualmente pelo usuário.
+        # _enriquecer_odds() mantida no código para reativação futura.
+        print("\n📊 Etapa 6: Odds manuais (via Telegram)")
 
         # ─── ETAPA 6b: Salvar no banco ───
         print("\n💾 Etapa 6b: Salvando tips aprovadas...")
@@ -965,14 +966,14 @@ class Scanner:
         except Exception:
             return Scanner._data_br(date_str)
 
-    def formatar_relatorio(self, resultado: dict) -> list[str]:
+    def formatar_relatorio(self, resultado: dict) -> list[tuple[str, list]]:
         """
         Formata resultado do scanner para envio no Telegram (HTML).
 
-        Retorna uma LISTA de mensagens:
-          - Índice 0: cabeçalho com resumo geral
-          - Índice 1..N: uma mensagem por LIGA (agrupa todos os jogos da liga)
-          - Último: performance acumulada
+        Retorna uma LISTA de tuplas (texto_html, botões):
+          - texto_html: mensagem HTML formatada
+          - botões: lista de (label, callback_data) para InlineKeyboardMarkup
+            Cada tip gera um botão ✏️ Odd para o usuário definir a odd manual.
 
         Agrupamento: Liga → Fixture → Tips do fixture.
         Tips do mesmo jogo ficam juntas no mesmo bloco visual.
@@ -981,12 +982,13 @@ class Scanner:
 
         # ─── Scanner pausado ───
         if resultado.get("pausado"):
-            return [
+            return [(
                 "⛔ <b>FuteBot — Scanner PAUSADO</b>\n\n"
                 f"Motivo: {resultado.get('motivo_pausa', 'modelo degradado')}\n\n"
                 "Use /treinar para retreinar ou /metricas para ver detalhes.\n"
-                "O scanner volta a funcionar automaticamente após retreino aprovado."
-            ]
+                "O scanner volta a funcionar automaticamente após retreino aprovado.",
+                []
+            )]
 
         tips = resultado.get("ev_positivas", [])
         data_raw = resultado.get("data", "hoje")
@@ -1002,10 +1004,10 @@ class Scanner:
         )
 
         if not tips:
-            msgs.append(header + "\n\n📭 Nenhuma tip aprovada hoje.")
+            msgs.append((header + "\n\n📭 Nenhuma tip aprovada hoje.", []))
             return msgs
 
-        msgs.append(header + f"\n🎯 {len(tips)} tips aprovadas")
+        msgs.append((header + f"\n🎯 {len(tips)} tips aprovadas", []))
 
         # ─── Agrupar tips: liga → fixture → lista de tips ───
         por_liga = defaultdict(lambda: defaultdict(list))
@@ -1023,9 +1025,10 @@ class Scanner:
             fixtures_da_liga = por_liga[lid]
             nome_liga = _LEAGUE_NOME.get(lid, f"Liga {lid}")
 
-            # Header da liga
+            # Header da liga + lista de botões para odd manual
             bloco = f"🏆 <b>{nome_liga}</b>\n"
             bloco += "─" * 24 + "\n"
+            botoes_liga = []
 
             # Ordenar fixtures por horário (primeiro jogo primeiro)
             fixtures_ordenados = sorted(
@@ -1065,16 +1068,16 @@ class Scanner:
 
                     # Linha principal: nomes copiáveis + mercado + confiança
                     linha = f"   {emoji} <code>{home}</code> vs <code>{away}</code> → {desc} — {prob:.0%}"
-
-                    # Odd Pinnacle + EV (se disponível)
-                    odd_p = tip.get("odd_pinnacle")
-                    ev = tip.get("ev_percent")
-                    if odd_p:
-                        ev_str = f" | EV: {ev:+.0f}%" if ev is not None else ""
-                        fonte = tip.get("odd_fonte", "Pinnacle")
-                        linha += f"\n   💰 Odd {fonte}: <b>{odd_p:.2f}</b>{ev_str}"
-
                     bloco += linha + "\n"
+
+                    # Botão ✏️ Odd para input manual (prob codificado no callback)
+                    fid_tip = tip.get("fixture_id", 0)
+                    merc = tip.get("mercado", "?")
+                    prob_int = int(prob * 1000)
+                    botoes_liga.append((
+                        f"✏️ {desc}",
+                        f"odd:{fid_tip}:{merc}:{prob_int}"
+                    ))
 
                     # Parecer LLM (curto, abaixo da tip)
                     llm = tip.get("llm_validacao")
@@ -1085,7 +1088,7 @@ class Scanner:
                 if i < len(fixtures_ordenados) - 1:
                     bloco += "\n"
 
-            msgs.append(bloco.rstrip())
+            msgs.append((bloco.rstrip(), botoes_liga))
 
         # ─── Combos sugeridos (acumuladas) ───
         combos = resultado.get("combos", [])
@@ -1098,44 +1101,18 @@ class Scanner:
                 prob_c = combo["prob_composta"]
                 emoji_c = "🔥" if prob_c > 0.55 else "⚡" if prob_c > 0.45 else "📊"
 
-                # Odd composta real (produto das odds Pinnacle)
-                odd_composta = 1.0
-                todas_com_odd = True
-                for t in combo["tips"]:
-                    odd_t = t.get("odd_pinnacle")
-                    if odd_t and odd_t > 1.0:
-                        odd_composta *= odd_t
-                    else:
-                        todas_com_odd = False
-
-                # Header do combo com odd composta
-                if todas_com_odd and odd_composta > 1.0:
-                    ev_combo = (prob_c * odd_composta - 1) * 100
-                    bloco_combo += (
-                        f"\n{emoji_c} <b>{tipo_label} #{i}</b> — "
-                        f"Odd: <b>{odd_composta:.2f}</b> | "
-                        f"Prob: {prob_c:.0%} | EV: {ev_combo:+.0f}%\n"
-                    )
-                else:
-                    bloco_combo += f"\n{emoji_c} <b>{tipo_label} #{i}</b> — {prob_c:.0%}\n"
+                bloco_combo += f"\n{emoji_c} <b>{tipo_label} #{i}</b> — {prob_c:.0%}\n"
 
                 for t in combo["tips"]:
                     home = t.get("home_name", "?")
                     away = t.get("away_name", "?")
                     desc = t.get("descricao", t.get("mercado", "?"))
                     prob_t = t.get("prob_modelo", 0)
-                    odd_t = t.get("odd_pinnacle")
 
-                    # Nomes copiáveis + mercado + prob + odd
                     linha_combo = f"   • <code>{home}</code> vs <code>{away}</code> → {desc} ({prob_t:.0%})"
-                    if odd_t:
-                        linha_combo += f" @ {odd_t:.2f}"
                     bloco_combo += linha_combo + "\n"
 
-            # Link genérico Pinnacle para facilitar acesso
-            bloco_combo += "\n🔗 <a href=\"https://www.pinnacle.com/pt/soccer\">Abrir Pinnacle → Futebol</a>"
-
-            msgs.append(bloco_combo.rstrip())
+            msgs.append((bloco_combo.rstrip(), []))
 
         # ─── Performance acumulada (última mensagem) ───
         metricas = self.db.metricas_modelo()
@@ -1145,7 +1122,7 @@ class Scanner:
                 f"   Accuracy: {metricas['accuracy']}% ({metricas['acertos']}/{metricas['total']})\n"
                 f"   ROI: {metricas['roi']:+.1f}%"
             )
-            msgs.append(perf)
+            msgs.append((perf, []))
 
         return msgs
 
@@ -1155,6 +1132,8 @@ if __name__ == "__main__":
     scanner = Scanner()
     resultado = scanner.executar()
     msgs = scanner.formatar_relatorio(resultado)
-    for msg in msgs:
-        print(msg)
+    for texto, botoes in msgs:
+        print(texto)
+        if botoes:
+            print(f"  [{len(botoes)} botões ✏️ Odd]")
         print()

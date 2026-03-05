@@ -595,6 +595,29 @@ class Database:
         conn.commit()
         conn.close()
 
+    def buscar_prediction(self, fixture_id: int, mercado: str) -> dict | None:
+        """Busca uma previsão pelo fixture_id + mercado. Retorna dict ou None."""
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT * FROM predictions WHERE fixture_id = ? AND mercado = ?",
+            (fixture_id, mercado)
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def atualizar_odd_manual(self, fixture_id: int, mercado: str,
+                             odd: float, ev_percent: float,
+                             bookmaker: str = "manual"):
+        """Atualiza odd e EV de uma previsão (input manual do usuário)."""
+        conn = self._conn()
+        conn.execute("""
+            UPDATE predictions
+            SET odd_usada = ?, ev_percent = ?, bookmaker = ?
+            WHERE fixture_id = ? AND mercado = ?
+        """, (odd, ev_percent, bookmaker, fixture_id, mercado))
+        conn.commit()
+        conn.close()
+
     def resolver_prediction(self, fixture_id: int, resultado: str,
                             gols_home: int, gols_away: int):
         """

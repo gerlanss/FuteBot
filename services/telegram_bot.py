@@ -30,7 +30,9 @@ from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
+    MessageHandler,
     ContextTypes,
+    filters,
 )
 from telegram.constants import ParseMode
 
@@ -292,11 +294,18 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         scanner = Scanner(_db)
         resultado = scanner.executar()
         msgs = scanner.formatar_relatorio(resultado)
-        # Envia cada tip como mensagem separada (melhor organização)
-        for i, msg in enumerate(msgs):
-            markup = _botao_voltar() if i == len(msgs) - 1 else None
+        # Envia cada bloco como mensagem separada (com botões ✏️ Odd)
+        for i, (texto, botoes) in enumerate(msgs):
+            kb = None
+            if botoes:
+                # Botões de odd manual (1 por tip)
+                kb = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(label, callback_data=cb)] for label, cb in botoes]
+                )
+            elif i == len(msgs) - 1:
+                kb = _botao_voltar()
             await update.message.reply_text(
-                msg, parse_mode=ParseMode.HTML, reply_markup=markup
+                texto, parse_mode=ParseMode.HTML, reply_markup=kb
             )
     except Exception as e:
         await update.message.reply_text(
@@ -600,6 +609,100 @@ async def _logica_ao_vivo() -> str:
 
 
 # ══════════════════════════════════════════════
+#  ODD MANUAL: Botão ✏️ Odd + input de texto
+# ══════════════════════════════════════════════
+
+async def _handle_odd_button(query, context, data: str):
+    """
+    Processa clique no botão ✏️ Odd.
+    callback_data: 'odd:{fixture_id}:{mercado}:{prob_int}'
+    Armazena estado em context.user_data e pede a odd ao usuário.
+    """
+    try:
+        parts = data.split(":")
+        fixture_id = int(parts[1])
+        mercado = parts[2]
+        prob_int = int(parts[3])
+    except (IndexError, ValueError):
+        await query.message.reply_text("❌ Botão inválido.")
+        return
+
+    prob = prob_int / 1000.0
+
+    # Busca previsão no banco para contexto (nomes dos times)
+    pred = _db.buscar_prediction(fixture_id, mercado)
+    if not pred:
+        await query.message.reply_text("❌ Previsão não encontrada no banco.")
+        return
+
+    # Armazena estado: aguardando digitação da odd
+    context.user_data["odd_pendente"] = {
+        "fixture_id": fixture_id,
+        "mercado": mercado,
+        "prob": prob,
+        "home": pred["home_name"],
+        "away": pred["away_name"],
+    }
+
+    await query.message.reply_text(
+        f"✏️ <b>Definir odd manual</b>\n\n"
+        f"⚽ {pred['home_name']} vs {pred['away_name']}\n"
+        f"📊 {mercado} — Prob modelo: {prob:.0%}\n\n"
+        f"Digite a odd (ex: <code>2.15</code>):",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def _handle_odd_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Recebe texto livre — se o bot está aguardando uma odd (odd_pendente),
+    processa e calcula EV. Caso contrário, ignora silenciosamente.
+    """
+    pendente = context.user_data.get("odd_pendente")
+    if not pendente:
+        return  # Não está aguardando odd, ignora texto
+
+    texto = update.message.text.strip().replace(",", ".")
+    try:
+        odd = float(texto)
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Odd inválida. Digite um número decimal (ex: <code>2.15</code>).",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if odd <= 1.0:
+        await update.message.reply_text("❌ Odd deve ser maior que 1.0")
+        return
+
+    fixture_id = pendente["fixture_id"]
+    mercado = pendente["mercado"]
+    prob = pendente["prob"]
+    home = pendente["home"]
+    away = pendente["away"]
+
+    # Calcula EV: (prob × odd - 1) × 100
+    ev = round((prob * odd - 1) * 100, 1)
+
+    # Atualiza no banco
+    _db.atualizar_odd_manual(fixture_id, mercado, round(odd, 2), ev)
+
+    # Limpa estado
+    context.user_data.pop("odd_pendente", None)
+
+    emoji_ev = "✅" if ev > 0 else "⚠️"
+    await update.message.reply_text(
+        f"{emoji_ev} <b>Odd registrada!</b>\n\n"
+        f"⚽ {home} vs {away}\n"
+        f"📊 {mercado}\n"
+        f"💰 Odd: <b>{odd:.2f}</b>\n"
+        f"📈 EV: <b>{ev:+.1f}%</b>",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+# ══════════════════════════════════════════════
 #  CALLBACK: BOTÕES INLINE
 # ══════════════════════════════════════════════
 
@@ -635,6 +738,11 @@ async def _callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ── Botão ✏️ Odd (odd manual por tip) ──
+    if data.startswith("odd:"):
+        await _handle_odd_button(query, context, data)
+        return
+
     # Busca o handler mapeado
     handler_fn = _CALLBACK_MAP.get(data)
     if not handler_fn:
@@ -667,10 +775,16 @@ async def _executar_via_callback(query, handler_fn, context):
             scanner = Scanner(_db)
             resultado = scanner.executar()
             msgs = scanner.formatar_relatorio(resultado)
-            for i, msg in enumerate(msgs):
-                markup = _botao_voltar() if i == len(msgs) - 1 else None
+            for i, (texto, botoes) in enumerate(msgs):
+                kb = None
+                if botoes:
+                    kb = InlineKeyboardMarkup(
+                        [[InlineKeyboardButton(label, callback_data=cb)] for label, cb in botoes]
+                    )
+                elif i == len(msgs) - 1:
+                    kb = _botao_voltar()
                 await query.message.reply_text(
-                    msg, parse_mode=ParseMode.HTML, reply_markup=markup
+                    texto, parse_mode=ParseMode.HTML, reply_markup=kb
                 )
 
         elif handler_fn == cmd_resultados:
@@ -881,5 +995,10 @@ def criar_bot() -> Application:
 
     # Handler de callbacks dos botões inline (deve vir depois dos comandos)
     app.add_handler(CallbackQueryHandler(_callback_handler))
+
+    # Handler de texto para receber odd manual (após clicar ✏️ Odd)
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND, _handle_odd_input
+    ))
 
     return app

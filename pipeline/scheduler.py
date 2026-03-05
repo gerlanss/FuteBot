@@ -244,10 +244,19 @@ class Scheduler:
             scanner = Scanner(self.db)
             resultado = scanner.executar(dias_adiante=0)  # Apenas jogos do dia
 
-            # Enviar relatório via Telegram (lista de mensagens: 1 por tip)
+            # Enviar relatório via Telegram (tuplas: texto + botões ✏️ Odd)
             msgs = scanner.formatar_relatorio(resultado)
-            for msg in msgs:
-                self._enviar_telegram(msg)
+            for texto, botoes in msgs:
+                reply_markup = None
+                if botoes:
+                    # Monta inline_keyboard para API HTTP do Telegram
+                    reply_markup = {
+                        "inline_keyboard": [
+                            [{"text": label, "callback_data": cb}]
+                            for label, cb in botoes
+                        ]
+                    }
+                self._enviar_telegram(texto, reply_markup=reply_markup)
 
         except Exception as e:
             print(f"❌ Erro no scanner: {e}")
@@ -529,12 +538,16 @@ class Scheduler:
             print(f"❌ Erro no check ao vivo: {e}")
             self._enviar_telegram(f"❌ Erro no check ao vivo:\n{e}")
 
-    def _enviar_telegram(self, texto: str):
+    def _enviar_telegram(self, texto: str, reply_markup: dict | None = None):
         """Envia mensagem via API HTTP direta do Telegram (síncrono).
 
         Não depende de _app_instance nem do event loop do bot.
         APScheduler roda jobs em ThreadPoolExecutor, então usamos
         requests.post direto — simples e confiável.
+
+        Parâmetros:
+          texto: mensagem HTML
+          reply_markup: dict com inline_keyboard (opcional, para botões ✏️ Odd)
         """
         from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
         if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
@@ -548,6 +561,9 @@ class Scheduler:
                     "text": msg,
                     "parse_mode": "HTML",
                 }
+                if reply_markup:
+                    import json as _json
+                    payload["reply_markup"] = _json.dumps(reply_markup)
                 resp = requests.post(url, json=payload, timeout=15)
                 if resp.status_code == 200:
                     print(f"[Scheduler] ✅ Msg enviada ao Telegram")
