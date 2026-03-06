@@ -87,12 +87,12 @@ class Scheduler:
             replace_existing=True,
         )
 
-        # 3. Relatório noturno (diário às 22h)
+        # 3. Relatório diário (06:45 — após coleta das 06:00, com resultados do dia anterior)
         self.scheduler.add_job(
             self._job_relatorio,
-            CronTrigger(hour=22, minute=0),
-            id="relatorio_noturno",
-            name="Relatório noturno",
+            CronTrigger(hour=6, minute=45),
+            id="relatorio_diario",
+            name="Relatório diário (resultados de ontem)",
             replace_existing=True,
         )
 
@@ -135,7 +135,7 @@ class Scheduler:
         print(f"   📦 Bulk: {BULK_HORA} (diário, incremental)")
         print(f"   📥 Coleta: {RESULTADOS_HORA} (diário)")
         print(f"   🔍 Scanner: {SCAN_HORA} (diário)")
-        print(f"   📋 Relatório: 22:00 (diário)")
+        print(f"   📋 Relatório: 06:45 (resultados de ontem)")
         print(f"   ⚽ Ao vivo: a cada 2h 10:30-23:30")
         print(f"   🤖 Retreino: 1º {RETREINO_DIA} do mês {RETREINO_HORA} per-league (mensal)")
         print()
@@ -263,23 +263,23 @@ class Scheduler:
             self._enviar_telegram(f"❌ Erro no scanner:\n{e}")
 
     def _job_relatorio(self):
-        """Job: relatório noturno — resultados do dia + saúde do modelo.
+        """Job: relatório diário — resultados do dia ANTERIOR.
 
-        Às 22h envia:
-          1. Resultados dos jogos de HOJE (não de ontem)
+        Roda às 06:45 (após coleta das 06:00) e envia:
+          1. Resultados dos jogos de ONTEM (todos já finalizados)
           2. Relatório de performance geral
           3. Saúde do modelo + alertas de degradação
         """
         print(f"\n{'='*60}")
-        print(f"📋 JOB: Relatório noturno — {datetime.now()}")
+        print(f"📋 JOB: Relatório diário — {datetime.now()}")
         print(f"{'='*60}")
 
         try:
             learner = Learner(self.db)
 
-            # 1. Resultados do dia (jogos de HOJE)
-            hoje = datetime.now().strftime("%Y-%m-%d")
-            resultado_dia = learner.relatorio_resultado_dia(hoje)
+            # 1. Resultados de ONTEM (dia anterior completo)
+            ontem = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+            resultado_dia = learner.relatorio_resultado_dia(ontem)
             if "Nenhum resultado" not in resultado_dia:
                 self._enviar_telegram(resultado_dia)
 
