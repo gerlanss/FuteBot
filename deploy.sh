@@ -59,7 +59,7 @@ sync_files() {
 
 # ── Reiniciar serviços ──
 restart_services() {
-    info "Reiniciando serviços no VPS..."
+    info "Reiniciando serviço no VPS..."
 
     ${SSH_CMD} << 'REMOTE'
         # Ajustar permissões
@@ -70,13 +70,11 @@ restart_services() {
 
         # Reiniciar serviços
         systemctl restart futebot
-        systemctl restart futebot-web
 
         # Verificar status
         echo ""
-        echo "=== Status dos serviços ==="
+        echo "=== Status do serviço ==="
         systemctl is-active futebot && echo "  ✅ futebot (bot+scheduler)" || echo "  ❌ futebot FALHOU"
-        systemctl is-active futebot-web && echo "  ✅ futebot-web (dashboard)" || echo "  ❌ futebot-web FALHOU"
         echo ""
 REMOTE
 
@@ -93,7 +91,7 @@ setup_vps() {
         # 1. Instalar dependências do sistema
         echo "📦 Instalando pacotes do sistema..."
         apt-get update -qq
-        apt-get install -y -qq python3 python3-venv python3-pip nginx
+        apt-get install -y -qq python3 python3-venv python3-pip
 
         # 2. Criar usuário de serviço (sem login)
         if ! id -u ${SERVICE_USER} &>/dev/null; then
@@ -114,20 +112,12 @@ setup_vps() {
         sudo -u ${SERVICE_USER} ${APP_DIR}/venv/bin/pip install -q --upgrade pip
         sudo -u ${SERVICE_USER} ${APP_DIR}/venv/bin/pip install -q -r ${APP_DIR}/requirements.txt
 
-        # 6. Copiar serviços systemd
+        # 6. Copiar serviço systemd
         cp ${APP_DIR}/deploy/futebot.service /etc/systemd/system/
-        cp ${APP_DIR}/deploy/futebot-web.service /etc/systemd/system/
         systemctl daemon-reload
 
-        # 7. Habilitar serviços (iniciam no boot)
+        # 7. Habilitar serviço (inicia no boot)
         systemctl enable futebot
-        systemctl enable futebot-web
-
-        # 8. Configurar Nginx
-        cp ${APP_DIR}/deploy/nginx.conf /etc/nginx/sites-available/futebot
-        ln -sf /etc/nginx/sites-available/futebot /etc/nginx/sites-enabled/
-        rm -f /etc/nginx/sites-enabled/default
-        nginx -t && systemctl reload nginx
 
         echo ""
         echo "✅ Setup concluído!"
@@ -136,9 +126,8 @@ setup_vps() {
         echo "   1. Copie o .env para o VPS:"
         echo "      scp -P ${VPS_PORT} .env ${VPS_USER}@${VPS_HOST}:${APP_DIR}/.env"
         echo ""
-        echo "   2. Inicie os serviços:"
+        echo "   2. Inicie o serviço:"
         echo "      systemctl start futebot"
-        echo "      systemctl start futebot-web"
         echo ""
 REMOTE
 

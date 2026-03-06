@@ -12,21 +12,18 @@ class ConfigTests(unittest.TestCase):
         original = {
             "API_FOOTBALL_KEY": os.environ.get("API_FOOTBALL_KEY"),
             "ODDS_API_KEY": os.environ.get("ODDS_API_KEY"),
-            "FLASK_SECRET_KEY": os.environ.get("FLASK_SECRET_KEY"),
             "TIMEZONE": os.environ.get("TIMEZONE"),
         }
 
         try:
             os.environ["API_FOOTBALL_KEY"] = "api-key-test"
             os.environ["ODDS_API_KEY"] = "odds-key-test"
-            os.environ["FLASK_SECRET_KEY"] = "secret-key-test"
             os.environ["TIMEZONE"] = "America/Manaus"
 
             config = importlib.reload(config)
 
             self.assertEqual(config.API_FOOTBALL_KEY, "api-key-test")
             self.assertEqual(config.ODDS_API_KEY, "odds-key-test")
-            self.assertEqual(config.SECRET_KEY, "secret-key-test")
             self.assertEqual(config.TIMEZONE, "America/Manaus")
         finally:
             for key, value in original.items():

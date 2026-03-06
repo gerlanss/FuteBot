@@ -20,10 +20,9 @@ Uso:
   python bot.py
 """
 
-import asyncio
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonCommands
 from telegram.ext import (
@@ -34,7 +33,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, DB_PATH, TIMEZONE
+from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, TIMEZONE
 from data.database import Database
 from pipeline.scanner import Scanner
 from pipeline.collector import Collector
@@ -42,7 +41,6 @@ from models.trainer import Trainer
 from models.learner import Learner
 from models.autotuner import AutoTuner
 from services.apifootball import raw_request
-from datetime import timedelta
 
 
 # ══════════════════════════════════════════════
@@ -189,10 +187,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         # Verificar se modelos existem no disco mesmo sem train_log
-        _ALL = ["resultado_1x2","over_under_15","over_under_25","over_under_35","btts","resultado_ht","htft"]
         n_modelos = Trainer.contar_modelos_base()
         if n_modelos > 0:
-            msg += f"🤖 <b>Modelo:</b> {n_modelos}/7 carregados (sem métricas — clique Retreinar)\n\n"
+            msg += (
+                f"🤖 <b>Modelo:</b> {n_modelos}/{len(Trainer.CORE_MODEL_NAMES)} "
+                "modelos-base disponíveis (sem métricas — clique Retreinar)\n\n"
+            )
         else:
             msg += "⚠️ Modelo ainda não treinado\n\n"
 
@@ -258,12 +258,11 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         # Verificar se modelos existem no disco mesmo sem train_log
-        _ALL = ["resultado_1x2","over_under_15","over_under_25","over_under_35","btts","resultado_ht","htft"]
         n_modelos = Trainer.contar_modelos_base()
         if n_modelos > 0:
             msg += (
                 f"*Modelo:*\n"
-                f"  {n_modelos}/7 modelos carregados\n"
+                f"  {n_modelos}/{len(Trainer.CORE_MODEL_NAMES)} modelos-base disponíveis\n"
                 f"  ⚠️ Sem métricas de treino — clique *Retreinar* para registrar\n"
             )
         else:
@@ -669,8 +668,6 @@ async def _executar_via_callback(query, handler_fn, context):
     """
     # Mapeamento direto — executa a lógica inline ao invés de
     # tentar hackear o Update. Mais seguro e manutenível.
-    chat = query.message.chat
-
     try:
         if handler_fn == cmd_scan:
             await query.message.reply_text("🔍 Executando scanner... aguarde.")
@@ -742,12 +739,11 @@ async def _executar_via_callback(query, handler_fn, context):
                 )
             else:
                 # Verificar se modelos existem no disco mesmo sem train_log
-                _ALL = ["resultado_1x2","over_under_15","over_under_25","over_under_35","btts","resultado_ht","htft"]
                 n_modelos = Trainer.contar_modelos_base()
                 if n_modelos > 0:
                     msg += (
                         f"*Modelo:*\n"
-                        f"  {n_modelos}/7 modelos carregados\n"
+                        f"  {n_modelos}/{len(Trainer.CORE_MODEL_NAMES)} modelos-base disponíveis\n"
                         f"  ⚠️ Sem métricas — clique *Retreinar* para registrar\n"
                     )
                 else:

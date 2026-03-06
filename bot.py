@@ -15,16 +15,11 @@ Ambiente:
 """
 
 import asyncio
-import sys
-import os
-
-# Garante que o diretório do projeto está no path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dotenv import load_dotenv
 load_dotenv()
 
-from config import TELEGRAM_TOKEN, DB_PATH, MIN_FIXTURES_TREINO
+from config import TELEGRAM_TOKEN, MIN_FIXTURES_TREINO
 from data.database import Database
 from data.bulk_download import baixar_fixtures, baixar_stats, _check_limite
 from services.telegram_bot import criar_bot, enviar_mensagem
@@ -139,12 +134,7 @@ async def main():
         print("📅 Scheduler desativado (--no-sched)")
 
     # ─── 3. Mensagem de boot (usa app.bot direto, sem depender de _app_instance) ───
-    ALL_MODELS = [
-        "resultado_1x2", "over_under_15", "over_under_25", "over_under_35",
-        "btts", "resultado_ht", "htft",
-    ]
     modelos_ok = Trainer.ha_modelos_treinados()
-    status_modelo = "✅ 7 modelos treinados" if modelos_ok else "⏳ Modelos pendentes (aguardando dados)"
     modelos_base = Trainer.contar_modelos_base()
     status_modelo = (
         f"Modelos disponiveis ({modelos_base}/{len(Trainer.CORE_MODEL_NAMES)} base)"
@@ -228,10 +218,6 @@ async def _auto_bootstrap(db: Database, resumo: dict, max_stats: int = 0):
                 print(f"   ⚠️ Erro no download de stats: {e}")
 
         # ─── Passo 3: Treinar modelo se tiver dados suficientes ───
-        ALL_MODELS = [
-            "resultado_1x2", "over_under_15", "over_under_25", "over_under_35",
-            "btts", "resultado_ht", "htft",
-        ]
         modelos_existem = Trainer.ha_modelos_treinados()
         if not modelos_existem and com_stats >= MIN_FIXTURES_TREINO:
             print(f"\n🔄 AUTO-BOOTSTRAP: {com_stats} jogos com stats — treinando modelo...")

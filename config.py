@@ -201,10 +201,3 @@ LLM_MIN_EV_FOR_REVIEW = 3.0   # Só manda para LLM tips com EV >= 3% (economiza 
 # Banco de dados
 # ──────────────────────────────────────────────
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "futebot.db")
-
-# ──────────────────────────────────────────────
-# Flask
-# ──────────────────────────────────────────────
-SECRET_KEY = _get_env_str("FLASK_SECRET_KEY") or _get_env_str("SECRET_KEY")
-FLASK_DEBUG = _get_env_bool("FLASK_DEBUG", True)
-FLASK_PORT = _get_env_int("FLASK_PORT", 5000)

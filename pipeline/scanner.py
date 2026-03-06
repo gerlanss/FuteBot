@@ -22,11 +22,6 @@ Uso:
   resultado = scanner.executar()           # Pipeline completo
 """
 
-import sys
-import os
-# Garante que o diretório raiz do projeto está no path para as importações
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 from config import LEAGUES, TIMEZONE

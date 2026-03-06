@@ -2,8 +2,6 @@
 # Dependências do FuteBot
 # ──────────────────────────────────────────────
 
-# Web
-flask>=3.0
 requests>=2.31
 python-dotenv>=1.0
 
@@ -19,5 +17,3 @@ python-telegram-bot>=21.0
 # Scheduler
 APScheduler>=3.10
 
-# Deploy (WSGI server para produção)
-gunicorn>=21.2

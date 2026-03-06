@@ -30,13 +30,12 @@ from collections import Counter
 
 from data.database import Database
 from models.features import FeatureExtractor
-from config import MODEL_ACC_MIN_1X2, MODEL_ACC_MIN_BINARY, MODEL_BRIER_MAX, LEAGUES
+from config import MODEL_ACC_MIN_1X2, MODEL_BRIER_MAX, LEAGUES
 
 # Tentativa de importar XGBoost (será instalado via requirements.txt)
 try:
     import xgboost as xgb
-    from sklearn.model_selection import train_test_split
-    from sklearn.metrics import accuracy_score, classification_report, log_loss
+    from sklearn.metrics import accuracy_score
     HAS_ML = True
 except ImportError:
     HAS_ML = False
@@ -47,11 +46,12 @@ MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "m
 
 
 class Trainer:
+    """Treina e gerencia os modelos de previsão XGBoost."""
+
     CORE_MODEL_NAMES = [
         "resultado_1x2", "over_under_15", "over_under_25", "over_under_35",
         "btts", "resultado_ht", "htft",
     ]
-    """Treina e gerencia os modelos de previsão XGBoost."""
 
     def __init__(self, db: Database):
         self.db = db

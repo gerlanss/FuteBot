@@ -31,11 +31,6 @@ from models.trainer import Trainer
 from models.learner import Learner
 from config import SCAN_HORA, RESULTADOS_HORA, RETREINO_DIA, RETREINO_HORA, BULK_HORA, MIN_FIXTURES_TREINO, TIMEZONE
 
-# Importar semana do retreino (1st, 2nd, etc.) — controla qual domingo do mês
-try:
-    from config import RETREINO_SEMANA
-except ImportError:
-    RETREINO_SEMANA = "1st"  # fallback: 1º domingo
 from services.apifootball import raw_request
 
 

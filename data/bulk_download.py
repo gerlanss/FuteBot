@@ -22,13 +22,8 @@ Segurança:
 """
 
 import time
-import sys
 import argparse
 from datetime import datetime
-
-# Ajustar path para imports
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import LEAGUES, TRAIN_SEASONS
 from services.apifootball import raw_request, stats_partida, eventos_partida
