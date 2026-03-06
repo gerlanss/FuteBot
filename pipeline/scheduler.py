@@ -19,7 +19,7 @@ Uso:
   scheduler.iniciar(bloquear=False)
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -380,7 +380,6 @@ class Scheduler:
                 return
 
             # Filtrar apenas previsões de hoje e ontem (não verificar antigas demais)
-            from datetime import timedelta
             hoje = datetime.now().strftime("%Y-%m-%d")
             ontem = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
             recentes = [

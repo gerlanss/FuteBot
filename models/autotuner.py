@@ -31,6 +31,8 @@ from collections import Counter
 
 from data.database import Database
 from models.features import FeatureExtractor
+from models.feature_factory import FeatureFactory
+from models.feature_evolution import FeatureEvolution
 from models.trainer import Trainer, MODELS_DIR
 from config import LEAGUES
 
@@ -184,9 +186,12 @@ class AutoTuner:
     Não existe modelo global. Liga sem dados = liga sem tips.
     """
 
-    def __init__(self, db: Database = None):
+    def __init__(self, db: Database = None, device: str = "cpu"):
         self.db = db or Database()
         self.fe = FeatureExtractor(self.db)
+        self.ff = FeatureFactory(self.db)
+        self.evo = FeatureEvolution(device=device)
+        self.device = device
 
     def executar(self, train_seasons: list[int] = None,
                  test_season: int = None,
@@ -244,7 +249,7 @@ class AutoTuner:
             return {"erro": f"Nenhuma liga com >= {MIN_JOGOS_LIGA} jogos FT"}
 
         # ─── ETAPA 2: Processar cada liga ───
-        feat_names = FeatureExtractor.feature_names()
+        feat_names = FeatureFactory.feature_names_full()
         todas_strategies = []
         resultados_por_liga = {}
         total_modelos_salvos = 0
@@ -371,8 +376,8 @@ class AutoTuner:
 
         Retorna dict com melhores params, accuracy, strategies.
         """
-        # ─── Carregar dataset da liga ───
-        all_features, all_labels = self.fe.build_dataset(
+        # ─── Carregar dataset da liga (pool completo ~217 features) ───
+        all_features, all_labels = self.ff.build_dataset(
             league_id=league_id,
             seasons=train_seasons + [test_season]
         )
@@ -407,16 +412,23 @@ class AutoTuner:
             y_train = [all_y[i] for i in idx_tr]
             y_test = [all_y[i] for i in idx_te]
 
-        X_train = np.array(X_train, dtype=np.float32)
-        X_test = np.array(X_test, dtype=np.float32)
+        # Arrays contíguos C-order em RAM — DMatrix e slice por coluna ficam rápidos
+        X_train = np.ascontiguousarray(np.array(X_train, dtype=np.float32))
+        X_test = np.ascontiguousarray(np.array(X_test, dtype=np.float32))
 
+        print(f"[Features] Dataset: {len(all_features)} jogos com features "
+              f"(de {len(all_features)} fixtures totais)")
         print(f"   Treino: {len(X_train)} | Teste: {len(X_test)} amostras")
 
         if len(X_train) < 30:
             return {"erro": f"Treino muito pequeno: {len(X_train)} amostras"}
 
-        # ─── Optuna por modelo ───
+        # ─── Evolução + Optuna por modelo ───
         melhores = {}
+        feat_selecionadas = {}  # nome_modelo → (indices, feat_names_selecionados)
+
+        # Features originais (51) como semente 0 da evolução
+        features_base = FeatureExtractor.feature_names()
 
         for nome_modelo, objetivo, num_class, _ in MODELO_MERCADOS:
             label_key = LABEL_KEY[nome_modelo]
@@ -427,10 +439,24 @@ class AutoTuner:
             if len(np.unique(y_tr)) < 2:
                 continue
 
+            # ── Evolução genética: selecionar features ótimas ──
+            print(f"   🧬 {nome_modelo}: evolução de features...")
+            indices_sel = self.evo.evoluir(
+                X_train, y_tr, X_test, y_te,
+                feat_names, objetivo, num_class,
+                features_base=features_base
+            )
+            fn_sel = [feat_names[i] for i in indices_sel]
+            X_tr_sel = X_train[:, indices_sel]
+            X_te_sel = X_test[:, indices_sel]
+            feat_selecionadas[nome_modelo] = (indices_sel, fn_sel)
+            print(f"      → {len(indices_sel)} features selecionadas (de {len(feat_names)})")
+
+            # ── Optuna com features selecionadas ──
             best_result = self._optuna_modelo(
                 nome_modelo, objetivo, num_class,
-                X_train, y_tr, X_test, y_te,
-                feat_names, trials_per_model
+                X_tr_sel, y_tr, X_te_sel, y_te,
+                fn_sel, trials_per_model
             )
 
             if best_result:
@@ -445,15 +471,28 @@ class AutoTuner:
             if nome_modelo not in melhores:
                 continue
             best = melhores[nome_modelo]
+            indices_sel, fn_sel = feat_selecionadas[nome_modelo]
             self._treinar_e_salvar(
-                X_train,
+                X_train[:, indices_sel],
                 np.array([l[LABEL_KEY[nome_modelo]] for l in y_train]),
-                X_test,
+                X_test[:, indices_sel],
                 np.array([l[LABEL_KEY[nome_modelo]] for l in y_test]),
                 best["params"], objetivo, num_class,
-                nome_modelo, feat_names, league_id
+                nome_modelo, fn_sel, league_id
             )
             modelos_salvos += 1
+
+        # ─── Salvar mapa de features por modelo ───
+        feature_map = {
+            nome: fn_sel
+            for nome, (_, fn_sel) in feat_selecionadas.items()
+        }
+        liga_dir = os.path.join(MODELS_DIR, f"league_{league_id}")
+        os.makedirs(liga_dir, exist_ok=True)
+        map_path = os.path.join(liga_dir, "feature_map.json")
+        with open(map_path, "w") as f:
+            json.dump(feature_map, f, indent=2)
+        print(f"   📝 feature_map.json salvo ({len(feature_map)} modelos)")
 
         # ─── Strategy slicing (dados de teste da liga) ───
         strategies = self._strategy_slicing_liga(
@@ -527,6 +566,8 @@ class AutoTuner:
                 **params,
                 "objective": objetivo,
                 "tree_method": "hist",
+                "device": self.device,
+                "nthread": os.cpu_count() or 4,
                 "seed": 42,
                 "verbosity": 0,
             }
@@ -633,6 +674,8 @@ class AutoTuner:
             **params,
             "objective": objetivo,
             "tree_method": "hist",
+            "device": self.device,
+            "nthread": os.cpu_count() or 4,
             "seed": 42,
             "verbosity": 0,
         }
@@ -679,6 +722,8 @@ class AutoTuner:
             **params,
             "objective": objetivo,
             "tree_method": "hist",
+            "device": self.device,
+            "nthread": os.cpu_count() or 4,
             "seed": 42,
             "verbosity": 0,
         }

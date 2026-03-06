@@ -22,7 +22,13 @@ Uso:
   resultado = scanner.executar()           # Pipeline completo
 """
 
+import sys
+import os
+# Garante que o diretório raiz do projeto está no path para as importações
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple, Any
 from config import LEAGUES, TIMEZONE
 from config import ROI_PAUSE_THRESHOLD, ROI_PAUSE_MIN_BETS
 from config import ODDS_SPORTS_MAP, PREFERRED_BOOKMAKER, PREFERRED_BOOKMAKER_LABEL
@@ -85,8 +91,7 @@ CONF_MIN_ABSOLUTA = 0.60
 # Limite de tips por fixture (evita spam no mesmo jogo)
 MAX_TIPS_POR_JOGO = 2
 
-# Limite total de tips por execução do scanner (qualidade > quantidade)
-MAX_TIPS_DIA = 15
+MAX_TIPS_DIA = 999          # Limite total de tips por dia (ilimitado a pedido do usúario)
 
 # Categorias de conflito — no máximo 1 tip por categoria por jogo.
 # Se múltiplos mercados da mesma categoria passam (ex: Over 1.5 + Under 3.5),
@@ -118,9 +123,9 @@ _LEAGUE_NOME = {v["id"]: v["nome"] for v in LEAGUES.values()}
 # Combina tips de jogos DIFERENTES para multiplicar odds.
 # Usa odds Pinnacle reais quando disponíveis.
 # ──────────────────────────────────────────────
-COMBO_MAX_TOTAL = 5           # Máximo de combos total (duplas + triplas)
-COMBO_DUPLAS_MAX = 4          # Teto de duplas (limitado por COMBO_MAX_TOTAL)
-COMBO_TRIPLAS_MAX = 3         # Teto de triplas (limitado por COMBO_MAX_TOTAL)
+COMBO_MAX_TOTAL = 999           # Máximo de combos total (duplas + triplas) (Iluminado a pedido do usúario)
+COMBO_DUPLAS_MAX = 999          # Teto de duplas (limitado por COMBO_MAX_TOTAL)
+COMBO_TRIPLAS_MAX = 999         # Teto de triplas (limitado por COMBO_MAX_TOTAL)
 COMBO_PROB_MIN = 0.45         # Confiança composta mínima (produto das probs)
 COMBO_TIP_PROB_MIN = 0.62     # Prob mínima individual para entrar em combo
 
@@ -1028,7 +1033,6 @@ class Scanner:
             # Header da liga + lista de botões para odd manual
             bloco = f"🏆 <b>{nome_liga}</b>\n"
             bloco += "─" * 24 + "\n"
-            botoes_liga = []
 
             # Ordenar fixtures por horário (primeiro jogo primeiro)
             fixtures_ordenados = sorted(
@@ -1070,15 +1074,6 @@ class Scanner:
                     linha = f"   {emoji} <code>{home}</code> vs <code>{away}</code> → {desc} — {prob:.0%}"
                     bloco += linha + "\n"
 
-                    # Botão ✏️ Odd para input manual (prob codificado no callback)
-                    fid_tip = tip.get("fixture_id", 0)
-                    merc = tip.get("mercado", "?")
-                    prob_int = int(prob * 1000)
-                    botoes_liga.append((
-                        f"✏️ {desc}",
-                        f"odd:{fid_tip}:{merc}:{prob_int}"
-                    ))
-
                     # Parecer LLM (curto, abaixo da tip)
                     llm = tip.get("llm_validacao")
                     if llm and llm.get("motivo") and "desativado" not in llm.get("motivo", ""):
@@ -1088,7 +1083,7 @@ class Scanner:
                 if i < len(fixtures_ordenados) - 1:
                     bloco += "\n"
 
-            msgs.append((bloco.rstrip(), botoes_liga))
+            msgs.append((bloco.rstrip(), []))
 
         # ─── Combos sugeridos (acumuladas) ───
         combos = resultado.get("combos", [])

@@ -11,6 +11,7 @@ Rotas:
 """
 
 import json
+import secrets
 from urllib.parse import parse_qs
 
 from flask import Flask, render_template, request, flash
@@ -22,7 +23,7 @@ from services import apifootball as api
 # Inicialização do Flask
 # ──────────────────────────────────────────────
 app = Flask(__name__)
-app.secret_key = "futebot-dev-key-mude-em-producao"
+app.secret_key = config.SECRET_KEY or secrets.token_hex(32)
 
 
 # ══════════════════════════════════════════════

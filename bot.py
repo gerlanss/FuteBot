@@ -143,8 +143,14 @@ async def main():
         "resultado_1x2", "over_under_15", "over_under_25", "over_under_35",
         "btts", "resultado_ht", "htft",
     ]
-    modelos_ok = all(Trainer.modelo_existe(m) for m in ALL_MODELS)
+    modelos_ok = Trainer.ha_modelos_treinados()
     status_modelo = "✅ 7 modelos treinados" if modelos_ok else "⏳ Modelos pendentes (aguardando dados)"
+    modelos_base = Trainer.contar_modelos_base()
+    status_modelo = (
+        f"Modelos disponiveis ({modelos_base}/{len(Trainer.CORE_MODEL_NAMES)} base)"
+        if modelos_ok else
+        "Modelos pendentes (aguardando dados)"
+    )
     boot_msg = (
         f"🟢 *FuteBot iniciado!*\n\n"
         f"📦 {resumo['fixtures']:,} fixtures | {resumo['fixtures_com_stats']:,} com stats\n"
@@ -226,7 +232,7 @@ async def _auto_bootstrap(db: Database, resumo: dict, max_stats: int = 0):
             "resultado_1x2", "over_under_15", "over_under_25", "over_under_35",
             "btts", "resultado_ht", "htft",
         ]
-        modelos_existem = all(Trainer.modelo_existe(m) for m in ALL_MODELS)
+        modelos_existem = Trainer.ha_modelos_treinados()
         if not modelos_existem and com_stats >= MIN_FIXTURES_TREINO:
             print(f"\n🔄 AUTO-BOOTSTRAP: {com_stats} jogos com stats — treinando modelo...")
             try:

@@ -21,9 +21,11 @@ Uso:
 """
 
 import os
+import json
 import numpy as np
 from data.database import Database
 from models.features import FeatureExtractor
+from models.feature_factory import FeatureFactory
 
 try:
     import xgboost as xgb
@@ -54,14 +56,18 @@ class Predictor:
     def __init__(self, db: Database):
         self.db = db
         self.fe = FeatureExtractor(db)
+        self.ff = FeatureFactory(db)
         # Cache de modelos per-league — carregados sob demanda (lazy loading)
         self._modelos_liga = {}  # {league_id: {nome: Booster}}
-        print(f"[Predictor] ✅ Inicializado (100% per-league, sem modelo global)")
+        # Cache de mapas de features por liga — {league_id: {modelo: [feat_names]}}
+        self._feature_maps = {}
+        print(f"[Predictor] ✅ Inicializado (100% per-league, features dinâmicas)")
 
     def _carregar_modelos_liga(self, league_id: int) -> dict:
         """
         Carrega modelos de uma liga específica (lazy loading com cache).
 
+        Também carrega feature_map.json se existir (features dinâmicas).
         Retorna dict {nome: Booster} dos modelos encontrados para a liga.
         Se a liga não tem modelos próprios, retorna dict vazio.
         """
@@ -79,8 +85,16 @@ class Predictor:
                     model.load_model(path)
                     modelos[nome] = model
 
+            # Carregar mapa de features dinâmicas (se existir)
+            map_path = os.path.join(liga_dir, "feature_map.json")
+            if os.path.exists(map_path):
+                with open(map_path) as f:
+                    self._feature_maps[league_id] = json.load(f)
+
         if modelos:
-            print(f"[Predictor] 🏟️ Liga {league_id}: {len(modelos)} modelos per-league carregados")
+            tem_evo = league_id in self._feature_maps
+            print(f"[Predictor] 🏟️ Liga {league_id}: {len(modelos)} modelos"
+                  f"{' (features evoluídas)' if tem_evo else ''}")
 
         self._modelos_liga[league_id] = modelos
         return modelos
@@ -117,11 +131,29 @@ class Predictor:
                         return True
         return False
 
+    def _dmat_para_modelo(self, feats: dict, nome_modelo: str,
+                           league_id: int) -> "xgb.DMatrix":
+        """
+        Cria DMatrix com as features corretas para o modelo.
+
+        Se feature_map.json existe para a liga, usa features evoluídas
+        (subconjunto selecionado pelo genético). Caso contrário, usa
+        as 51 features estáticas originais (backward compat).
+        """
+        feature_map = self._feature_maps.get(league_id, {})
+        if nome_modelo in feature_map:
+            fn = feature_map[nome_modelo]
+        else:
+            fn = FeatureExtractor.feature_names()
+        X = np.array([[feats.get(n, 0) or 0 for n in fn]], dtype=np.float32)
+        return xgb.DMatrix(X, feature_names=fn)
+
     def prever_jogo(self, fixture: dict) -> dict | None:
         """
         Gera previsão completa para um jogo.
 
         Usa modelos per-league da liga do fixture.
+        Se feature_map.json existir, usa features evoluídas por modelo.
         Se a liga não tem modelo treinado, retorna None.
 
         Parâmetros:
@@ -129,17 +161,18 @@ class Predictor:
 
         Retorna dict com probabilidades de cada mercado, ou None sem modelo/dados.
         """
-        # Extrair features
-        feats = self.fe.features_jogo(fixture)
+        league_id = fixture.get("league_id")
+
+        # Garantir que modelos (e feature_map) estejam carregados
+        self._carregar_modelos_liga(league_id)
+
+        # Extrair features: usa pool completo se feature_map existe, senão estático
+        if league_id in self._feature_maps:
+            feats = self.ff.features_jogo(fixture)
+        else:
+            feats = self.fe.features_jogo(fixture)
         if feats is None:
             return None
-
-        feat_names = FeatureExtractor.feature_names()
-        X = np.array([[feats.get(n, 0) or 0 for n in feat_names]], dtype=np.float32)
-        dmat = xgb.DMatrix(X, feature_names=feat_names)
-
-        # Identificar liga para buscar modelo per-league
-        league_id = fixture.get("league_id")
 
         resultado = {
             "fixture_id": fixture["fixture_id"],
@@ -155,6 +188,7 @@ class Predictor:
         # ─── Previsão 1x2 ───
         modelo = self._get_modelo("resultado_1x2", league_id)
         if modelo:
+            dmat = self._dmat_para_modelo(feats, "resultado_1x2", league_id)
             probs = modelo.predict(dmat)
             if probs.ndim > 1:
                 probs = probs[0]
@@ -170,6 +204,7 @@ class Predictor:
         # ─── Previsão Over/Under 2.5 ───
         modelo = self._get_modelo("over_under_25", league_id)
         if modelo:
+            dmat = self._dmat_para_modelo(feats, "over_under_25", league_id)
             prob = float(modelo.predict(dmat)[0])
             resultado["prob_over25"] = round(prob, 4)
             resultado["prob_under25"] = round(1 - prob, 4)
@@ -177,6 +212,7 @@ class Predictor:
         # ─── Previsão Over/Under 1.5 ───
         modelo = self._get_modelo("over_under_15", league_id)
         if modelo:
+            dmat = self._dmat_para_modelo(feats, "over_under_15", league_id)
             prob = float(modelo.predict(dmat)[0])
             resultado["prob_over15"] = round(prob, 4)
             resultado["prob_under15"] = round(1 - prob, 4)
@@ -184,6 +220,7 @@ class Predictor:
         # ─── Previsão Over/Under 3.5 ───
         modelo = self._get_modelo("over_under_35", league_id)
         if modelo:
+            dmat = self._dmat_para_modelo(feats, "over_under_35", league_id)
             prob = float(modelo.predict(dmat)[0])
             resultado["prob_over35"] = round(prob, 4)
             resultado["prob_under35"] = round(1 - prob, 4)
@@ -191,6 +228,7 @@ class Predictor:
         # ─── Previsão BTTS ───
         modelo = self._get_modelo("btts", league_id)
         if modelo:
+            dmat = self._dmat_para_modelo(feats, "btts", league_id)
             prob = float(modelo.predict(dmat)[0])
             resultado["prob_btts_yes"] = round(prob, 4)
             resultado["prob_btts_no"] = round(1 - prob, 4)
@@ -198,6 +236,7 @@ class Predictor:
         # ─── Previsão Resultado 1T ───
         modelo = self._get_modelo("resultado_ht", league_id)
         if modelo:
+            dmat = self._dmat_para_modelo(feats, "resultado_ht", league_id)
             probs = modelo.predict(dmat)
             if probs.ndim > 1:
                 probs = probs[0]
@@ -211,6 +250,7 @@ class Predictor:
         # ─── Previsão HT/FT (9 classes) ───
         modelo = self._get_modelo("htft", league_id)
         if modelo:
+            dmat = self._dmat_para_modelo(feats, "htft", league_id)
             probs = modelo.predict(dmat)
             if probs.ndim > 1:
                 probs = probs[0]
@@ -230,6 +270,7 @@ class Predictor:
         # ─── Previsão Over/Under 0.5 gols 1T ───
         modelo = self._get_modelo("over_under_05_ht", league_id)
         if modelo:
+            dmat = self._dmat_para_modelo(feats, "over_under_05_ht", league_id)
             prob = float(modelo.predict(dmat)[0])
             resultado["prob_over05_ht"] = round(prob, 4)
             resultado["prob_under05_ht"] = round(1 - prob, 4)
@@ -237,6 +278,7 @@ class Predictor:
         # ─── Previsão Over/Under 1.5 gols 1T ───
         modelo = self._get_modelo("over_under_15_ht", league_id)
         if modelo:
+            dmat = self._dmat_para_modelo(feats, "over_under_15_ht", league_id)
             prob = float(modelo.predict(dmat)[0])
             resultado["prob_over15_ht"] = round(prob, 4)
             resultado["prob_under15_ht"] = round(1 - prob, 4)
@@ -244,6 +286,7 @@ class Predictor:
         # ─── Previsão Over/Under 0.5 gols 2T ───
         modelo = self._get_modelo("over_under_05_2t", league_id)
         if modelo:
+            dmat = self._dmat_para_modelo(feats, "over_under_05_2t", league_id)
             prob = float(modelo.predict(dmat)[0])
             resultado["prob_over05_2t"] = round(prob, 4)
             resultado["prob_under05_2t"] = round(1 - prob, 4)
@@ -251,6 +294,7 @@ class Predictor:
         # ─── Previsão Over/Under 1.5 gols 2T ───
         modelo = self._get_modelo("over_under_15_2t", league_id)
         if modelo:
+            dmat = self._dmat_para_modelo(feats, "over_under_15_2t", league_id)
             prob = float(modelo.predict(dmat)[0])
             resultado["prob_over15_2t"] = round(prob, 4)
             resultado["prob_under15_2t"] = round(1 - prob, 4)
@@ -258,18 +302,21 @@ class Predictor:
         # ─── Previsão Escanteios Over/Under ───
         modelo = self._get_modelo("corners_over_85", league_id)
         if modelo:
+            dmat = self._dmat_para_modelo(feats, "corners_over_85", league_id)
             prob = float(modelo.predict(dmat)[0])
             resultado["prob_corners_over_85"] = round(prob, 4)
             resultado["prob_corners_under_85"] = round(1 - prob, 4)
 
         modelo = self._get_modelo("corners_over_95", league_id)
         if modelo:
+            dmat = self._dmat_para_modelo(feats, "corners_over_95", league_id)
             prob = float(modelo.predict(dmat)[0])
             resultado["prob_corners_over_95"] = round(prob, 4)
             resultado["prob_corners_under_95"] = round(1 - prob, 4)
 
         modelo = self._get_modelo("corners_over_105", league_id)
         if modelo:
+            dmat = self._dmat_para_modelo(feats, "corners_over_105", league_id)
             prob = float(modelo.predict(dmat)[0])
             resultado["prob_corners_over_105"] = round(prob, 4)
             resultado["prob_corners_under_105"] = round(1 - prob, 4)

@@ -13,18 +13,42 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _get_env_str(name: str, default: str = "") -> str:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip()
+
+
+def _get_env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _get_env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("true", "1", "yes", "on")
+
 # ──────────────────────────────────────────────
 # API-Football (api-sports.io)
 # Autenticação: header x-apisports-key
 # Plano Pro: 7.500 req/dia, todas as seasons
 # ──────────────────────────────────────────────
-API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "7d40d96b3852438ee6fd1d4896bc54b9")
+API_FOOTBALL_KEY = _get_env_str("API_FOOTBALL_KEY")
 API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
 
 # ──────────────────────────────────────────────
 # Temporada padrão (Pro: todas disponíveis)
 # ──────────────────────────────────────────────
-DEFAULT_SEASON = int(os.getenv("DEFAULT_SEASON", "2025"))
+DEFAULT_SEASON = _get_env_int("DEFAULT_SEASON", 2025)
 
 # Seasons para bulk download e treino do modelo
 TRAIN_SEASONS = [2024, 2025, 2026]
@@ -71,7 +95,7 @@ LEAGUES = {
 # The Odds API
 # Plano Starter: 500 créditos/mês, odds em tempo real
 # ──────────────────────────────────────────────
-ODDS_API_KEY = os.getenv("ODDS_API_KEY", "caff450465f0dbbc8d000e9ce4ce5233")
+ODDS_API_KEY = _get_env_str("ODDS_API_KEY")
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 
 # Mapeamento liga API-Football → chave The Odds API
@@ -116,8 +140,8 @@ ODDS_SPORTS_MAP = {
 # ──────────────────────────────────────────────
 # Telegram Bot
 # ──────────────────────────────────────────────
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")  # Preenchido no primeiro /start
+TELEGRAM_TOKEN = _get_env_str("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = _get_env_str("TELEGRAM_CHAT_ID")  # Preenchido no primeiro /start
 
 # ──────────────────────────────────────────────
 # Pipeline / Scanner
@@ -137,7 +161,7 @@ RETREINO_SEMANA = "1st"        # Qual semana do mês (1st, 2nd, 3rd, 4th, last) 
 
 # Fuso horário local (IANA). Boa Vista/RR = America/Boa_Vista (UTC-4).
 # Usado no scheduler, conversão de horários e exibição no Telegram.
-TIMEZONE = "America/Boa_Vista"
+TIMEZONE = _get_env_str("TIMEZONE", "America/Boa_Vista")
 
 # ──────────────────────────────────────────────
 # Auto-bootstrap — bot treina sozinho sem intervenção
@@ -167,10 +191,10 @@ DEGRADATION_ACC_MIN = 0.35    # Se accuracy janela < 35% → alerta de degradaç
 # DeepSeek LLM — Validação inteligente de tips
 # Atua como "segundo par de olhos" pós-XGBoost
 # ──────────────────────────────────────────────
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_API_KEY = _get_env_str("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_MODEL = "deepseek-chat"                # DeepSeek-V3 (barato e rápido)
-USE_LLM_VALIDATION = os.getenv("USE_LLM_VALIDATION", "False").lower() in ("true", "1", "yes")
+USE_LLM_VALIDATION = _get_env_bool("USE_LLM_VALIDATION", False)
 LLM_MIN_EV_FOR_REVIEW = 3.0   # Só manda para LLM tips com EV >= 3% (economiza tokens)
 
 # ──────────────────────────────────────────────
@@ -181,5 +205,6 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "data", "futebot.db")
 # ──────────────────────────────────────────────
 # Flask
 # ──────────────────────────────────────────────
-FLASK_DEBUG = os.getenv("FLASK_DEBUG", "True").lower() in ("true", "1", "yes")
-FLASK_PORT = int(os.getenv("FLASK_PORT", "5000"))
+SECRET_KEY = _get_env_str("FLASK_SECRET_KEY") or _get_env_str("SECRET_KEY")
+FLASK_DEBUG = _get_env_bool("FLASK_DEBUG", True)
+FLASK_PORT = _get_env_int("FLASK_PORT", 5000)

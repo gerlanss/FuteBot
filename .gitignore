@@ -9,4 +9,4 @@ venv/
 data/futebot.db
 data/futebot.db-wal
 data/futebot.db-shm
-data/models/*.json
+data/models/

@@ -47,6 +47,10 @@ MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "m
 
 
 class Trainer:
+    CORE_MODEL_NAMES = [
+        "resultado_1x2", "over_under_15", "over_under_25", "over_under_35",
+        "btts", "resultado_ht", "htft",
+    ]
     """Treina e gerencia os modelos de previsão XGBoost."""
 
     def __init__(self, db: Database):
@@ -649,9 +653,40 @@ class Trainer:
     # dentro de _gate_qualidade_por_modelo()
 
     @staticmethod
-    def modelo_existe(nome: str) -> bool:
-        """Verifica se um modelo treinado existe no disco."""
-        return os.path.exists(os.path.join(MODELS_DIR, f"{nome}.json"))
+    def modelo_existe(nome: str, league_id: int = None) -> bool:
+        """
+        Verifica se um modelo treinado existe no disco.
+
+        Sem `league_id`, aceita tanto o layout legado global quanto
+        o layout atual per-league.
+        """
+        if league_id is not None:
+            return os.path.exists(
+                os.path.join(MODELS_DIR, f"league_{league_id}", f"{nome}.json")
+            )
+
+        if os.path.exists(os.path.join(MODELS_DIR, f"{nome}.json")):
+            return True
+
+        if not os.path.isdir(MODELS_DIR):
+            return False
+
+        for entry in os.listdir(MODELS_DIR):
+            if not entry.startswith("league_"):
+                continue
+            if os.path.exists(os.path.join(MODELS_DIR, entry, f"{nome}.json")):
+                return True
+        return False
+
+    @staticmethod
+    def contar_modelos_base() -> int:
+        """Conta quantos modelos-base obrigatÃ³rios estÃ£o disponÃ­veis."""
+        return sum(1 for nome in Trainer.CORE_MODEL_NAMES if Trainer.modelo_existe(nome))
+
+    @staticmethod
+    def ha_modelos_treinados() -> bool:
+        """Indica se hÃ¡ pelo menos um conjunto utilizÃ¡vel de modelos."""
+        return Trainer.modelo_existe("resultado_1x2")
 
 
 if __name__ == "__main__":
