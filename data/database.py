@@ -254,8 +254,18 @@ class Database:
                 UNIQUE(mercado, league_id, conf_min, conf_max)
             );
         """)
+        self._aplicar_migracoes(conn)
         conn.commit()
         conn.close()
+
+    def _aplicar_migracoes(self, conn: sqlite3.Connection):
+        """Aplica migrações simples e idempotentes no schema atual."""
+        cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(predictions)").fetchall()
+        }
+        if "prob_modelo" not in cols:
+            conn.execute("ALTER TABLE predictions ADD COLUMN prob_modelo REAL")
 
     # ══════════════════════════════════════════════
     #  FIXTURES
@@ -579,15 +589,15 @@ class Database:
         conn.execute("""
             INSERT OR IGNORE INTO predictions (
                 fixture_id, date, league_id, home_name, away_name,
-                prob_home, prob_draw, prob_away, prob_over25, prob_btts,
+                prob_home, prob_draw, prob_away, prob_over25, prob_btts, prob_modelo,
                 mercado, odd_usada, ev_percent, bookmaker,
                 modelo_versao, features_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             pred["fixture_id"], pred["date"], pred.get("league_id"),
             pred.get("home_name"), pred.get("away_name"),
             pred.get("prob_home"), pred.get("prob_draw"), pred.get("prob_away"),
-            pred.get("prob_over25"), pred.get("prob_btts"),
+            pred.get("prob_over25"), pred.get("prob_btts"), pred.get("prob_modelo"),
             pred.get("mercado"), pred.get("odd_usada"), pred.get("ev_percent"),
             pred.get("bookmaker"), pred.get("modelo_versao", "v1"),
             json.dumps(pred.get("features", {}), ensure_ascii=False),

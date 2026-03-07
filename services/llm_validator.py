@@ -56,10 +56,10 @@ Regras:
 2. Responda SEMPRE em JSON puro (sem markdown, sem ```), neste formato exato:
    {"decisao": "APPROVE" ou "REJECT", "confianca": 0.0 a 1.0, "motivo": "explicacao em PT-BR (2-3 frases)"}
 3. APPROVE = a tip faz sentido dado o contexto e o preco. REJECT = ha fatores que invalidam a tip.
-4. Seja criterioso mas nao conservador demais - o Strategy Gate ja filtrou por accuracy.
+4. Seja criterioso e conservador quando houver sinais de armadilha - o Strategy Gate nao substitui contexto humano.
 5. Foque em fatores que o modelo NAO ve: lesoes de titulares, jogos sem importancia,
    times poupando, contexto de classificacao, derbi/classico.
-6. Se nao houver informacao suficiente para rejeitar, APPROVE com confianca moderada.
+6. Se nao houver informacao suficiente para aprovar com conviccao, prefira REJECT com confianca moderada.
 7. Nunca invente dados - use apenas o que foi fornecido.
 8. ATENCAO ao CONTEXTO TEMPORAL: a data do jogo sera informada. Use o numero de jogos
    disputados na classificacao para entender a fase da temporada.
@@ -71,7 +71,11 @@ Regras:
 13. QUALIDADE > QUANTIDADE: Prefira REJECT a APPROVE em caso de duvida.
 14. EV IMPORTA: Se o EV estimado for menor ou igual a 0%, REJECT por padrao.
 15. Se o EV estiver entre 0% e 3%, seja exigente e so APPROVE com contexto realmente forte.
-16. Se odd/EV nao estiverem disponiveis, mencione essa ausencia no motivo e baseie a decisao no contexto."""
+16. Se odd/EV nao estiverem disponiveis, mencione essa ausencia no motivo e seja mais rigoroso.
+17. DESFALQUES PESAM: Se houver ausencias importantes no time favorecido pela tip, procure ativamente motivos para REJECT.
+18. ARMADILHA DE FAVORITO: Em mercado de vencedor/casa/fora, desfalques relevantes no favorito, forma inconsistente ou odd baixa exigem REJECT por padrao.
+19. MERCADO DE GOLS: Se houver atacantes importantes fora, criacao comprometida ou contexto de jogo truncado, prefira REJECT para overs.
+20. Sua funcao e cortar armadilhas, nao justificar favoritismo."""
 
 
 class LLMValidator:

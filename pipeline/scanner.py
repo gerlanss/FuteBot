@@ -85,9 +85,9 @@ PROB_MIN = 0.60
 CONF_MIN_ABSOLUTA = 0.60
 
 # Limite de tips por fixture (evita spam no mesmo jogo)
-MAX_TIPS_POR_JOGO = 2
+MAX_TIPS_POR_JOGO = None
 
-MAX_TIPS_DIA = 999          # Limite total de tips por dia (ilimitado a pedido do usúario)
+MAX_TIPS_DIA = 12
 
 # Categorias de conflito — no máximo 1 tip por categoria por jogo.
 # Se múltiplos mercados da mesma categoria passam (ex: Over 1.5 + Under 3.5),
@@ -119,9 +119,9 @@ _LEAGUE_NOME = {v["id"]: v["nome"] for v in LEAGUES.values()}
 # Combina tips de jogos DIFERENTES para multiplicar odds.
 # Usa odds Pinnacle reais quando disponíveis.
 # ──────────────────────────────────────────────
-COMBO_MAX_TOTAL = 999           # Máximo de combos total (duplas + triplas) (Iluminado a pedido do usúario)
-COMBO_DUPLAS_MAX = 999          # Teto de duplas (limitado por COMBO_MAX_TOTAL)
-COMBO_TRIPLAS_MAX = 999         # Teto de triplas (limitado por COMBO_MAX_TOTAL)
+COMBO_MAX_TOTAL = 3
+COMBO_DUPLAS_MAX = 3
+COMBO_TRIPLAS_MAX = 3
 COMBO_PROB_MIN = 0.45         # Confiança composta mínima (produto das probs)
 COMBO_TIP_PROB_MIN = 0.62     # Prob mínima individual para entrar em combo
 
@@ -243,7 +243,8 @@ class Scanner:
         # ─── ETAPA 3: Expandir em tips por mercado ───
         print("\n🎯 Etapa 3: Expandindo mercados...")
         tips_raw = self._expandir_mercados(previsoes)
-        print(f"   Tips brutas (prob >= {PROB_MIN:.0%}): {len(tips_raw)}")
+        tips_brutas = len(tips_raw)
+        print(f"   Tips brutas (prob >= {PROB_MIN:.0%}): {tips_brutas}")
 
         # ─── ETAPA 4: Strategy Gate ───
         print("\n🛡️ Etapa 4: Filtrando pelo Strategy Gate...")
@@ -264,6 +265,7 @@ class Scanner:
 
         # ─── ETAPA 4b: Resolver conflitos + limitar por jogo ───
         tips_gate = self._filtrar_conflitos_e_limites(tips_gate)
+        tips_pos_filtros = len(tips_gate)
 
         if not tips_gate:
             print("   📭 Nenhuma tip passou nos filtros")
@@ -334,6 +336,7 @@ class Scanner:
                 "prob_away": tip.get("prob_away"),
                 "prob_over25": tip.get("prob_over25"),
                 "prob_btts": tip.get("prob_btts_yes"),
+                "prob_modelo": tip.get("prob_modelo"),
                 "mercado": tip["mercado"],
                 "odd_usada": tip.get("odd_pinnacle"),
                 "ev_percent": tip.get("ev_percent"),
@@ -351,6 +354,9 @@ class Scanner:
         return {
             "fixtures": len(fixtures),
             "previsoes": len(previsoes),
+            "tips_brutas": tips_brutas,
+            "tips_pos_filtros": tips_pos_filtros,
+            "tips_enviadas_llm": len(tips_revisao),
             "oportunidades": tips_raw,
             "ev_positivas": tips_aprovadas,
             "combos": combos,
@@ -524,7 +530,7 @@ class Scanner:
           - Idem para 'resultado' (h2h), 'btts' e 'ht'.
           Isso garante que Over 1.5 + Under 3.5 NUNCA coexistam.
 
-        Após resolver categorias, limita a MAX_TIPS_POR_JOGO por fixture.
+        Após resolver categorias, aplica o teto por fixture somente se configurado.
         """
         from collections import defaultdict
         por_fixture = defaultdict(list)
@@ -552,8 +558,8 @@ class Scanner:
                     categorias_usadas.add(cat)
                 tips_filtradas.append(t)
 
-            # Passo 2: limitar a MAX_TIPS_POR_JOGO por fixture
-            if len(tips_filtradas) > MAX_TIPS_POR_JOGO:
+            # Passo 2: limitar a MAX_TIPS_POR_JOGO por fixture (opcional)
+            if MAX_TIPS_POR_JOGO and len(tips_filtradas) > MAX_TIPS_POR_JOGO:
                 removidos_limite += len(tips_filtradas) - MAX_TIPS_POR_JOGO
                 tips_filtradas = tips_filtradas[:MAX_TIPS_POR_JOGO]
 
@@ -748,9 +754,6 @@ class Scanner:
         melhor_casa = ""
         odd_pinnacle = 0.0
 
-        # Coleta todas as linhas disponíveis para fallback (totals)
-        linhas_disponiveis = {}  # {bookmaker_key: {point: price}}
-
         for bk in jogo.get("bookmakers", []):
             for mkt in bk.get("markets", []):
                 if mkt.get("key") != market_key:
@@ -779,30 +782,6 @@ class Scanner:
                         if price > melhor_odd:
                             melhor_odd = price
                             melhor_casa = bk.get("title", bk.get("key", ""))
-
-                    # Guardar linhas para fallback (totals com point diferente)
-                    if point is not None and oc_point is not None:
-                        bk_key = bk.get("key", "")
-                        if bk_key not in linhas_disponiveis:
-                            linhas_disponiveis[bk_key] = {}
-                        linhas_disponiveis[bk_key][oc_point] = (price, bk.get("title", bk_key))
-
-        # Se não encontrou a linha exata, usar linha mais próxima da Pinnacle
-        if odd_pinnacle == 0 and melhor_odd == 0 and linhas_disponiveis:
-            # Priorizar Pinnacle
-            for bk_key in ["pinnacle"] + list(linhas_disponiveis.keys()):
-                if bk_key not in linhas_disponiveis:
-                    continue
-                pts = linhas_disponiveis[bk_key]
-                # Encontrar a linha mais próxima do point desejado
-                closest = min(pts.keys(), key=lambda p: abs(p - point))
-                price, casa = pts[closest]
-                if bk_key == "pinnacle":
-                    odd_pinnacle = price
-                    break
-                elif price > melhor_odd:
-                    melhor_odd = price
-                    melhor_casa = casa
 
         # Retornar Pinnacle se disponível, senão melhor alternativa
         if odd_pinnacle > 0:
@@ -845,62 +824,59 @@ class Scanner:
         if len(elegiveis) < 2:
             return []
 
-        # ─── Duplas ───
-        candidatas_duplas = []
+        candidatas = []
+
         for a, b in combinations(elegiveis, 2):
             prob = a["prob_modelo"] * b["prob_modelo"]
             if prob >= COMBO_PROB_MIN:
-                candidatas_duplas.append({
+                candidatas.append({
                     "tipo": "dupla",
                     "tips": [a, b],
                     "prob_composta": round(prob, 4),
                 })
-        candidatas_duplas.sort(key=lambda x: x["prob_composta"], reverse=True)
 
-        # Set GLOBAL de fixtures usadas — compartilhado entre duplas e triplas
-        # Garante que um jogo NUNCA aparece em mais de um combo
-        fixtures_usadas = set()
-        combos_total = []
-
-        # Selecionar duplas diversificadas
-        duplas = []
-        for c in candidatas_duplas:
-            if len(combos_total) >= COMBO_MAX_TOTAL:
-                break
-            fids = {t["fixture_id"] for t in c["tips"]}
-            if fids & fixtures_usadas:
-                continue  # Fixture já usada em outro combo
-            duplas.append(c)
-            combos_total.append(c)
-            fixtures_usadas.update(fids)
-            if len(duplas) >= COMBO_DUPLAS_MAX:
-                break
-
-        # ─── Triplas (só se há pelo menos 3 elegíveis e ainda cabe) ───
-        triplas = []
-        if len(elegiveis) >= 3 and len(combos_total) < COMBO_MAX_TOTAL:
-            candidatas_triplas = []
+        if len(elegiveis) >= 3:
             for a, b, c in combinations(elegiveis, 3):
                 prob = a["prob_modelo"] * b["prob_modelo"] * c["prob_modelo"]
                 if prob >= COMBO_PROB_MIN:
-                    candidatas_triplas.append({
+                    candidatas.append({
                         "tipo": "tripla",
                         "tips": [a, b, c],
                         "prob_composta": round(prob, 4),
                     })
-            candidatas_triplas.sort(key=lambda x: x["prob_composta"], reverse=True)
 
-            for c in candidatas_triplas:
-                if len(combos_total) >= COMBO_MAX_TOTAL:
-                    break
-                fids = {t["fixture_id"] for t in c["tips"]}
-                if fids & fixtures_usadas:
-                    continue  # Fixture já usada em outro combo
-                triplas.append(c)
-                combos_total.append(c)
-                fixtures_usadas.update(fids)
-                if len(triplas) >= COMBO_TRIPLAS_MAX:
-                    break
+        candidatas.sort(
+            key=lambda item: (
+                item["prob_composta"],
+                len(item["tips"]),
+            ),
+            reverse=True,
+        )
+
+        fixtures_usadas = set()
+        combos_total = []
+        duplas = 0
+        triplas = 0
+
+        for combo in candidatas:
+            if len(combos_total) >= COMBO_MAX_TOTAL:
+                break
+
+            if combo["tipo"] == "dupla" and duplas >= COMBO_DUPLAS_MAX:
+                continue
+            if combo["tipo"] == "tripla" and triplas >= COMBO_TRIPLAS_MAX:
+                continue
+
+            fids = {t["fixture_id"] for t in combo["tips"]}
+            if fids & fixtures_usadas:
+                continue
+
+            combos_total.append(combo)
+            fixtures_usadas.update(fids)
+            if combo["tipo"] == "dupla":
+                duplas += 1
+            else:
+                triplas += 1
 
         return combos_total
 
@@ -1047,11 +1023,18 @@ class Scanner:
         data_br = self._data_br(data_raw)
         msgs: list[tuple[str, list]] = []
 
-        header = (
-            f"<b>Tips do dia {data_br}</b>\n"
-            f"- Jogos analisados: {resultado['fixtures']}\n"
-            f"- Previsoes geradas: {resultado['previsoes']}"
-        )
+        header_lines = [
+            f"<b>Tips do dia {data_br}</b>",
+            f"- Jogos analisados: {resultado['fixtures']}",
+            f"- Jogos com previsao: {resultado['previsoes']}",
+        ]
+        if resultado.get("tips_brutas") is not None:
+            header_lines.append(f"- Mercados candidatos: {resultado['tips_brutas']}")
+        if resultado.get("tips_pos_filtros") is not None:
+            header_lines.append(f"- Apos filtros internos: {resultado['tips_pos_filtros']}")
+        if resultado.get("tips_enviadas_llm") is not None:
+            header_lines.append(f"- Enviadas ao DeepSeek: {resultado['tips_enviadas_llm']}")
+        header = "\n".join(header_lines)
 
         if not tips:
             return [(header + "\n- Nenhuma tip aprovada hoje.", [])]
@@ -1091,7 +1074,8 @@ class Scanner:
                 agenda_txt = f" ({' | '.join(agenda)})" if agenda else ""
 
                 linhas.append(
-                    f"\n<b>{primeira.get('home_name', '?')} vs {primeira.get('away_name', '?')}</b>{agenda_txt}"
+                    f"\n<code>{primeira.get('home_name', '?')}</code> <b>x</b> "
+                    f"<code>{primeira.get('away_name', '?')}</code>{agenda_txt}"
                 )
 
                 for tip in fix_tips:
@@ -1108,7 +1092,8 @@ class Scanner:
                         detalhes.append(f"EV {ev:+.1f}%")
                     detalhes.append(casa)
 
-                    linhas.append(f"- {desc} | {' | '.join(detalhes)}")
+                    linhas.append(f"• <b>{desc}</b>")
+                    linhas.append(f"  <i>{' | '.join(detalhes)}</i>")
 
                     llm = tip.get("llm_validacao")
                     if llm and llm.get("motivo") and "desativado" not in llm.get("motivo", ""):
@@ -1125,8 +1110,10 @@ class Scanner:
                 for t in combo["tips"]:
                     desc = t.get("descricao", t.get("mercado", "?"))
                     linhas_combo.append(
-                        f"- {t.get('home_name', '?')} vs {t.get('away_name', '?')} | {desc} | {t.get('prob_modelo', 0):.0%}"
+                        f"• <code>{t.get('home_name', '?')}</code> <b>x</b> "
+                        f"<code>{t.get('away_name', '?')}</code>"
                     )
+                    linhas_combo.append(f"  <i>{desc} | {t.get('prob_modelo', 0):.0%}</i>")
             msgs.append(("\n".join(linhas_combo).rstrip(), []))
 
         metricas = self.db.metricas_modelo()

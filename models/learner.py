@@ -458,6 +458,26 @@ class Learner:
                 break
         return seq
 
+    @staticmethod
+    def _confidence_from_prediction(row: dict) -> float | None:
+        """Retorna a confiança correta da tip salva, sem misturar mercados."""
+        prob = row.get("prob_modelo")
+        if prob is not None:
+            return prob
+
+        fallback_map = {
+            "h2h_home": "prob_home",
+            "h2h_draw": "prob_draw",
+            "h2h_away": "prob_away",
+            "over25": "prob_over25",
+            "btts_yes": "prob_btts",
+            "btts_no": "prob_btts",
+        }
+        key = fallback_map.get(row.get("mercado"))
+        if not key:
+            return None
+        return row.get(key)
+
     def relatorio_resultado_dia(self, data: str = None) -> str:
         """
         Gera relatório detalhado dos resultados do dia.
@@ -524,14 +544,17 @@ class Learner:
             ga = r.get("gols_away")
             placar = f"{gh}-{ga}" if gh is not None and ga is not None else "?"
 
-            # Exibir confiança do modelo ao invés de Odd/EV (odds desativadas)
-            prob = r.get("prob_home") or r.get("prob_over25") or r.get("prob_btts") or 0
-            conf_pct = prob * 100 if prob and prob <= 1 else prob
             acertou_txt = "✅ Acertou!" if acertou else "❌ Errou"
+            prob = self._confidence_from_prediction(r)
+            if prob is None:
+                conf_txt = "n/d"
+            else:
+                conf_pct = prob * 100 if prob <= 1 else prob
+                conf_txt = f"{conf_pct:.0f}%"
 
             lines.append(
                 f"{emoji} <b>{r['home_name']} vs {r['away_name']}</b> ({placar})\n"
-                f"   Aposta: {mercado_label} | Confiança: {conf_pct:.0f}%\n"
+                f"   Aposta: {mercado_label} | Confiança: {conf_txt}\n"
                 f"   {acertou_txt}"
             )
 

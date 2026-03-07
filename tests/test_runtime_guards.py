@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
+from datetime import datetime
 
 
 class ConfigTests(unittest.TestCase):
@@ -75,6 +76,153 @@ class SchedulerTests(unittest.TestCase):
             scheduler._job_relatorio()
 
         self.assertEqual(sent_messages, ["Resultados OK", "Diario OK", "Saude OK"])
+
+
+class LearnerConfidenceTests(unittest.TestCase):
+    @staticmethod
+    def _insert_fixture(db, fixture_id, data):
+        conn = db._conn()
+        conn.execute("""
+            INSERT INTO fixtures (
+                fixture_id, league_id, league_name, season, round, date, status,
+                home_id, home_name, away_id, away_name
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            fixture_id, 71, "Liga Teste", 2026, "Round 1", f"{data} 19:00:00", "FT",
+            fixture_id * 10 + 1, f"Time {fixture_id}A", fixture_id * 10 + 2, f"Time {fixture_id}B",
+        ))
+        conn.commit()
+        conn.close()
+
+    def test_relatorio_resultado_uses_prob_modelo_for_saved_tip(self):
+        from data.database import Database
+        from models.learner import Learner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, "test.db"))
+            data = datetime.now().strftime("%Y-%m-%d")
+            self._insert_fixture(db, 1, data)
+            db.salvar_prediction({
+                "fixture_id": 1,
+                "date": f"{data} 19:00:00",
+                "league_id": 71,
+                "home_name": "Time A",
+                "away_name": "Time B",
+                "mercado": "under35",
+                "prob_modelo": 0.82,
+                "odd_usada": 1.9,
+                "ev_percent": 12.3,
+            })
+            db.resolver_prediction(1, "away", 0, 2)
+
+            relatorio = Learner(db).relatorio_resultado_dia(data)
+
+            self.assertIn("Confiança: 82%", relatorio)
+
+    def test_relatorio_resultado_shows_nd_for_legacy_market_without_prob_mapping(self):
+        from data.database import Database
+        from models.learner import Learner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, "test.db"))
+            data = datetime.now().strftime("%Y-%m-%d")
+            self._insert_fixture(db, 2, data)
+            conn = db._conn()
+            conn.execute("""
+                INSERT INTO predictions (
+                    fixture_id, date, league_id, home_name, away_name,
+                    mercado, acertou, gols_home, gols_away, lucro
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (2, f"{data} 19:00:00", 71, "Time C", "Time D", "under35", 1, 1, 1, 0.9))
+            conn.commit()
+            conn.close()
+
+            relatorio = Learner(db).relatorio_resultado_dia(data)
+
+            self.assertIn("Confiança: n/d", relatorio)
+
+
+class ScannerSelectionTests(unittest.TestCase):
+    def test_scanner_limits_total_combos_and_keeps_tripla_possible(self):
+        from pipeline.scanner import Scanner
+
+        scanner = Scanner.__new__(Scanner)
+        tips = [
+            {"fixture_id": 1, "prob_modelo": 0.90},
+            {"fixture_id": 2, "prob_modelo": 0.88},
+            {"fixture_id": 3, "prob_modelo": 0.86},
+            {"fixture_id": 4, "prob_modelo": 0.84},
+            {"fixture_id": 5, "prob_modelo": 0.82},
+            {"fixture_id": 6, "prob_modelo": 0.80},
+        ]
+
+        combos = scanner._gerar_combos(tips)
+
+        self.assertLessEqual(len(combos), 3)
+        self.assertTrue(all(len(c["tips"]) in (2, 3) for c in combos))
+        self.assertEqual(len({t["fixture_id"] for c in combos for t in c["tips"]}),
+                         sum(len(c["tips"]) for c in combos))
+
+    def test_extrair_odd_mercado_requires_exact_total_line(self):
+        from pipeline.scanner import Scanner
+
+        jogo = {
+            "home_team": "RB Leipzig",
+            "away_team": "FC Augsburg",
+            "bookmakers": [
+                {
+                    "key": "pinnacle",
+                    "title": "Pinnacle",
+                    "markets": [
+                        {
+                            "key": "totals",
+                            "outcomes": [
+                                {"name": "Over", "price": 1.90, "point": 2.5},
+                                {"name": "Under", "price": 1.95, "point": 2.5},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+
+        odd, casa = Scanner._extrair_odd_mercado(jogo, {"mercado": "over15"})
+
+        self.assertEqual((odd, casa), (0, ""))
+
+    def test_formatar_relatorio_exibe_estagios_e_nomes_em_code(self):
+        from pipeline.scanner import Scanner
+
+        scanner = Scanner.__new__(Scanner)
+        scanner.db = MagicMock()
+        scanner.db.metricas_modelo.return_value = {"total": 0}
+
+        msgs = scanner.formatar_relatorio({
+            "fixtures": 29,
+            "previsoes": 29,
+            "tips_brutas": 187,
+            "tips_pos_filtros": 119,
+            "tips_enviadas_llm": 117,
+            "ev_positivas": [{
+                "league_id": 78,
+                "fixture_id": 1,
+                "home_name": "RB Leipzig",
+                "away_name": "FC Augsburg",
+                "date": "2026-03-07T13:30:00+00:00",
+                "prob_modelo": 0.822,
+                "descricao": "Over 1.5 gols",
+                "odd_pinnacle": 1.90,
+                "ev_percent": 56.1,
+                "odd_fonte": "Pinnacle",
+            }],
+            "combos": [],
+            "data": "2026-03-07",
+        })
+
+        header, body = msgs[0][0], msgs[1][0]
+        self.assertIn("Mercados candidatos: 187", header)
+        self.assertIn("Enviadas ao DeepSeek: 117", header)
+        self.assertIn("<code>RB Leipzig</code> <b>x</b> <code>FC Augsburg</code>", body)
 
 
 if __name__ == "__main__":

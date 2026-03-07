@@ -28,6 +28,7 @@ from telegram import (
     Update,
     BotCommand,
     BotCommandScopeAllPrivateChats,
+    BotCommandScopeChat,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     MenuButtonCommands,
@@ -42,7 +43,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, TIMEZONE, MINI_APP_URL
+from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, TIMEZONE, MINI_APP_URL, ADMIN_CHAT_IDS
 from data.database import Database
 from pipeline.scanner import Scanner
 from pipeline.collector import Collector
@@ -58,8 +59,15 @@ from services.user_prefs import get_preferences
 # ══════════════════════════════════════════════
 
 _db = Database()
-_chat_ids = set()
-_COMMANDS = [
+_ADMIN_CHAT_IDS = set(ADMIN_CHAT_IDS or [])
+_chat_ids = set(_ADMIN_CHAT_IDS)
+_PUBLIC_COMMANDS = [
+    BotCommand("start", "Abrir menu do bot"),
+    BotCommand("resultados", "Resultados recentes"),
+    BotCommand("app", "Abrir mini app"),
+    BotCommand("ajuda", "Ver como o bot funciona"),
+]
+_ADMIN_COMMANDS = [
     BotCommand("start", "Abrir menu do bot"),
     BotCommand("scan", "Buscar oportunidades agora"),
     BotCommand("ao_vivo", "Status dos jogos previstos"),
@@ -76,25 +84,35 @@ _COMMANDS = [
 # Carregar chat_id salvo (se existir)
 if TELEGRAM_CHAT_ID:
     _chat_ids.add(int(TELEGRAM_CHAT_ID))
+    _ADMIN_CHAT_IDS.add(int(TELEGRAM_CHAT_ID))
 
 
 # ══════════════════════════════════════════════
 #  TECLADOS INLINE (botões interativos)
 # ══════════════════════════════════════════════
 
-def _teclado_menu() -> InlineKeyboardMarkup:
-    """Monta o teclado inline do menu principal com todos os comandos."""
+def _is_admin_chat(chat_id: int | None) -> bool:
+    return chat_id is not None and int(chat_id) in _ADMIN_CHAT_IDS
+
+
+def _teclado_menu(chat_id: int | None = None) -> InlineKeyboardMarkup:
+    """Monta o teclado inline do menu principal conforme o nivel de acesso."""
     botoes = [
-        [InlineKeyboardButton("🔍 Scan — Oportunidades", callback_data="cmd_scan"),
-         InlineKeyboardButton("⚽ Ao Vivo", callback_data="cmd_ao_vivo")],
-        [InlineKeyboardButton("📊 Resultados", callback_data="cmd_resultados"),
-         InlineKeyboardButton("📈 Métricas", callback_data="cmd_metricas")],
-        [InlineKeyboardButton("🛡️ Saúde", callback_data="cmd_saude"),
-         InlineKeyboardButton("⚙️ Status", callback_data="cmd_status")],
-        [InlineKeyboardButton("🤖 Retreinar", callback_data="cmd_treinar"),
-         InlineKeyboardButton("📦 Bulk Download", callback_data="cmd_bulk")],
+        [InlineKeyboardButton("📊 Resultados", callback_data="cmd_resultados")],
         [InlineKeyboardButton("❓ Ajuda", callback_data="cmd_ajuda")],
     ]
+    if _is_admin_chat(chat_id):
+        botoes = [
+            [InlineKeyboardButton("🔍 Scan — Oportunidades", callback_data="cmd_scan"),
+             InlineKeyboardButton("⚽ Ao Vivo", callback_data="cmd_ao_vivo")],
+            [InlineKeyboardButton("📊 Resultados", callback_data="cmd_resultados"),
+             InlineKeyboardButton("📈 Métricas", callback_data="cmd_metricas")],
+            [InlineKeyboardButton("🛡️ Saúde", callback_data="cmd_saude"),
+             InlineKeyboardButton("⚙️ Status", callback_data="cmd_status")],
+            [InlineKeyboardButton("🤖 Retreinar", callback_data="cmd_treinar"),
+             InlineKeyboardButton("📦 Bulk Download", callback_data="cmd_bulk")],
+            [InlineKeyboardButton("❓ Ajuda", callback_data="cmd_ajuda")],
+        ]
     if MINI_APP_URL:
         botoes.insert(0, [InlineKeyboardButton("📲 Painel Mini App", web_app=WebAppInfo(url=MINI_APP_URL))])
     return InlineKeyboardMarkup(botoes)
@@ -110,8 +128,10 @@ def _botao_voltar() -> InlineKeyboardMarkup:
 
 async def _configurar_menu(bot, chat_id: int | None = None):
     """Garante menu de comandos e botao lateral do Telegram."""
-    await bot.set_my_commands(_COMMANDS)
-    await bot.set_my_commands(_COMMANDS, scope=BotCommandScopeAllPrivateChats())
+    await bot.set_my_commands(_PUBLIC_COMMANDS)
+    await bot.set_my_commands(_PUBLIC_COMMANDS, scope=BotCommandScopeAllPrivateChats())
+    for admin_chat_id in sorted(_ADMIN_CHAT_IDS):
+        await bot.set_my_commands(_ADMIN_COMMANDS, scope=BotCommandScopeChat(admin_chat_id))
 
     if MINI_APP_URL:
         menu_button = MenuButtonWebApp("Painel", WebAppInfo(url=MINI_APP_URL))
@@ -126,6 +146,22 @@ async def _configurar_menu(bot, chat_id: int | None = None):
         chat_id=chat_id,
         menu_button=menu_button,
     )
+
+
+async def _negar_acesso(message):
+    await _reply_html(
+        message,
+        "<b>Acesso restrito</b>\n\nEste comando fica disponivel apenas para o administrador do bot.",
+        reply_markup=_teclado_menu(getattr(getattr(message, "chat", None), "id", None)),
+    )
+
+
+async def _garantir_admin_message(message) -> bool:
+    chat_id = getattr(getattr(message, "chat", None), "id", None)
+    if _is_admin_chat(chat_id):
+        return True
+    await _negar_acesso(message)
+    return False
 
 
 async def _reply_html(message, texto: str, reply_markup=None):
@@ -190,6 +226,14 @@ def _formatar_modelo_html(treino: dict | None) -> str:
 
 
 def _formatar_start_html(chat_id: int) -> str:
+    if not _is_admin_chat(chat_id):
+        return (
+            "<b>FuteBot</b>\n"
+            "Bot privado de analise.\n\n"
+            "Seu acesso atual eh limitado.\n"
+            "Use o menu para abrir a Mini App ou ver a ajuda."
+        )
+
     resumo = _db.resumo()
     treino = _db.ultimo_treino()
     return (
@@ -275,11 +319,31 @@ def _formatar_ajuda_html() -> str:
         "- 07:00 - scanner do dia\n"
         "- a cada 2h - acompanhamento ao vivo\n"
         "- 06:45 - relatorio de resultados\n"
-        "- mensal - retreino per-league"
+        "- mensal - retreino per-league\n\n"
+        "<b>Como o FuteBot escolhe as tips</b>\n"
+        "Cada jogo passa por um funil antes de virar tip.\n\n"
+        "1. <b>Modelo por liga</b>\n"
+        "Cada liga tem modelos proprios para resultado, gols, BTTS, tempos e escanteios.\n\n"
+        "2. <b>Confianca minima</b>\n"
+        "Mercado com menos de 60% de confianca ja cai antes de tudo.\n\n"
+        "3. <b>Strategy Gate</b>\n"
+        "So passa se aquela combinacao liga + mercado + faixa de confianca tiver historico validado.\n\n"
+        "4. <b>Anti-conflito</b>\n"
+        "O bot nao manda mercados contraditorios no mesmo jogo. Ex.: Over 1.5 e Under 3.5 nao coexistem.\n\n"
+        "5. <b>Odds e EV</b>\n"
+        "Quando existe linha exata de odd, o bot calcula EV. Se a odd exata nao existir, ele nao inventa preco.\n\n"
+        "6. <b>DeepSeek</b>\n"
+        "A IA revisa contexto, forma, tabela, lesoes e coerencia da tip.\n\n"
+        "7. <b>Selecao final</b>\n"
+        "Depois de tudo, o bot ordena as oportunidades e envia so as 12 melhores do dia.\n\n"
+        "8. <b>Combos</b>\n"
+        "As combinacoes usam jogos diferentes e o bot envia no maximo 3 combos, priorizando os melhores."
     )
 
 def _salvar_chat_id(chat_id: int):
     """Salva chat_id no .env para persistência."""
+    if not _is_admin_chat(chat_id):
+        return
     _chat_ids.add(chat_id)
     # .env fica na raiz do projeto, não em services/
     env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
@@ -317,7 +381,11 @@ async def enviar_mensagem(texto: str, chat_id: int = None):
         print("[Bot] App não inicializado, mensagem não enviada")
         return
 
-    ids = [chat_id] if chat_id else list(_chat_ids)
+    if chat_id is not None and not _is_admin_chat(chat_id):
+        print(f"[Bot] Envio bloqueado para chat nao-admin: {chat_id}")
+        return
+
+    ids = [chat_id] if chat_id else sorted(_ADMIN_CHAT_IDS)
     if not ids:
         print("[Bot] Nenhum chat_id registrado")
         return
@@ -361,16 +429,20 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    await _reply_html(update.message, _formatar_start_html(chat_id), reply_markup=_teclado_menu())
+    await _reply_html(update.message, _formatar_start_html(chat_id), reply_markup=_teclado_menu(chat_id))
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Mostra status geral do bot."""
+    if not await _garantir_admin_message(update.message):
+        return
     await _reply_html(update.message, _formatar_status_html(), reply_markup=_botao_voltar())
 
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Executa o scanner de oportunidades manualmente."""
+    if not await _garantir_admin_message(update.message):
+        return
     await update.message.reply_text("🔍 Executando scanner... aguarde.")
 
     try:
@@ -415,6 +487,8 @@ async def cmd_resultados(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_metricas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Mostra métricas de performance do modelo (HTML para suportar nomes com _)."""
+    if not await _garantir_admin_message(update.message):
+        return
     learner = Learner(_db)
     msg = learner.relatorio_diario()
     await update.message.reply_text(
@@ -424,6 +498,8 @@ async def cmd_metricas(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_treinar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Força retreino via AutoTuner (Optuna + strategy slicing)."""
+    if not await _garantir_admin_message(update.message):
+        return
     await update.message.reply_text(
         "🧠 Iniciando AutoTuner... Optuna (50 trials) + strategy slicing.\n"
         "Isso pode demorar ~30-60 min. Você receberá o resultado aqui."
@@ -445,6 +521,8 @@ async def cmd_treinar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_bulk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Status do bulk download."""
+    if not await _garantir_admin_message(update.message):
+        return
     await _reply_html(update.message, _formatar_bulk_html(), reply_markup=_botao_voltar())
 
 
@@ -470,11 +548,13 @@ async def cmd_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lista todos os comandos."""
-    await _reply_html(update.message, _formatar_ajuda_html(), reply_markup=_teclado_menu())
+    await _reply_html(update.message, _formatar_ajuda_html(), reply_markup=_teclado_menu(update.effective_chat.id))
 
 
 async def cmd_saude(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Mostra saúde do modelo (guard rails, degradação, calibração)."""
+    if not await _garantir_admin_message(update.message):
+        return
     try:
         learner = Learner(_db)
         msg = learner.relatorio_saude()
@@ -492,6 +572,8 @@ async def cmd_ao_vivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Verifica status dos jogos previstos hoje/ontem.
     Mostra quais já finalizaram (acertou/errou) e quais estão em andamento.
     """
+    if not await _garantir_admin_message(update.message):
+        return
     await update.message.reply_text("⚽ Verificando jogos previstos...")
 
     try:
@@ -708,9 +790,16 @@ async def _callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Botão "← Menu Principal" — reenvia o menu completo
     if data == "cmd_menu":
+        if not _is_admin_chat(query.message.chat.id):
+            await _reply_html(
+                query.message,
+                "<b>FuteBot</b>\nUse o painel e a ajuda para navegar.",
+                reply_markup=_teclado_menu(query.message.chat.id),
+            )
+            return
         msg = "🤖 *FuteBot — Menu Principal*\n\n👇 Escolha uma opção:"
         await query.message.reply_text(
-            msg, parse_mode=ParseMode.MARKDOWN, reply_markup=_teclado_menu()
+            msg, parse_mode=ParseMode.MARKDOWN, reply_markup=_teclado_menu(query.message.chat.id)
         )
         return
 
@@ -738,6 +827,10 @@ async def _executar_via_callback(query, handler_fn, context):
     """
     # Mapeamento direto — executa a lógica inline ao invés de
     # tentar hackear o Update. Mais seguro e manutenível.
+    if handler_fn not in (cmd_ajuda, cmd_resultados) and not _is_admin_chat(query.message.chat.id):
+        await _negar_acesso(query.message)
+        return
+
     try:
         if handler_fn == cmd_scan:
             await query.message.reply_text("🔍 Executando scanner... aguarde.")
@@ -805,7 +898,11 @@ async def _executar_via_callback(query, handler_fn, context):
             )
 
         elif handler_fn == cmd_ajuda:
-            await _reply_html(query.message, _formatar_ajuda_html(), reply_markup=_teclado_menu())
+            await _reply_html(
+                query.message,
+                _formatar_ajuda_html(),
+                reply_markup=_teclado_menu(query.message.chat.id),
+            )
 
     except Exception as e:
         await query.message.reply_text(
