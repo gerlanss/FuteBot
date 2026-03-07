@@ -13,6 +13,7 @@ optuna>=3.5
 
 # Telegram Bot
 python-telegram-bot>=21.0
+aiohttp>=3.10
 
 # Scheduler
 APScheduler>=3.10

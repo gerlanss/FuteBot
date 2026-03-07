@@ -142,6 +142,9 @@ ODDS_SPORTS_MAP = {
 # ──────────────────────────────────────────────
 TELEGRAM_TOKEN = _get_env_str("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = _get_env_str("TELEGRAM_CHAT_ID")  # Preenchido no primeiro /start
+MINI_APP_URL = _get_env_str("MINI_APP_URL")
+MINI_APP_BIND_HOST = _get_env_str("MINI_APP_BIND_HOST", "0.0.0.0")
+MINI_APP_BIND_PORT = _get_env_int("MINI_APP_BIND_PORT", 8081)
 
 # ──────────────────────────────────────────────
 # Pipeline / Scanner

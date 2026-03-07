@@ -49,6 +49,7 @@ sync_files() {
         --exclude 'data/futebot.db' \
         --exclude 'data/futebot.db-wal' \
         --exclude 'data/futebot.db-shm' \
+        --exclude 'data/user_prefs.json' \
         --exclude 'data/models/*.json' \
         --exclude '.git' \
         -e "ssh -p ${VPS_PORT}" \

@@ -24,13 +24,14 @@ Uso:
 
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
-from config import LEAGUES, TIMEZONE
-from config import ROI_PAUSE_THRESHOLD, ROI_PAUSE_MIN_BETS
+from config import LEAGUES, TIMEZONE, TELEGRAM_CHAT_ID
+from config import ROI_PAUSE_THRESHOLD, ROI_PAUSE_MIN_BETS, LLM_MIN_EV_FOR_REVIEW
 from config import ODDS_SPORTS_MAP, PREFERRED_BOOKMAKER, PREFERRED_BOOKMAKER_LABEL
 from data.database import Database
 from services.apifootball import raw_request
 from models.predictor import Predictor
 from services.llm_validator import LLMValidator
+from services.user_prefs import get_runtime_preferences
 
 
 # ──────────────────────────────────────────────
@@ -271,26 +272,53 @@ class Scanner:
                 "oportunidades": [], "ev_positivas": [], "data": data,
             }
 
-        # ─── ETAPA 5: Validação LLM (DeepSeek) ───
-        if tips_gate and self.llm.ativo:
-            print(f"\n🤖 Etapa 5: Validação DeepSeek ({len(tips_gate)} tips)...")
-            tips_aprovadas = self.llm.validar_lote(tips_gate)
+        # ─── ETAPA 5: Enriquecer com odds de referência + EV ───
+        print(f"\n📊 Etapa 5: Odds de referência + EV ({len(tips_gate)} tips)...")
+        tips_enriquecidas = self._enriquecer_odds(tips_gate)
+
+        bloqueadas_por_ev = 0
+        tips_revisao = []
+        for tip in tips_enriquecidas:
+            ev = tip.get("ev_percent")
+            if ev is not None and ev < LLM_MIN_EV_FOR_REVIEW:
+                bloqueadas_por_ev += 1
+                tip["llm_validacao"] = {
+                    "decisao": "REJECT",
+                    "confianca": 0.95,
+                    "motivo": f"EV abaixo do minimo configurado ({ev:+.1f}% < {LLM_MIN_EV_FOR_REVIEW:.1f}%).",
+                }
+                continue
+            tips_revisao.append(tip)
+
+        if bloqueadas_por_ev:
+            print(f"   🚫 {bloqueadas_por_ev} tips bloqueadas por EV abaixo de {LLM_MIN_EV_FOR_REVIEW:.1f}%")
+
+        # ─── ETAPA 6: Validação LLM (DeepSeek) com odds/EV ───
+        if tips_revisao and self.llm.ativo:
+            print(f"\n🤖 Etapa 6: Validação DeepSeek ({len(tips_revisao)} tips)...")
+            tips_aprovadas = self.llm.validar_lote(tips_revisao)
             print(f"   Aprovadas pelo DeepSeek: {len(tips_aprovadas)}")
         else:
-            tips_aprovadas = tips_gate
+            tips_aprovadas = tips_revisao
 
-        # ─── ETAPA 5b: Limite total de tips por dia ───
+        tips_aprovadas = self._aplicar_preferencias_usuario(tips_aprovadas)
+
+        tips_aprovadas.sort(
+            key=lambda t: (
+                t.get("ev_percent") is not None,
+                t.get("ev_percent", -999),
+                t.get("prob_modelo", 0),
+            ),
+            reverse=True,
+        )
+
+        # ─── ETAPA 6b: Limite total de tips por dia ───
         if len(tips_aprovadas) > MAX_TIPS_DIA:
             print(f"   ✂️ Cortando de {len(tips_aprovadas)} para {MAX_TIPS_DIA} tips (limite diário)")
             tips_aprovadas = tips_aprovadas[:MAX_TIPS_DIA]
 
-        # ─── ETAPA 6: Odds manuais (via botão ✏️ Odd no Telegram) ───
-        # Etapa 6 desativada: odds são inseridas manualmente pelo usuário.
-        # _enriquecer_odds() mantida no código para reativação futura.
-        print("\n📊 Etapa 6: Odds manuais (via Telegram)")
-
-        # ─── ETAPA 6b: Salvar no banco ───
-        print("\n💾 Etapa 6b: Salvando tips aprovadas...")
+        # ─── ETAPA 7: Salvar no banco ───
+        print("\n💾 Etapa 7: Salvando tips aprovadas...")
         _treino = self.db.ultimo_treino()
         versao_atual = _treino["modelo_versao"] if _treino else "v1"
 
@@ -315,10 +343,10 @@ class Scanner:
             })
         print(f"   ✅ {len(tips_aprovadas)} tips salvas (modelo {versao_atual})")
 
-        # ─── ETAPA 7: Gerar combos (acumuladas sugeridas) ───
+        # ─── ETAPA 8: Gerar combos (acumuladas sugeridas) ───
         combos = self._gerar_combos(tips_aprovadas)
         if combos:
-            print(f"\n🎰 Etapa 7: {len(combos)} combos gerados")
+            print(f"\n🎰 Etapa 8: {len(combos)} combos gerados")
 
         return {
             "fixtures": len(fixtures),
@@ -877,6 +905,37 @@ class Scanner:
         return combos_total
 
     # ══════════════════════════════════════════════
+    #  Preferencias do usuario (Mini App)
+    # ══════════════════════════════════════════════
+
+    def _aplicar_preferencias_usuario(self, tips: list[dict]) -> list[dict]:
+        """Aplica filtros runtime configurados na Mini App."""
+        prefs = get_runtime_preferences(TELEGRAM_CHAT_ID)
+        if not prefs:
+            return tips
+
+        filtradas = tips
+        favoritas = set(prefs.get("favorite_leagues", []))
+        min_ev = prefs.get("min_ev")
+
+        if favoritas:
+            antes = len(filtradas)
+            filtradas = [t for t in filtradas if t.get("league_id") in favoritas]
+            if antes != len(filtradas):
+                print(f"   👤 Preferencias: {antes - len(filtradas)} tips fora das ligas favoritas")
+
+        if min_ev is not None:
+            antes = len(filtradas)
+            filtradas = [
+                t for t in filtradas
+                if t.get("ev_percent") is None or t.get("ev_percent", -999) >= float(min_ev)
+            ]
+            if antes != len(filtradas):
+                print(f"   👤 Preferencias: {antes - len(filtradas)} tips abaixo do EV minimo do usuario")
+
+        return filtradas
+
+    # ══════════════════════════════════════════════
     #  GUARD RAIL: Auto-pause se modelo está degradando
     # ══════════════════════════════════════════════
 
@@ -970,152 +1029,116 @@ class Scanner:
         """
         Formata resultado do scanner para envio no Telegram (HTML).
 
-        Retorna uma LISTA de tuplas (texto_html, botões):
-          - texto_html: mensagem HTML formatada
-          - botões: lista de (label, callback_data) para InlineKeyboardMarkup
-            Cada tip gera um botão ✏️ Odd para o usuário definir a odd manual.
-
-        Agrupamento: Liga → Fixture → Tips do fixture.
-        Tips do mesmo jogo ficam juntas no mesmo bloco visual.
+        Retorna uma lista de tuplas (texto_html, botoes).
+        Cada bloco eh organizado por secao para ficar mais legivel no chat.
         """
         from collections import defaultdict
 
-        # ─── Scanner pausado ───
         if resultado.get("pausado"):
             return [(
-                "⛔ <b>FuteBot — Scanner PAUSADO</b>\n\n"
+                "<b>Scanner pausado</b>\n\n"
                 f"Motivo: {resultado.get('motivo_pausa', 'modelo degradado')}\n\n"
-                "Use /treinar para retreinar ou /metricas para ver detalhes.\n"
-                "O scanner volta a funcionar automaticamente após retreino aprovado.",
-                []
+                "Use /treinar para retreinar ou /metricas para ver detalhes.",
+                [],
             )]
 
         tips = resultado.get("ev_positivas", [])
         data_raw = resultado.get("data", "hoje")
         data_br = self._data_br(data_raw)
+        msgs: list[tuple[str, list]] = []
 
-        msgs = []
-
-        # ─── Cabeçalho ───
         header = (
-            f"🤖 <b>FuteBot — Tips {data_br}</b>\n"
-            f"📋 {resultado['fixtures']} jogos analisados | "
-            f"{resultado['previsoes']} previsões geradas"
+            f"<b>Tips do dia {data_br}</b>\n"
+            f"- Jogos analisados: {resultado['fixtures']}\n"
+            f"- Previsoes geradas: {resultado['previsoes']}"
         )
 
         if not tips:
-            msgs.append((header + "\n\n📭 Nenhuma tip aprovada hoje.", []))
-            return msgs
+            return [(header + "\n- Nenhuma tip aprovada hoje.", [])]
 
-        msgs.append((header + f"\n🎯 {len(tips)} tips aprovadas", []))
+        msgs.append((header + f"\n- Tips aprovadas: {len(tips)}", []))
 
-        # ─── Agrupar tips: liga → fixture → lista de tips ───
         por_liga = defaultdict(lambda: defaultdict(list))
         for tip in tips:
-            lid = tip.get("league_id", 0)
-            fid = tip.get("fixture_id", 0)
-            por_liga[lid][fid].append(tip)
+            por_liga[tip.get("league_id", 0)][tip.get("fixture_id", 0)].append(tip)
 
-        # Ordenar ligas pelo nome para consistência
-        ligas_ordenadas = sorted(por_liga.keys(),
-                                 key=lambda lid: _LEAGUE_NOME.get(lid, f"Liga {lid}"))
+        ligas_ordenadas = sorted(
+            por_liga.keys(),
+            key=lambda lid: _LEAGUE_NOME.get(lid, f"Liga {lid}"),
+        )
 
-        # ─── Uma mensagem por liga (com todos os jogos agrupados) ───
         for lid in ligas_ordenadas:
             fixtures_da_liga = por_liga[lid]
             nome_liga = _LEAGUE_NOME.get(lid, f"Liga {lid}")
+            linhas = [f"<b>{nome_liga}</b>"]
 
-            # Header da liga + lista de botões para odd manual
-            bloco = f"🏆 <b>{nome_liga}</b>\n"
-            bloco += "─" * 24 + "\n"
-
-            # Ordenar fixtures por horário (primeiro jogo primeiro)
             fixtures_ordenados = sorted(
                 fixtures_da_liga.items(),
-                key=lambda item: item[1][0].get("date", "")
+                key=lambda item: item[1][0].get("date", ""),
             )
 
-            for i, (fid, fix_tips) in enumerate(fixtures_ordenados):
-                # Ordenar tips do fixture por confiança desc
+            for _, fix_tips in fixtures_ordenados:
                 fix_tips.sort(key=lambda x: x.get("prob_modelo", 0), reverse=True)
-
                 primeira = fix_tips[0]
                 horario = self._horario_local(primeira.get("date", ""))
                 data_jogo = self._data_local(primeira.get("date", ""))
 
-                # Mostra data se for diferente de hoje
-                data_info = ""
+                agenda = []
+                if horario:
+                    agenda.append(horario)
                 if data_jogo and data_jogo != data_br:
-                    data_info = f" 📅 {data_jogo}"
+                    agenda.append(data_jogo)
+                agenda_txt = f" ({' | '.join(agenda)})" if agenda else ""
 
-                hora_str = f" ⏰ {horario}" if horario else ""
-
-                # Nome do jogo (1 linha)
-                bloco += (
-                    f"\n⚽ <b>{primeira.get('home_name', '?')} vs "
-                    f"{primeira.get('away_name', '?')}</b>"
-                    f"{hora_str}{data_info}\n"
+                linhas.append(
+                    f"\n<b>{primeira.get('home_name', '?')} vs {primeira.get('away_name', '?')}</b>{agenda_txt}"
                 )
 
-                # Tips do jogo (cada uma com emoji, nomes copiáveis, odd Pinnacle e EV)
                 for tip in fix_tips:
                     prob = tip.get("prob_modelo", 0)
-                    emoji = "🔥" if prob > 0.70 else "⚡" if prob > 0.55 else "📊"
                     desc = tip.get("descricao", tip.get("mercado", "?"))
-                    home = primeira.get("home_name", "?")
-                    away = primeira.get("away_name", "?")
+                    odd = tip.get("odd_pinnacle") or tip.get("odd") or 0
+                    ev = tip.get("ev_percent")
+                    casa = tip.get("odd_fonte") or tip.get("bookmaker") or PREFERRED_BOOKMAKER_LABEL
 
-                    # Linha principal: nomes copiáveis + mercado + confiança
-                    linha = f"   {emoji} <code>{home}</code> vs <code>{away}</code> → {desc} — {prob:.0%}"
-                    bloco += linha + "\n"
+                    detalhes = [f"Conf {prob:.0%}"]
+                    if odd and odd > 1:
+                        detalhes.append(f"Odd {odd:.2f}")
+                    if ev is not None:
+                        detalhes.append(f"EV {ev:+.1f}%")
+                    detalhes.append(casa)
 
-                    # Parecer LLM (curto, abaixo da tip)
+                    linhas.append(f"- {desc} | {' | '.join(detalhes)}")
+
                     llm = tip.get("llm_validacao")
                     if llm and llm.get("motivo") and "desativado" not in llm.get("motivo", ""):
-                        bloco += f"   🤖 <i>{llm['motivo']}</i>\n"
+                        linhas.append(f"  <i>{llm['motivo']}</i>")
 
-                # Separador entre jogos da mesma liga (exceto último)
-                if i < len(fixtures_ordenados) - 1:
-                    bloco += "\n"
+            msgs.append(("\n".join(linhas).rstrip(), []))
 
-            msgs.append((bloco.rstrip(), []))
-
-        # ─── Combos sugeridos (acumuladas) ───
         combos = resultado.get("combos", [])
         if combos:
-            bloco_combo = "🎰 <b>Combos sugeridos</b>\n"
-            bloco_combo += "─" * 24 + "\n"
-
+            linhas_combo = ["<b>Combos sugeridos</b>"]
             for i, combo in enumerate(combos, 1):
                 tipo_label = "Dupla" if combo["tipo"] == "dupla" else "Tripla"
-                prob_c = combo["prob_composta"]
-                emoji_c = "🔥" if prob_c > 0.55 else "⚡" if prob_c > 0.45 else "📊"
-
-                bloco_combo += f"\n{emoji_c} <b>{tipo_label} #{i}</b> — {prob_c:.0%}\n"
-
+                linhas_combo.append(f"\n<b>{tipo_label} #{i}</b> | Conf composta {combo['prob_composta']:.0%}")
                 for t in combo["tips"]:
-                    home = t.get("home_name", "?")
-                    away = t.get("away_name", "?")
                     desc = t.get("descricao", t.get("mercado", "?"))
-                    prob_t = t.get("prob_modelo", 0)
+                    linhas_combo.append(
+                        f"- {t.get('home_name', '?')} vs {t.get('away_name', '?')} | {desc} | {t.get('prob_modelo', 0):.0%}"
+                    )
+            msgs.append(("\n".join(linhas_combo).rstrip(), []))
 
-                    linha_combo = f"   • <code>{home}</code> vs <code>{away}</code> → {desc} ({prob_t:.0%})"
-                    bloco_combo += linha_combo + "\n"
-
-            msgs.append((bloco_combo.rstrip(), []))
-
-        # ─── Performance acumulada (última mensagem) ───
         metricas = self.db.metricas_modelo()
         if metricas["total"] > 0:
             perf = (
-                f"📈 <b>Performance acumulada:</b>\n"
-                f"   Accuracy: {metricas['accuracy']}% ({metricas['acertos']}/{metricas['total']})\n"
-                f"   ROI: {metricas['roi']:+.1f}%"
+                "<b>Performance acumulada</b>\n"
+                f"- Accuracy: {metricas['accuracy']}% ({metricas['acertos']}/{metricas['total']})\n"
+                f"- ROI: {metricas['roi']:+.1f}%"
             )
             msgs.append((perf, []))
 
         return msgs
-
 
 if __name__ == "__main__":
     # Execução manual para teste

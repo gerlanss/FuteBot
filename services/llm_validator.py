@@ -1,23 +1,23 @@
 """
-Validador LLM — "segundo par de olhos" para tips do XGBoost.
+Validador LLM - "segundo par de olhos" para tips do XGBoost.
 
-Usa o DeepSeek (API compatível com OpenAI) para analisar contexto
-qualitativo que o modelo estatístico não captura:
-  - Lesões/desfalques de jogadores-chave
-  - Importância do jogo (posição na classificação)
-  - Padrões de confronto direto
+Usa o DeepSeek (API compativel com OpenAI) para analisar contexto
+qualitativo que o modelo estatistico nao captura:
+  - Lesoes/desfalques de jogadores-chave
+  - Importancia do jogo (posicao na classificacao)
+  - Padroes de confronto direto
   - Forma recente contextualizada
+  - Relacao entre odd de referencia e EV estimado
 
-Fluxo (sem EV/odds):
-  Scanner → XGBoost → Strategy Gate → LLM Validator → Telegram
-  O LLM recebe confiança do modelo + contexto e responde APPROVE ou REJECT.
-  Não depende de odds ou cálculo de EV.
+Fluxo:
+  Scanner -> XGBoost -> Strategy Gate -> Odds/EV -> LLM Validator -> Telegram
+  O LLM recebe confianca do modelo + contexto + odd/EV de referencia.
 
-Configuração (.env):
+Configuracao (.env):
   DEEPSEEK_API_KEY=sk-xxx
   USE_LLM_VALIDATION=True
 
-Custo estimado: ~$0.50-2/mês (DeepSeek é ~10x mais barato que GPT-4o-mini).
+Custo estimado: ~$0.50-2/mes (DeepSeek e ~10x mais barato que GPT-4o-mini).
 """
 
 import json
@@ -42,41 +42,36 @@ _TIMEOUT = 30
 #  PROMPT DO SISTEMA — instruções fixas para o LLM
 # ══════════════════════════════════════════════
 
-SYSTEM_PROMPT = """Você é um analista de futebol especializado em previsões esportivas.
-Seu trabalho é validar tips geradas por um modelo estatístico XGBoost.
+SYSTEM_PROMPT = """Voce e um analista de futebol especializado em previsoes esportivas.
+Seu trabalho e validar tips geradas por um modelo estatistico XGBoost.
 
 Contexto:
-- O modelo XGBoost foi treinado com dados históricos e gera probabilidades calibradas.
-- As tips já passaram por um Strategy Gate (filtro de accuracy histórica por liga×mercado).
-- Você é o último filtro antes do usuário receber a tip.
-- NÃO temos odds disponíveis — avalie apenas pela confiança do modelo e contexto.
+- O modelo XGBoost foi treinado com dados historicos e gera probabilidades calibradas.
+- As tips ja passaram por um Strategy Gate (filtro de accuracy historica por liga x mercado).
+- Voce e o ultimo filtro antes do usuario receber a tip.
+- Tambem recebera odd de referencia e EV estimado. Use isso como sinal de valor.
 
 Regras:
-1. Analise: confiança do modelo, lesões, classificação, forma recente, importância do jogo.
+1. Analise: confianca do modelo, odd de referencia, EV estimado, lesoes, classificacao, forma recente e importancia do jogo.
 2. Responda SEMPRE em JSON puro (sem markdown, sem ```), neste formato exato:
-   {"decisao": "APPROVE" ou "REJECT", "confianca": 0.0 a 1.0, "motivo": "explicação em PT-BR (2-3 frases)"}
-3. APPROVE = a tip faz sentido dado o contexto. REJECT = há fatores que invalidam a tip.
-4. Seja criterioso mas não conservador demais — o Strategy Gate já filtrou por accuracy.
-5. Foque em fatores que o modelo NÃO vê: lesões de titulares, jogos sem importância,
-   times poupando, contexto de classificação, derbi/clássico.
-6. Se não houver informação suficiente para rejeitar, APPROVE com confiança moderada.
-7. Nunca invente dados — use apenas o que foi fornecido.
-8. ATENÇÃO ao CONTEXTO TEMPORAL: a data do jogo será informada. Use o número de jogos
-   disputados na classificação para entender a fase da temporada (ex: 2 jogos = início).
-   NÃO diga 'final de temporada' se a tabela mostra poucos jogos disputados.
-9. ATENÇÃO ao FORMATO DA COMPETIÇÃO: será informado se é liga (pontos corridos),
-   copa (mata-mata) ou grupo (fase de grupos). Isso muda a importância do jogo.
-10. O campo 'motivo' deve ter 2-3 frases completas explicando sua análise. Não corte.
-11. ADVOGADO DO DIABO: Se a confiança do modelo for ACIMA DE 80% em mercados de gols
-    (BTTS, Over 1.5, Over 2.5, Over 3.5), desconfie. Atue como Advogado do Diabo:
-    procure ativamente motivos para o jogo ser Under/sem gols (defesa sólida, time fechado,
-    contexto tático, fase de poucos gols). Modelos estatísticos tendem a inflar probabilidades
-    em mercados de alta variância. Só APPROVE se o contexto realmente justificar.
-12. CONFIANÇA BAIXA: Se a confiança do modelo for ABAIXO DE 55%, REJECT automaticamente.
-    Tips de baixa confiança não valem o risco — o modelo está basicamente incerto.
-    Inclua no motivo: "Confiança do modelo insuficiente ({X}%)".
-13. QUALIDADE > QUANTIDADE: Prefira REJECT a APPROVE em caso de dúvida.
-    Uma tip errada custa mais que uma oportunidade perdida."""
+   {"decisao": "APPROVE" ou "REJECT", "confianca": 0.0 a 1.0, "motivo": "explicacao em PT-BR (2-3 frases)"}
+3. APPROVE = a tip faz sentido dado o contexto e o preco. REJECT = ha fatores que invalidam a tip.
+4. Seja criterioso mas nao conservador demais - o Strategy Gate ja filtrou por accuracy.
+5. Foque em fatores que o modelo NAO ve: lesoes de titulares, jogos sem importancia,
+   times poupando, contexto de classificacao, derbi/classico.
+6. Se nao houver informacao suficiente para rejeitar, APPROVE com confianca moderada.
+7. Nunca invente dados - use apenas o que foi fornecido.
+8. ATENCAO ao CONTEXTO TEMPORAL: a data do jogo sera informada. Use o numero de jogos
+   disputados na classificacao para entender a fase da temporada.
+9. ATENCAO ao FORMATO DA COMPETICAO: sera informado se e liga, copa ou grupos.
+10. O campo 'motivo' deve ter 2-3 frases completas explicando sua analise. Nao corte.
+11. ADVOGADO DO DIABO: Se a confianca do modelo for ACIMA DE 80% em mercados de gols
+    (BTTS, Over 1.5, Over 2.5, Over 3.5), desconfie e procure motivos para under/sem gols.
+12. CONFIANCA BAIXA: Se a confianca do modelo for ABAIXO DE 55%, REJECT automaticamente.
+13. QUALIDADE > QUANTIDADE: Prefira REJECT a APPROVE em caso de duvida.
+14. EV IMPORTA: Se o EV estimado for menor ou igual a 0%, REJECT por padrao.
+15. Se o EV estiver entre 0% e 3%, seja exigente e so APPROVE com contexto realmente forte.
+16. Se odd/EV nao estiverem disponiveis, mencione essa ausencia no motivo e baseie a decisao no contexto."""
 
 
 class LLMValidator:
@@ -270,6 +265,9 @@ class LLMValidator:
         descricao = oportunidade.get("descricao", mercado)
         prob = oportunidade.get("prob_modelo", 0)
         league_id = oportunidade.get("league_id")
+        odd_ref = oportunidade.get("odd_pinnacle")
+        ev_ref = oportunidade.get("ev_percent")
+        casa_ref = oportunidade.get("odd_fonte", "")
 
         # Data do jogo formatada
         date_str = oportunidade.get("date", "")
@@ -300,15 +298,17 @@ class LLMValidator:
 
         prompt = f"""JOGO: {home} vs {away}
 DATA DO JOGO: {data_jogo}
-COMPETIÇÃO: {nome_comp} ({tipo_comp}) — {desc_formato}
+COMPETI??O: {nome_comp} ({tipo_comp}) - {desc_formato}
 RODADA: {rodada if rodada else "N/D"}
 TIP DO MODELO: {descricao}
-CONFIANÇA DO MODELO: {prob:.1%}
+CONFIAN?A DO MODELO: {prob:.1%}
+ODD DE REFERENCIA: {f"{odd_ref:.2f} ({casa_ref or 'referencia'})" if odd_ref else "N/D"}
+EV ESTIMADO: {f"{ev_ref:+.1f}%" if ev_ref is not None else "N/D"}
 
 PROBABILIDADES COMPLETAS DO XGBOOST:
 {chr(10).join(prob_lines)}
 
-NOTA: Não temos odds/EV. Avalie pela confiança do modelo + contexto abaixo.
+NOTA: Use odd/EV como sinal de valor junto com o contexto abaixo.
 """
 
         # Adicionar lesões ao prompt

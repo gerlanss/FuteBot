@@ -10,3 +10,4 @@ data/futebot.db
 data/futebot.db-wal
 data/futebot.db-shm
 data/models/
+data/user_prefs.json

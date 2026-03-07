@@ -15,6 +15,7 @@ Ambiente:
 """
 
 import asyncio
+import sys
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -23,6 +24,7 @@ from config import TELEGRAM_TOKEN, MIN_FIXTURES_TREINO
 from data.database import Database
 from data.bulk_download import baixar_fixtures, baixar_stats, _check_limite
 from services.telegram_bot import criar_bot, enviar_mensagem
+from services.miniapp import MiniAppServer
 from pipeline.scheduler import Scheduler
 from models.trainer import Trainer
 
@@ -112,6 +114,8 @@ async def main():
     """
     # Inicializar banco
     db = Database()
+    miniapp = MiniAppServer(db)
+    await miniapp.start()
     resumo = db.resumo()
     print(f"📦 Banco: {resumo['fixtures']:,} fixtures, {resumo['fixtures_ft']:,} FT, "
           f"{resumo['fixtures_com_stats']:,} com stats")
@@ -120,6 +124,8 @@ async def main():
     app = criar_bot()
     print("🚀 Iniciando bot Telegram...")
     await app.initialize()
+    if app.post_init:
+        await app.post_init(app)
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
     print("✅ Bot Telegram ouvindo comandos")
@@ -167,6 +173,7 @@ async def main():
         print("\n⏹️  Parando bot...")
         if usar_scheduler:
             scheduler.parar()
+        await miniapp.stop()
         await app.updater.stop()
         await app.stop()
         await app.shutdown()
