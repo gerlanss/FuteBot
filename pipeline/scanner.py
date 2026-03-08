@@ -78,11 +78,11 @@ MERCADOS = [
 ]
 
 # Probabilidade mínima para considerar uma tip (filtra ruído)
-# Elevado de 0.40 → 0.60 para evitar tips de baixa confiança
-PROB_MIN = 0.60
+# Elevado para 0.70 para priorizar apenas tips mais fortes
+PROB_MIN = 0.70
 
 # Confiança mínima absoluta — mesmo com strategy gate, bloqueia abaixo disso
-CONF_MIN_ABSOLUTA = 0.60
+CONF_MIN_ABSOLUTA = 0.70
 
 # Limite de tips por fixture (evita spam no mesmo jogo)
 MAX_TIPS_POR_JOGO = None
@@ -122,8 +122,8 @@ _LEAGUE_NOME = {v["id"]: v["nome"] for v in LEAGUES.values()}
 COMBO_MAX_TOTAL = 3
 COMBO_DUPLAS_MAX = 3
 COMBO_TRIPLAS_MAX = 3
-COMBO_PROB_MIN = 0.45         # Confiança composta mínima (produto das probs)
-COMBO_TIP_PROB_MIN = 0.62     # Prob mínima individual para entrar em combo
+COMBO_PROB_MIN = 0.50         # Confiança composta mínima (produto das probs)
+COMBO_TIP_PROB_MIN = 0.70     # Prob mínima individual para entrar em combo
 
 
 # ──────────────────────────────────────────────
@@ -350,12 +350,17 @@ class Scanner:
         combos = self._gerar_combos(tips_aprovadas)
         if combos:
             print(f"\n🎰 Etapa 8: {len(combos)} combos gerados")
+            for combo in combos:
+                combo_payload = dict(combo)
+                combo_payload["date"] = data
+                self.db.salvar_combo(combo_payload)
 
         return {
             "fixtures": len(fixtures),
             "previsoes": len(previsoes),
             "tips_brutas": tips_brutas,
             "tips_pos_filtros": tips_pos_filtros,
+            "tips_bloqueadas_ev": bloqueadas_por_ev,
             "tips_enviadas_llm": len(tips_revisao),
             "oportunidades": tips_raw,
             "ev_positivas": tips_aprovadas,
@@ -1032,6 +1037,8 @@ class Scanner:
             header_lines.append(f"- Mercados candidatos: {resultado['tips_brutas']}")
         if resultado.get("tips_pos_filtros") is not None:
             header_lines.append(f"- Apos filtros internos: {resultado['tips_pos_filtros']}")
+        if resultado.get("tips_bloqueadas_ev") is not None:
+            header_lines.append(f"- Bloqueadas por EV: {resultado['tips_bloqueadas_ev']}")
         if resultado.get("tips_enviadas_llm") is not None:
             header_lines.append(f"- Enviadas ao DeepSeek: {resultado['tips_enviadas_llm']}")
         header = "\n".join(header_lines)

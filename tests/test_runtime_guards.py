@@ -141,6 +141,54 @@ class LearnerConfidenceTests(unittest.TestCase):
 
             self.assertIn("Confiança: n/d", relatorio)
 
+    def test_relatorio_resultado_includes_combo_results(self):
+        from data.database import Database
+        from models.learner import Learner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, "test.db"))
+            data = datetime.now().strftime("%Y-%m-%d")
+            self._insert_fixture(db, 11, data)
+            self._insert_fixture(db, 12, data)
+
+            db.salvar_prediction({
+                "fixture_id": 11,
+                "date": f"{data} 19:00:00",
+                "league_id": 71,
+                "home_name": "Time 11A",
+                "away_name": "Time 11B",
+                "mercado": "over15",
+                "prob_modelo": 0.81,
+                "odd_usada": 1.8,
+            })
+            db.salvar_prediction({
+                "fixture_id": 12,
+                "date": f"{data} 19:00:00",
+                "league_id": 71,
+                "home_name": "Time 12A",
+                "away_name": "Time 12B",
+                "mercado": "under35",
+                "prob_modelo": 0.77,
+                "odd_usada": 1.7,
+            })
+            db.resolver_prediction(11, "home", 2, 1)
+            db.resolver_prediction(12, "away", 0, 1)
+
+            db.salvar_combo({
+                "date": data,
+                "tipo": "dupla",
+                "prob_composta": 0.62,
+                "tips": [
+                    {"fixture_id": 11, "mercado": "over15", "home_name": "Time 11A", "away_name": "Time 11B", "prob_modelo": 0.81},
+                    {"fixture_id": 12, "mercado": "under35", "home_name": "Time 12A", "away_name": "Time 12B", "prob_modelo": 0.77},
+                ],
+            })
+
+            relatorio = Learner(db).relatorio_resultado_dia(data)
+
+            self.assertIn("<b>COMBOS</b>", relatorio)
+            self.assertIn("Dupla #1", relatorio)
+
 
 class ScannerSelectionTests(unittest.TestCase):
     def test_scanner_limits_total_combos_and_keeps_tripla_possible(self):
@@ -202,6 +250,7 @@ class ScannerSelectionTests(unittest.TestCase):
             "previsoes": 29,
             "tips_brutas": 187,
             "tips_pos_filtros": 119,
+            "tips_bloqueadas_ev": 2,
             "tips_enviadas_llm": 117,
             "ev_positivas": [{
                 "league_id": 78,
@@ -221,6 +270,7 @@ class ScannerSelectionTests(unittest.TestCase):
 
         header, body = msgs[0][0], msgs[1][0]
         self.assertIn("Mercados candidatos: 187", header)
+        self.assertIn("Bloqueadas por EV: 2", header)
         self.assertIn("Enviadas ao DeepSeek: 117", header)
         self.assertIn("<code>RB Leipzig</code> <b>x</b> <code>FC Augsburg</code>", body)
 

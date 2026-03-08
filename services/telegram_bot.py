@@ -325,7 +325,7 @@ def _formatar_ajuda_html() -> str:
         "1. <b>Modelo por liga</b>\n"
         "Cada liga tem modelos proprios para resultado, gols, BTTS, tempos e escanteios.\n\n"
         "2. <b>Confianca minima</b>\n"
-        "Mercado com menos de 60% de confianca ja cai antes de tudo.\n\n"
+        "Mercado com menos de 70% de confianca ja cai antes de tudo.\n\n"
         "3. <b>Strategy Gate</b>\n"
         "So passa se aquela combinacao liga + mercado + faixa de confianca tiver historico validado.\n\n"
         "4. <b>Anti-conflito</b>\n"
@@ -337,7 +337,7 @@ def _formatar_ajuda_html() -> str:
         "7. <b>Selecao final</b>\n"
         "Depois de tudo, o bot ordena as oportunidades e envia so as 12 melhores do dia.\n\n"
         "8. <b>Combos</b>\n"
-        "As combinacoes usam jogos diferentes e o bot envia no maximo 3 combos, priorizando os melhores."
+        "As combinacoes usam jogos diferentes, exigem no minimo 70% por tip e 50% de confianca composta, e o bot envia no maximo 3 combos priorizando os melhores."
     )
 
 def _salvar_chat_id(chat_id: int):

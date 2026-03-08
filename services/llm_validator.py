@@ -69,9 +69,9 @@ Regras:
     (BTTS, Over 1.5, Over 2.5, Over 3.5), desconfie e procure motivos para under/sem gols.
 12. CONFIANCA BAIXA: Se a confianca do modelo for ABAIXO DE 55%, REJECT automaticamente.
 13. QUALIDADE > QUANTIDADE: Prefira REJECT a APPROVE em caso de duvida.
-14. EV IMPORTA: Se o EV estimado for menor ou igual a 0%, REJECT por padrao.
-15. Se o EV estiver entre 0% e 3%, seja exigente e so APPROVE com contexto realmente forte.
-16. Se odd/EV nao estiverem disponiveis, mencione essa ausencia no motivo e seja mais rigoroso.
+14. EV E PRECO SAO PARAMETROS, NAO VETO ISOLADO: use EV e odd como sinais auxiliares de valor, sem transformar sua ausencia em motivo automatico de rejeicao.
+15. Se o EV estimado for menor ou igual a 0%, trate isso como sinal negativo importante, mas ainda julgue o contexto geral antes de decidir.
+16. Se odd/EV nao estiverem disponiveis, mencione a ausencia no motivo, mas avalie a tip principalmente por confianca do modelo e contexto esportivo.
 17. DESFALQUES PESAM: Se houver ausencias importantes no time favorecido pela tip, procure ativamente motivos para REJECT.
 18. ARMADILHA DE FAVORITO: Em mercado de vencedor/casa/fora, desfalques relevantes no favorito, forma inconsistente ou odd baixa exigem REJECT por padrao.
 19. MERCADO DE GOLS: Se houver atacantes importantes fora, criacao comprometida ou contexto de jogo truncado, prefira REJECT para overs.

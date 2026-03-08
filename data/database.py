@@ -253,6 +253,34 @@ class Database:
                 created_at   TEXT DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(mercado, league_id, conf_min, conf_max)
             );
+
+            -- Combos sugeridos pelo scanner (duplas/triplas)
+            CREATE TABLE IF NOT EXISTS combos (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                date           TEXT NOT NULL,
+                combo_type     TEXT NOT NULL,           -- dupla, tripla
+                prob_composta  REAL,
+                created_at     TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS combo_items (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                combo_id       INTEGER NOT NULL,
+                prediction_id  INTEGER NOT NULL,
+                item_order     INTEGER NOT NULL,
+                fixture_id     INTEGER NOT NULL,
+                mercado        TEXT NOT NULL,
+                home_name      TEXT,
+                away_name      TEXT,
+                prob_modelo    REAL,
+                FOREIGN KEY (combo_id) REFERENCES combos(id) ON DELETE CASCADE,
+                FOREIGN KEY (prediction_id) REFERENCES predictions(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_combos_date
+                ON combos(date);
+            CREATE INDEX IF NOT EXISTS idx_combo_items_combo
+                ON combo_items(combo_id);
         """)
         self._aplicar_migracoes(conn)
         conn.commit()
@@ -614,6 +642,81 @@ class Database:
         ).fetchone()
         conn.close()
         return dict(row) if row else None
+
+    def salvar_combo(self, combo: dict):
+        """Salva um combo e seus itens vinculados às predictions já persistidas."""
+        itens = combo.get("tips", [])
+        if not itens:
+            return
+
+        conn = self._conn()
+        cur = conn.execute("""
+            INSERT INTO combos (date, combo_type, prob_composta)
+            VALUES (?, ?, ?)
+        """, (
+            combo.get("date"),
+            combo.get("tipo", "dupla"),
+            combo.get("prob_composta"),
+        ))
+        combo_id = cur.lastrowid
+
+        for idx, item in enumerate(itens, start=1):
+            pred = conn.execute(
+                "SELECT id FROM predictions WHERE fixture_id = ? AND mercado = ?",
+                (item.get("fixture_id"), item.get("mercado")),
+            ).fetchone()
+            if not pred:
+                continue
+
+            conn.execute("""
+                INSERT INTO combo_items (
+                    combo_id, prediction_id, item_order, fixture_id, mercado,
+                    home_name, away_name, prob_modelo
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                combo_id,
+                pred["id"],
+                idx,
+                item.get("fixture_id"),
+                item.get("mercado"),
+                item.get("home_name"),
+                item.get("away_name"),
+                item.get("prob_modelo"),
+            ))
+
+        conn.commit()
+        conn.close()
+
+    def combos_por_data(self, data: str) -> list[dict]:
+        """Retorna combos e itens associados para uma data ISO."""
+        conn = self._conn()
+        combos = conn.execute("""
+            SELECT * FROM combos
+            WHERE date LIKE ?
+            ORDER BY created_at ASC, id ASC
+        """, (f"{data}%",)).fetchall()
+
+        resultado = []
+        for combo in combos:
+            itens = conn.execute("""
+                SELECT
+                    ci.*,
+                    p.acertou,
+                    p.gols_home,
+                    p.gols_away,
+                    p.odd_usada,
+                    p.lucro
+                FROM combo_items ci
+                JOIN predictions p ON p.id = ci.prediction_id
+                WHERE ci.combo_id = ?
+                ORDER BY ci.item_order ASC
+            """, (combo["id"],)).fetchall()
+            payload = dict(combo)
+            payload["items"] = [dict(i) for i in itens]
+            resultado.append(payload)
+
+        conn.close()
+        return resultado
 
     def atualizar_odd_manual(self, fixture_id: int, mercado: str,
                              odd: float, ev_percent: float,

@@ -498,6 +498,7 @@ class Learner:
 
         # Converter sqlite3.Row para dict (evita erro com .get())
         rows = [dict(r) for r in raw_rows]
+        combos = self.db.combos_por_data(data)
 
         # Formatar data em DD/MM para exibição
         try:
@@ -570,6 +571,44 @@ class Learner:
             por_mercado[mercado]["lucro"] += lucro_item
 
         # ─── Resumo do dia ───
+        if combos:
+            lines.extend([
+                "",
+                "━━━━━━━━━━━━━━━━━━━━━━━━━",
+                "<b>COMBOS</b>",
+            ])
+            for idx, combo in enumerate(combos, start=1):
+                itens = combo.get("items", [])
+                if not itens:
+                    continue
+
+                resolvidos = [i for i in itens if i.get("acertou") is not None]
+                if len(resolvidos) != len(itens):
+                    status_emoji = "🟡"
+                    status_txt = "Aberto"
+                elif all(i.get("acertou") == 1 for i in itens):
+                    status_emoji = "✅"
+                    status_txt = "Green"
+                else:
+                    status_emoji = "❌"
+                    status_txt = "Red"
+
+                tipo_label = "Dupla" if combo.get("combo_type") == "dupla" else "Tripla"
+                lines.append(
+                    f"{status_emoji} <b>{tipo_label} #{idx}</b> | Conf composta: {(combo.get('prob_composta') or 0):.0%} | {status_txt}"
+                )
+                for item in itens:
+                    item_status = item.get("acertou")
+                    if item_status is None:
+                        item_emoji = "🟡"
+                    elif item_status == 1:
+                        item_emoji = "✅"
+                    else:
+                        item_emoji = "❌"
+                    lines.append(
+                        f"   {item_emoji} {item.get('home_name', '?')} vs {item.get('away_name', '?')} | {item.get('mercado', '?')}"
+                    )
+
         total = len(rows)
         pct = acertos / total * 100 if total > 0 else 0
         emoji_dia = "🟢" if pct >= 55 else "🔴" if pct < 40 else "🟡"
