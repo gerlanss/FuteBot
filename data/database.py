@@ -643,6 +643,25 @@ class Database:
         conn.close()
         return dict(row) if row else None
 
+    def limpar_lote_scan(self, data: str):
+        """
+        Remove o lote aberto de scan de uma data antes de salvar um novo.
+
+        Mantém previsões já resolvidas para não apagar histórico após os jogos.
+        Remove combos do dia inteiro, porque combos são sempre regenerados a cada scan.
+        """
+        conn = self._conn()
+        conn.execute(
+            "DELETE FROM combos WHERE date LIKE ?",
+            (f"{data}%",),
+        )
+        conn.execute(
+            "DELETE FROM predictions WHERE date LIKE ? AND acertou IS NULL",
+            (f"{data}%",),
+        )
+        conn.commit()
+        conn.close()
+
     def salvar_combo(self, combo: dict):
         """Salva um combo e seus itens vinculados às predictions já persistidas."""
         itens = combo.get("tips", [])

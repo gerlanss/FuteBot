@@ -323,6 +323,7 @@ class Scanner:
         print("\n💾 Etapa 7: Salvando tips aprovadas...")
         _treino = self.db.ultimo_treino()
         versao_atual = _treino["modelo_versao"] if _treino else "v1"
+        self.db.limpar_lote_scan(data)
 
         for tip in tips_aprovadas:
             self.db.salvar_prediction({
