@@ -1318,6 +1318,82 @@ class Scanner:
         return f"{emoji} {desc}"
 
     @staticmethod
+    def _quebrar_motivo_curto(texto: str) -> list[str]:
+        texto = (texto or "").strip()
+        if not texto:
+            return []
+        partes = [
+            parte.strip(" .")
+            for parte in texto.replace(":", ".").split(".")
+            if parte.strip(" .")
+        ]
+        return partes
+
+    @staticmethod
+    def _resumo_lesoes(ctx: dict) -> str | None:
+        lesoes = ctx.get("lesoes") or []
+        if not lesoes:
+            return None
+        nomes = []
+        for item in lesoes[:3]:
+            jogador = (item.get("jogador") or "").strip()
+            if jogador and jogador != "?":
+                nomes.append(jogador)
+        if not nomes:
+            return None
+        return f"Desfalques relevantes: {', '.join(nomes)}"
+
+    @staticmethod
+    def _resumo_externo(ctx: dict) -> list[str]:
+        lookup = ctx.get("market_lookup") or {}
+        fatores = []
+        if lookup.get("weather_summary"):
+            fatores.append(str(lookup["weather_summary"]).strip(" ."))
+        if lookup.get("field_conditions"):
+            fatores.append(f"Gramado: {str(lookup['field_conditions']).strip(' .')}")
+        if lookup.get("rotation_risk"):
+            fatores.append(f"Rotacao: {str(lookup['rotation_risk']).strip(' .')}")
+        if lookup.get("motivation_context"):
+            fatores.append(str(lookup["motivation_context"]).strip(" ."))
+        if lookup.get("news_summary"):
+            fatores.append(str(lookup["news_summary"]).strip(" ."))
+        return [f for f in fatores if f]
+
+    def _formatar_resumo_revisao(self, motivo: str, bloqueado: bool, tip: dict | None = None) -> list[str]:
+        partes = self._quebrar_motivo_curto(motivo)
+        ctx = (tip or {}).get("llm_contexto") or {}
+        candidatos = []
+
+        lesoes = self._resumo_lesoes(ctx)
+        if lesoes:
+            candidatos.append(lesoes)
+
+        for fator in self._resumo_externo(ctx):
+            if fator not in candidatos:
+                candidatos.append(fator)
+
+        for parte in partes:
+            if parte not in candidatos:
+                candidatos.append(parte)
+
+        if not candidatos:
+            return []
+
+        linhas = []
+        decisao = "Entrada cancelada nesta janela." if bloqueado else "Entrada mantida nesta janela."
+        linhas.append(f"  <b>{decisao}</b>")
+
+        fatores = candidatos[:3]
+        for fator in fatores:
+            linhas.append(f"  • {fator}.")
+
+        resto = candidatos[3:]
+        if resto:
+            linhas.append(f"  <i>{resto[0]}.</i>")
+
+        return linhas
+
+    @staticmethod
     def _data_local(date_str: str) -> str:
         """Extrai data local (DD/MM) de uma data ISO."""
         if not date_str:
@@ -1356,15 +1432,15 @@ class Scanner:
         if mode == "preselect":
             candidatos = resultado.get("preselecionados", [])
             header = "\n".join([
-                f"<b>🗓️ Radar do dia {data_br}</b>",
+                f"<b>🗓️ Observação do dia {data_br}</b>",
+                f"Hoje separei <b>{len({tip.get('fixture_id') for tip in candidatos})}</b> jogo(s) para observar.",
                 f"• Jogos analisados: <b>{resultado['fixtures']}</b>",
                 f"• Jogos com previsão: <b>{resultado['previsoes']}</b>",
                 f"• Mercados candidatos: <b>{resultado.get('tips_brutas', 0)}</b>",
                 f"• Após filtros internos: <b>{resultado.get('tips_pos_filtros', 0)}</b>",
-                f"• Jogos pré-selecionados: <b>{len({tip.get('fixture_id') for tip in candidatos})}</b>",
                 "",
-                "ℹ️ Os mercados ficam ocultos agora.",
-                "⏳ A liberação final acontece 30 min antes do jogo.",
+                "ℹ️ Por enquanto vou deixar só os jogos no radar.",
+                "⏳ Os mercados saem na revisão final, 30 min antes de cada partida.",
             ])
             msgs.append((header, []))
             por_liga = defaultdict(dict)
@@ -1385,6 +1461,7 @@ class Scanner:
         rejeitadas_revisao = len(resultado.get("tips_rejeitadas_llm", []))
         header_lines = [
             f"<b>🚨 Revisão final {data_br}</b>",
+            f"Revisei <b>{resultado.get('tips_enviadas_llm', 0)}</b> mercado(s) nesta janela.",
             f"• Jogos analisados: <b>{resultado['fixtures']}</b>",
             f"• Jogos com previsão: <b>{resultado['previsoes']}</b>",
         ]
@@ -1395,10 +1472,10 @@ class Scanner:
         if resultado.get("tips_bloqueadas_ev") is not None:
             header_lines.append(f"• Bloqueadas por EV: <b>{resultado['tips_bloqueadas_ev']}</b>")
         if resultado.get("tips_enviadas_llm") is not None:
-            header_lines.append(f"• Mercados revisados pelo FuteBot: <b>{resultado['tips_enviadas_llm']}</b>")
+            header_lines.append(f"• Mercados revisados: <b>{resultado['tips_enviadas_llm']}</b>")
         if resultado.get("tips_aprovadas_llm") is not None:
             header_lines.append(
-                f"• Revisão final: <b>{aprovadas_revisao}</b> liberados | <b>{rejeitadas_revisao}</b> barrados"
+                f"• Resultado da revisão: <b>{aprovadas_revisao}</b> liberados | <b>{rejeitadas_revisao}</b> barrados"
             )
         header = "\n".join(header_lines)
 
@@ -1406,11 +1483,11 @@ class Scanner:
             resumo_sem_liberacao = (
                 header
                 + "\n\n<b>🚫 Nenhum mercado foi liberado nesta janela.</b>\n"
-                + "<i>Os jogos seguiram para revisão final do FuteBot, mas os mercados foram barrados pelo contexto do momento.</i>"
+                + "<i>Olhei o contexto de perto, mas preferi não liberar entrada agora.</i>"
             )
             msgs.append((resumo_sem_liberacao, []))
         else:
-            msgs.append((header + f"\n• Mercados liberados: <b>{len(tips)}</b>", []))
+            msgs.append((header + f"\n• Entradas liberadas: <b>{len(tips)}</b>", []))
 
         por_liga = defaultdict(lambda: defaultdict(list))
         for tip in tips:
@@ -1424,7 +1501,7 @@ class Scanner:
         for lid in ligas_ordenadas:
             fixtures_da_liga = por_liga[lid]
             nome_liga = _LEAGUE_NOME.get(lid, f"Liga {lid}")
-            linhas = [f"<b>✅ Liberados | {nome_liga}</b>"]
+            linhas = [f"<b>✅ Entradas liberadas | {nome_liga}</b>"]
 
             fixtures_ordenados = sorted(
                 fixtures_da_liga.items(),
@@ -1468,13 +1545,13 @@ class Scanner:
 
                     llm = tip.get("llm_validacao")
                     if llm and llm.get("motivo") and "desativado" not in llm.get("motivo", ""):
-                        linhas.append(f"  <i>Motivo da liberação: {llm['motivo']}</i>")
+                        linhas.extend(self._formatar_resumo_revisao(llm["motivo"], bloqueado=False, tip=tip))
 
             msgs.append(("\n".join(linhas).rstrip(), []))
 
         combos = resultado.get("combos", [])
         if combos:
-            linhas_combo = ["<b>🎰 Combos liberados</b>"]
+            linhas_combo = ["<b>🎰 Combos que mantive</b>"]
             for i, combo in enumerate(combos, 1):
                 tipo_label = "Dupla" if combo["tipo"] == "dupla" else "Tripla"
                 linhas_combo.append(f"\n<b>{tipo_label} #{i}</b> | 🔗 Conf composta {combo['prob_composta']:.0%}")
@@ -1504,7 +1581,7 @@ class Scanner:
 
             for lid in sorted(por_liga_rejeitada.keys(), key=lambda item: _LEAGUE_NOME.get(item, f"Liga {item}")):
                 nome_liga = _LEAGUE_NOME.get(lid, f"Liga {lid}")
-                linhas = [f"<b>🚫 Barrados na revisão | {nome_liga}</b>"]
+                linhas = [f"<b>🚫 Entradas barradas | {nome_liga}</b>"]
                 tips_liga = sorted(
                     por_liga_rejeitada[lid],
                     key=lambda item: (item.get("date", ""), -item.get("prob_modelo", 0)),
@@ -1518,7 +1595,7 @@ class Scanner:
                         f"• <b>{self._descricao_mercado(tip)}</b> | Conf {tip.get('prob_modelo', 0):.0%}"
                     )
                     if llm.get("motivo"):
-                        linhas.append(f"  <i>Motivo do bloqueio: {llm['motivo']}</i>")
+                        linhas.extend(self._formatar_resumo_revisao(llm["motivo"], bloqueado=True, tip=tip))
                 msgs.append(("\n".join(linhas).rstrip(), []))
 
         return msgs

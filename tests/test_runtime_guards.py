@@ -412,7 +412,7 @@ class ScannerSelectionTests(unittest.TestCase):
         header, body = msgs[0][0], msgs[1][0]
         self.assertIn("Mercados candidatos: <b>187</b>", header)
         self.assertIn("Bloqueadas por EV: <b>2</b>", header)
-        self.assertIn("Mercados revisados pelo FuteBot: <b>117</b>", header)
+        self.assertIn("Mercados revisados: <b>117</b>", header)
         self.assertIn("<code>RB Leipzig</code> <b>x</b> <code>FC Augsburg</code>", body)
 
 
@@ -631,9 +631,54 @@ class ScannerAuditFormattingTests(unittest.TestCase):
         })
 
         joined = "\n\n".join(texto for texto, _ in msgs)
-        self.assertIn("Revisão final: <b>2</b> liberados | <b>1</b> barrados", joined)
-        self.assertIn("🚫 Barrados na revisão", joined)
-        self.assertIn("Desfalques ofensivos importantes.", joined)
+        self.assertIn("Resultado da revis", joined)
+        self.assertIn("Entradas barradas", joined)
+        self.assertIn("Entrada cancelada nesta janela.", joined)
+        self.assertIn("• Desfalques ofensivos importantes.", joined)
+
+    def test_formatar_resumo_revisao_shortens_llm_text(self):
+        from pipeline.scanner import Scanner
+
+        scanner = Scanner.__new__(Scanner)
+        linhas = scanner._formatar_resumo_revisao(
+            "O contexto esportivo apresenta cautela. Desfalques ofensivos importantes. "
+            "Chuva forte e gramado pesado. Favorito deve controlar o ritmo. "
+            "Evite entrar agora.",
+            bloqueado=True,
+        )
+
+        texto = "\n".join(linhas)
+        self.assertIn("Entrada cancelada nesta janela.", texto)
+        self.assertIn("O contexto esportivo apresenta cautela.", texto)
+        self.assertIn("Desfalques ofensivos importantes.", texto)
+        self.assertIn("Chuva forte e gramado pesado.", texto)
+        self.assertIn("<i>Favorito deve controlar o ritmo.</i>", texto)
+
+    def test_formatar_resumo_revisao_prioritizes_concrete_context(self):
+        from pipeline.scanner import Scanner
+
+        scanner = Scanner.__new__(Scanner)
+        linhas = scanner._formatar_resumo_revisao(
+            "O contexto esportivo apresenta cautela. Favorito deve controlar o ritmo.",
+            bloqueado=True,
+            tip={
+                "llm_contexto": {
+                    "lesoes": [
+                        {"jogador": "Paulinho"},
+                        {"jogador": "Vitor Roque"},
+                    ],
+                    "market_lookup": {
+                        "weather_summary": "Chuva moderada durante o jogo",
+                        "field_conditions": "Gramado pesado",
+                    },
+                }
+            },
+        )
+
+        texto = "\n".join(linhas)
+        self.assertIn("Desfalques relevantes: Paulinho, Vitor Roque.", texto)
+        self.assertIn("Chuva moderada durante o jogo.", texto)
+        self.assertIn("Gramado: Gramado pesado.", texto)
 
 
 if __name__ == "__main__":
