@@ -11,3 +11,15 @@ data/futebot.db-wal
 data/futebot.db-shm
 data/models/
 data/user_prefs.json
+data/discovery_runs/
+data/gemini_debug/
+data/scan_logs/
+data/binary_slice_search_btts*.json
+data/btts_pattern_report.md
+data/market_coincidences_*.md
+data/optuna_xgb_market_slices.json
+data/scan_history_local_*.json
+data/scan_history_local_*.md
+data/slice_search_*.json
+data/strategy_runtime_audit.json
+data/tabpfn_benchmark*.json

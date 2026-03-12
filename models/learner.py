@@ -327,6 +327,12 @@ class Learner:
         # Métricas da janela recente (também filtradas pela versão ativa)
         data_inicio = (datetime.now() - timedelta(days=DEGRADATION_WINDOW_DAYS)).strftime("%Y-%m-%d")
         metricas_janela = self._metricas_janela(data_inicio, modelo_versao=versao)
+        slices_ruins = self.db.slices_degradados(
+            modelo_versao=versao,
+            min_amostras=max(5, ROI_PAUSE_MIN_BETS // 4),
+            roi_threshold=ROI_PAUSE_THRESHOLD,
+            acc_threshold=DEGRADATION_ACC_MIN * 100,
+        )
 
         # Verificação 1: Accuracy da janela recente
         if metricas_janela["total"] >= 5:  # Precisa de pelo menos 5 previsões na janela
@@ -338,14 +344,20 @@ class Learner:
                     f"({DEGRADATION_ACC_MIN*100:.0f}%). Considere retreinar."
                 )
 
-        # Verificação 2: ROI para auto-pause
-        if metricas_geral["total"] >= ROI_PAUSE_MIN_BETS:
-            if metricas_geral["roi"] < ROI_PAUSE_THRESHOLD:
-                pausado = True
-                alertas.append(
-                    f"🛑 ROI acumulado ({metricas_geral['roi']:+.1f}%) abaixo de "
-                    f"{ROI_PAUSE_THRESHOLD}%. Scanner será PAUSADO até retreino."
-                )
+        # Verificação 2: slices degradados entram em quarentena, sem pausar o bot inteiro
+        if slices_ruins:
+            degradado = True
+            preview = ", ".join(
+                f"L{item['league_id']}:{item['mercado']}"
+                for item in slices_ruins[:5]
+            )
+            extra = "..." if len(slices_ruins) > 5 else ""
+            alertas.append(
+                f"🛡️ {len(slices_ruins)} slice(s) liga × mercado em quarentena: {preview}{extra}."
+            )
+            alertas.append(
+                "O scanner segue ativo para os demais mercados/ligações saudáveis."
+            )
 
         # Verificação 3: Sequência de derrotas (5+ seguidas = alerta)
         seq_derrotas = self._sequencia_derrotas()
@@ -366,6 +378,7 @@ class Learner:
             "alertas": alertas,
             "metricas_janela": metricas_janela,
             "metricas_geral": metricas_geral,
+            "slices_ruins": slices_ruins,
         }
 
     def relatorio_saude(self) -> str:
@@ -386,6 +399,7 @@ class Learner:
 
         mj = check["metricas_janela"]
         mg = check["metricas_geral"]
+        slices_ruins = check.get("slices_ruins", [])
 
         if mj["total"] > 0:
             lines.extend([
@@ -403,6 +417,17 @@ class Learner:
                 f"  Accuracy: {mg['accuracy']}% | ROI: {mg['roi']:+.1f}%",
                 f"  Lucro: {mg['lucro_total']:+.2f}u",
             ])
+
+        if slices_ruins:
+            lines.extend([
+                "",
+                "*Slices em quarentena:*",
+            ])
+            for item in slices_ruins[:8]:
+                lines.append(
+                    f"  - Liga {item['league_id']} | {item['mercado']} | "
+                    f"{item['acertos']}/{item['total']} | ROI {item['roi']:+.1f}%"
+                )
 
         return "\n".join(lines)
 

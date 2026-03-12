@@ -195,7 +195,8 @@ class AutoTuner:
 
     def executar(self, train_seasons: list[int] = None,
                  test_season: int = None,
-                 n_trials: int = None) -> dict:
+                 n_trials: int = None,
+                 league_ids: list[int] = None) -> dict:
         """
         Executa o AutoTuner per-league completo.
 
@@ -237,6 +238,11 @@ class AutoTuner:
                 ligas_elegiveis.append((lid, nome, n_ft))
             else:
                 ligas_insuficientes.append((lid, nome, n_ft))
+
+        if league_ids:
+            alvo = set(league_ids)
+            ligas_elegiveis = [l for l in ligas_elegiveis if l[0] in alvo]
+            ligas_insuficientes = [l for l in ligas_insuficientes if l[0] in alvo]
 
         ligas_elegiveis.sort(key=lambda x: -x[2])  # Maior primeiro
 
@@ -297,7 +303,11 @@ class AutoTuner:
             nome_modelo = self._modelo_do_mercado(s["mercado"])
             s["params"] = melhores.get(nome_modelo, {}).get("params", {})
 
-        self.db.salvar_strategies(todas_strategies)
+        self.db.salvar_strategies(
+            todas_strategies,
+            replace=not bool(league_ids),
+            league_ids=league_ids,
+        )
 
         ativas = [s for s in todas_strategies if s.get("ativo", 0)]
         elapsed = time.time() - inicio
