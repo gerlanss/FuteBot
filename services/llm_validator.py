@@ -34,6 +34,7 @@ from services.apifootball import (
     previsao_api,
     classificacao,
 )
+from services.gemini_lookup import GeminiMarketLookup
 
 # Timeout para chamada à API do DeepSeek (segundos)
 _TIMEOUT = 30
@@ -71,11 +72,14 @@ Regras:
 13. QUALIDADE > QUANTIDADE: Prefira REJECT a APPROVE em caso de duvida.
 14. EV E PRECO SAO PARAMETROS, NAO VETO ISOLADO: use EV e odd como sinais auxiliares de valor, sem transformar sua ausencia em motivo automatico de rejeicao.
 15. Se o EV estimado for menor ou igual a 0%, trate isso como sinal negativo importante, mas ainda julgue o contexto geral antes de decidir.
-16. Se odd/EV nao estiverem disponiveis, mencione a ausencia no motivo, mas avalie a tip principalmente por confianca do modelo e contexto esportivo.
+16. Se odd/EV nao estiverem disponiveis, NAO use isso como razao principal para REJECT. Julgue a tip principalmente por confianca do modelo e contexto esportivo.
 17. DESFALQUES PESAM: Se houver ausencias importantes no time favorecido pela tip, procure ativamente motivos para REJECT.
 18. ARMADILHA DE FAVORITO: Em mercado de vencedor/casa/fora, desfalques relevantes no favorito, forma inconsistente ou odd baixa exigem REJECT por padrao.
 19. MERCADO DE GOLS: Se houver atacantes importantes fora, criacao comprometida ou contexto de jogo truncado, prefira REJECT para overs.
-20. Sua funcao e cortar armadilhas, nao justificar favoritismo."""
+20. Sua funcao e cortar armadilhas, nao justificar favoritismo.
+21. O motivo precisa citar fatores concretos do jogo. Evite frases vagas como "sem contexto externo forte", "mercado sensivel" ou "cheiro de armadilha" sem explicar o porque.
+22. Se rejeitar, explique de forma objetiva qual fator esportivo pesou mais: desfalques, forma, tabela, estilo esperado do jogo, importancia do confronto ou perfil ofensivo/defensivo.
+23. Se o contexto esportivo estiver bom, nao reprove so porque falta odd/EV."""
 
 
 class LLMValidator:
@@ -91,6 +95,7 @@ class LLMValidator:
 
     def __init__(self):
         self.ativo = USE_LLM_VALIDATION and bool(DEEPSEEK_API_KEY)
+        self.gemini_lookup = GeminiMarketLookup()
         if self.ativo:
             print("[LLMValidator] ✅ Validação LLM ativa (DeepSeek)")
         else:
@@ -213,6 +218,13 @@ class LLMValidator:
             except Exception as e:
                 print(f"[LLMValidator] ⚠️ Erro buscando previsão API: {e}")
 
+        try:
+            gemini_data = self.gemini_lookup.lookup_market(oportunidade)
+            if gemini_data.get("enabled"):
+                ctx["market_lookup"] = gemini_data
+        except Exception as e:
+            print(f"[LLMValidator] ⚠️ Erro no Gemini lookup: {e}")
+
         return ctx
 
     # Mapeamento league_id → formato da competição (para contexto do LLM)
@@ -258,7 +270,7 @@ class LLMValidator:
         """
         Monta o prompt do usuário com todos os dados disponíveis do jogo.
         Estruturado para ser claro e parseable pelo LLM.
-        Opera sem odds/EV — foca em confiança do modelo + contexto.
+        Opera sem odds/EV - foca em confianca do modelo + contexto.
         Inclui data do jogo, formato da competição e fase da temporada.
         """
         from datetime import datetime as dt
@@ -357,6 +369,36 @@ NOTA: Use odd/EV como sinal de valor junto com o contexto abaixo.
             total = api_comp.get("total", {})
             if total:
                 prompt += f"  Força geral: Casa {total.get('home', '?')} vs Fora {total.get('away', '?')}\n"
+
+        market_lookup = contexto.get("market_lookup")
+        if market_lookup and market_lookup.get("enabled"):
+            casas = market_lookup.get("bookmakers") or []
+            flags = market_lookup.get("risk_flags") or []
+            prompt += "\nCONTEXTO EXTERNO (Gemini + Google Search):\n"
+            prompt += f"  Mercado encontrado fora da fonte principal: {'SIM' if market_lookup.get('market_found') else 'NAO'}\n"
+            if casas:
+                prompt += f"  Casas citadas: {', '.join(casas[:8])}\n"
+            if market_lookup.get("market_summary"):
+                prompt += f"  Mercado: {market_lookup['market_summary']}\n"
+            if market_lookup.get("weather_summary"):
+                prompt += f"  Clima: {market_lookup['weather_summary']}\n"
+            if market_lookup.get("field_conditions"):
+                prompt += f"  Campo/gramado: {market_lookup['field_conditions']}\n"
+            if market_lookup.get("rotation_risk"):
+                prompt += f"  Risco de rotacao: {market_lookup['rotation_risk']}\n"
+            if market_lookup.get("motivation_context"):
+                prompt += f"  Motivacao/competicao: {market_lookup['motivation_context']}\n"
+            if market_lookup.get("news_summary"):
+                prompt += f"  Noticias recentes: {market_lookup['news_summary']}\n"
+            if flags:
+                prompt += f"  Flags de risco: {', '.join(flags[:8])}\n"
+            if market_lookup.get("context_summary"):
+                prompt += f"  Resumo externo: {market_lookup['context_summary']}\n"
+            fontes = market_lookup.get("sources") or []
+            if fontes:
+                prompt += "  Fontes:\n"
+                for item in fontes[:5]:
+                    prompt += f"    - {item.get('title', item.get('url', '?'))}: {item.get('url', '?')}\n"
 
         prompt += "\nDecida: APPROVE ou REJECT? Responda em JSON."
         return prompt
@@ -477,6 +519,7 @@ NOTA: Use odd/EV como sinal de valor junto com o contexto abaixo.
         for op in oportunidades:
             # Enriquecer com dados da API-Football
             ctx = self.enriquecer_contexto(op)
+            op["llm_contexto"] = ctx
 
             # Validar via LLM
             resultado = self.validar_tip(op, ctx)

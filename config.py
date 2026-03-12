@@ -31,6 +31,16 @@ def _get_env_int(name: str, default: int) -> int:
         return default
 
 
+def _get_env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
 def _get_env_int_list(name: str, default: list[int] | None = None) -> list[int]:
     value = os.getenv(name)
     if value is None or not value.strip():
@@ -115,6 +125,9 @@ LEAGUES = {
 ODDS_API_KEY = _get_env_str("ODDS_API_KEY")
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 
+# Gemini API (enriquecimento contextual)
+GEMINI_API_KEY = _get_env_str("GEMINI_API_KEY")
+
 # Mapeamento liga API-Football → chave The Odds API
 # None = liga sem cobertura na Odds API (tip sem odds, só confiança do modelo)
 ODDS_SPORTS_MAP = {
@@ -190,6 +203,22 @@ TIMEZONE = _get_env_str("TIMEZONE", "America/Boa_Vista")
 MIN_FIXTURES_TREINO = 200     # Mínimo de fixtures FT para tentar treinar
 BULK_BATCH_DIARIO = 2000      # Máximo de stats para baixar por dia (deixa margem)
 BULK_HORA = "03:00"           # Horário do bulk incremental (madrugada)
+AUTO_RETREINO_HORA_INICIO = _get_env_int("AUTO_RETREINO_HORA_INICIO", 1)
+AUTO_RETREINO_HORA_FIM = _get_env_int("AUTO_RETREINO_HORA_FIM", 5)
+AUTO_RETREINO_TRIALS = _get_env_int("AUTO_RETREINO_TRIALS", 8)
+AUTO_RETREINO_MAX_LIGAS = _get_env_int("AUTO_RETREINO_MAX_LIGAS", 1)
+
+# Discovery semanal de strategies (liga x mercado)
+DISCOVERY_SEMANAL_DIA = _get_env_str("DISCOVERY_SEMANAL_DIA", "sun")
+DISCOVERY_SEMANAL_HORA = _get_env_str("DISCOVERY_SEMANAL_HORA", "22:00")
+DISCOVERY_TARGET_PRECISION = _get_env_float("DISCOVERY_TARGET_PRECISION", 0.70)
+DISCOVERY_MIN_TRAIN_SAMPLES = _get_env_int("DISCOVERY_MIN_TRAIN_SAMPLES", 30)
+DISCOVERY_MIN_TEST_SAMPLES = _get_env_int("DISCOVERY_MIN_TEST_SAMPLES", 10)
+DISCOVERY_MIN_TEST_SAMPLES_COPA = _get_env_int("DISCOVERY_MIN_TEST_SAMPLES_COPA", 8)
+DISCOVERY_OPTUNA_TRIALS = _get_env_int("DISCOVERY_OPTUNA_TRIALS", 40)
+
+# Competições curtas/copas aceitam validação com menos jogos no teste.
+DISCOVERY_CUP_LEAGUE_IDS = {73, 2, 3, 13, 11, 1}
 
 # ──────────────────────────────────────────────
 # Guard Rails — proteção contra modelo "burro"
@@ -221,4 +250,9 @@ LLM_MIN_EV_FOR_REVIEW = 3.0   # Só manda para LLM tips com EV >= 3% (economiza 
 # ──────────────────────────────────────────────
 # Banco de dados
 # ──────────────────────────────────────────────
+GEMINI_API_KEY = _get_env_str("GEMINI_API_KEY")
+GEMINI_BASE_URL = _get_env_str("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta")
+GEMINI_MODEL = _get_env_str("GEMINI_MODEL", "gemini-2.5-flash")
+USE_GEMINI_MARKET_LOOKUP = _get_env_bool("USE_GEMINI_MARKET_LOOKUP", True)
+
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "futebot.db")

@@ -77,6 +77,17 @@ class SchedulerTests(unittest.TestCase):
 
         self.assertEqual(sent_messages, ["Resultados OK", "Diario OK", "Saude OK"])
 
+    def test_priorizar_ligas_quarentena_keeps_working_same_league_first(self):
+        from pipeline.scheduler import Scheduler
+
+        ordem = Scheduler._priorizar_ligas_quarentena([
+            {"league_id": 71, "roi": -12.0, "total": 5},
+            {"league_id": 71, "roi": -30.0, "total": 8},
+            {"league_id": 135, "roi": -40.0, "total": 4},
+        ])
+
+        self.assertEqual(ordem[0], 71)
+
 
 class LearnerConfidenceTests(unittest.TestCase):
     @staticmethod
@@ -190,6 +201,80 @@ class LearnerConfidenceTests(unittest.TestCase):
             self.assertIn("Dupla #1", relatorio)
 
 
+class StrategySliceTests(unittest.TestCase):
+    @staticmethod
+    def _insert_fixture(db, fixture_id, data):
+        conn = db._conn()
+        conn.execute("""
+            INSERT INTO fixtures (
+                fixture_id, league_id, league_name, season, round, date, status,
+                home_id, home_name, away_id, away_name
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            fixture_id, 71, "Liga Teste", 2026, "Round 1", f"{data} 19:00:00", "FT",
+            fixture_id * 10 + 1, f"Time {fixture_id}A", fixture_id * 10 + 2, f"Time {fixture_id}B",
+        ))
+        conn.commit()
+        conn.close()
+
+    def test_slices_degradados_identifies_bad_market_by_league(self):
+        from data.database import Database
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, "test.db"))
+            data = datetime.now().strftime("%Y-%m-%d")
+            self._insert_fixture(db, 100, data)
+            self._insert_fixture(db, 101, data)
+            self._insert_fixture(db, 102, data)
+            self._insert_fixture(db, 103, data)
+            self._insert_fixture(db, 104, data)
+
+            conn = db._conn()
+            for idx in range(5):
+                conn.execute("""
+                    INSERT INTO predictions (
+                        fixture_id, date, league_id, home_name, away_name,
+                        mercado, acertou, lucro, modelo_versao
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    100 + idx, f"{data} 19:00:00", 71, "Time A", "Time B",
+                    "over15", 0, -1.0, "vtest",
+                ))
+            conn.commit()
+            conn.close()
+
+            ruins = db.slices_degradados(
+                modelo_versao="vtest",
+                min_amostras=5,
+                roi_threshold=-15.0,
+                acc_threshold=35.0,
+            )
+
+            self.assertEqual(len(ruins), 1)
+            self.assertEqual(ruins[0]["league_id"], 71)
+            self.assertEqual(ruins[0]["mercado"], "over15")
+
+    def test_salvar_strategies_can_replace_single_league_only(self):
+        from data.database import Database
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, "test.db"))
+            db.salvar_strategies([
+                {"mercado": "over15", "league_id": 71, "conf_min": 0.7, "conf_max": 1.0, "accuracy": 0.6, "n_samples": 12, "ativo": 1},
+                {"mercado": "under35", "league_id": 78, "conf_min": 0.7, "conf_max": 1.0, "accuracy": 0.62, "n_samples": 12, "ativo": 1},
+            ])
+            db.salvar_strategies([
+                {"mercado": "h2h_home", "league_id": 71, "conf_min": 0.7, "conf_max": 1.0, "accuracy": 0.65, "n_samples": 14, "ativo": 1},
+            ], replace=False, league_ids=[71])
+
+            rows = db.strategies_ativas()
+            pares = {(r["league_id"], r["mercado"]) for r in rows}
+
+            self.assertIn((71, "h2h_home"), pares)
+            self.assertIn((78, "under35"), pares)
+            self.assertNotIn((71, "over15"), pares)
+
+
 class ScannerSelectionTests(unittest.TestCase):
     def test_scanner_limits_total_combos_and_keeps_tripla_possible(self):
         from pipeline.scanner import Scanner
@@ -269,10 +354,230 @@ class ScannerSelectionTests(unittest.TestCase):
         })
 
         header, body = msgs[0][0], msgs[1][0]
-        self.assertIn("Mercados candidatos: 187", header)
-        self.assertIn("Bloqueadas por EV: 2", header)
-        self.assertIn("Enviadas ao DeepSeek: 117", header)
+        self.assertIn("Mercados candidatos: <b>187</b>", header)
+        self.assertIn("Bloqueadas por EV: <b>2</b>", header)
+        self.assertIn("Enviadas ao DeepSeek: <b>117</b>", header)
         self.assertIn("<code>RB Leipzig</code> <b>x</b> <code>FC Augsburg</code>", body)
+
+
+class TelegramChatPersistenceTests(unittest.TestCase):
+    def test_database_persists_public_and_admin_chats(self):
+        from data.database import Database
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, "test.db"))
+            db.salvar_telegram_chat(123, is_admin=False, username="user", first_name="User")
+            db.salvar_telegram_chat(999, is_admin=True, username="admin", first_name="Admin")
+
+            self.assertEqual(db.telegram_chat_ids(), [123, 999])
+            self.assertEqual(db.telegram_chat_ids(apenas_admin=True), [999])
+
+    def test_predictions_por_data_returns_saved_scan_batch(self):
+        from data.database import Database
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, "test.db"))
+            data = datetime.now().strftime("%Y-%m-%d")
+
+            conn = db._conn()
+            conn.execute("""
+                INSERT INTO fixtures (
+                    fixture_id, league_id, league_name, season, round, date, status,
+                    home_id, home_name, away_id, away_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                501, 71, "Liga Teste", 2026, "Round 1", f"{data} 19:00:00", "NS",
+                1, "Casa", 2, "Fora",
+            ))
+            conn.commit()
+            conn.close()
+
+            db.salvar_prediction({
+                "fixture_id": 501,
+                "date": f"{data} 19:00:00",
+                "league_id": 71,
+                "home_name": "Casa",
+                "away_name": "Fora",
+                "mercado": "under35",
+                "prob_modelo": 0.74,
+                "odd_usada": 1.88,
+            })
+
+            rows = db.predictions_por_data(data)
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["league_name"], "Liga Teste")
+            self.assertEqual(rows[0]["mercado"], "under35")
+
+    def test_scan_audit_persists_llm_decisions(self):
+        from data.database import Database
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, "test.db"))
+            db.salvar_scan_audit("2026-03-12", [
+                {
+                    "fixture_id": 1,
+                    "league_id": 71,
+                    "home_name": "Casa",
+                    "away_name": "Fora",
+                    "mercado": "under35",
+                    "descricao": "Under 3.5 gols",
+                    "prob_modelo": 0.81,
+                    "approved_final": True,
+                    "llm_validacao": {
+                        "decisao": "APPROVE",
+                        "confianca": 0.75,
+                        "motivo": "Jogo travado.",
+                    },
+                    "llm_contexto": {"classificacao": []},
+                },
+                {
+                    "fixture_id": 2,
+                    "league_id": 71,
+                    "home_name": "Casa 2",
+                    "away_name": "Fora 2",
+                    "mercado": "over15",
+                    "descricao": "Over 1.5 gols",
+                    "prob_modelo": 0.74,
+                    "approved_final": False,
+                    "llm_validacao": {
+                        "decisao": "REJECT",
+                        "confianca": 0.65,
+                        "motivo": "Ataques fracos.",
+                    },
+                },
+            ])
+
+            rows = db.scan_audit_por_data("2026-03-12")
+
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0]["llm_decisao"], "APPROVE")
+            self.assertEqual(rows[1]["llm_decisao"], "REJECT")
+
+
+class MarketDiscoveryTests(unittest.TestCase):
+    def test_market_discovery_has_unique_market_ids(self):
+        from models.market_discovery import MARKET_SPECS
+
+        market_ids = [item.market_id for item in MARKET_SPECS]
+        self.assertEqual(len(market_ids), len(set(market_ids)))
+
+    def test_market_discovery_covers_result_and_corner_markets(self):
+        from models.market_discovery import MARKET_SPEC_MAP
+
+        self.assertIn("h2h_home", MARKET_SPEC_MAP)
+        self.assertIn("under35", MARKET_SPEC_MAP)
+        self.assertIn("over05_ht", MARKET_SPEC_MAP)
+        self.assertIn("corners_under_105", MARKET_SPEC_MAP)
+
+    def test_apply_discovery_infers_conf_band_from_model_prob_rule(self):
+        from scripts.apply_discovery_strategies import _infer_conf_band
+
+        conf_min, conf_max = _infer_conf_band({
+            "conditions": [
+                ["away_btts_pct", ">=", 0.4],
+                ["model_prob", ">=", 0.654],
+            ]
+        })
+
+        self.assertEqual(conf_min, 0.70)
+        self.assertEqual(conf_max, 1.01)
+
+    def test_strategy_rule_match_checks_tip_features(self):
+        from pipeline.scanner import Scanner
+
+        scanner = Scanner.__new__(Scanner)
+        strategy = {
+            "params_json": "{\"conditions\": [[\"away_btts_pct\", \">=\", 0.4], [\"model_prob\", \">=\", 0.75]]}"
+        }
+
+        self.assertTrue(scanner._strategy_rule_match(strategy, {
+            "prob_modelo": 0.8,
+            "features": {"away_btts_pct": 0.5},
+        }))
+        self.assertFalse(scanner._strategy_rule_match(strategy, {
+            "prob_modelo": 0.8,
+            "features": {"away_btts_pct": 0.2},
+        }))
+
+
+class GeminiLookupTests(unittest.TestCase):
+    def test_gemini_extract_json_from_fenced_block(self):
+        from services.gemini_lookup import GeminiMarketLookup
+
+        lookup = GeminiMarketLookup()
+        data = lookup._extract_json("""```json
+{"market_found": true, "bookmakers": ["Bet365"], "summary": "ok", "confidence": 0.8}
+```""")
+
+        self.assertTrue(data["market_found"])
+        self.assertEqual(data["bookmakers"], ["Bet365"])
+
+    def test_gemini_normalize_keeps_external_context_fields(self):
+        from services.gemini_lookup import GeminiMarketLookup
+
+        lookup = GeminiMarketLookup()
+        data = lookup._normalize({
+            "market_found": True,
+            "bookmakers": ["Bet365"],
+            "market_summary": "Mercado encontrado.",
+            "weather_summary": "Chuva leve prevista.",
+            "field_conditions": "Gramado pesado.",
+            "rotation_risk": "alto",
+            "motivation_context": "Jogo decisivo por classificacao.",
+            "news_summary": "Time da casa pode poupar titulares.",
+            "risk_flags": ["chuva", "rotacao"],
+            "context_summary": "Contexto externo relevante.",
+            "confidence": 0.8,
+        }, "", {})
+
+        self.assertEqual(data["rotation_risk"], "alto")
+        self.assertIn("chuva", data["risk_flags"])
+        self.assertEqual(data["weather_summary"], "Chuva leve prevista.")
+
+
+class ScannerAuditFormattingTests(unittest.TestCase):
+    def test_formatar_relatorio_includes_llm_rejections_block(self):
+        from pipeline.scanner import Scanner
+
+        scanner = Scanner.__new__(Scanner)
+        scanner.db = MagicMock()
+        scanner.db.metricas_modelo.return_value = {"total": 0}
+
+        msgs = scanner.formatar_relatorio({
+            "fixtures": 10,
+            "previsoes": 10,
+            "tips_brutas": 20,
+            "tips_pos_filtros": 5,
+            "tips_bloqueadas_ev": 0,
+            "tips_enviadas_llm": 5,
+            "tips_aprovadas_llm": 2,
+            "tips_rejeitadas_llm": [{
+                "league_id": 71,
+                "home_name": "Casa",
+                "away_name": "Fora",
+                "descricao": "Over 1.5 gols",
+                "prob_modelo": 0.76,
+                "llm_validacao": {"motivo": "Desfalques ofensivos importantes."},
+            }],
+            "ev_positivas": [{
+                "league_id": 71,
+                "fixture_id": 1,
+                "home_name": "Casa",
+                "away_name": "Fora",
+                "date": "2026-03-07T13:30:00+00:00",
+                "prob_modelo": 0.822,
+                "descricao": "Under 3.5 gols",
+                "llm_validacao": {"motivo": "Jogo travado."},
+            }],
+            "combos": [],
+            "data": "2026-03-07",
+        })
+
+        joined = "\n\n".join(texto for texto, _ in msgs)
+        self.assertIn("DeepSeek: <b>2</b> aprovadas | <b>1</b> rejeitadas", joined)
+        self.assertIn("Rejeitadas pelo DeepSeek", joined)
+        self.assertIn("Desfalques ofensivos importantes.", joined)
 
 
 if __name__ == "__main__":

@@ -22,9 +22,12 @@ Uso:
 
 import os
 import sys
+import subprocess
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from telegram import (
+    Bot,
     Update,
     BotCommand,
     BotCommandScopeAllPrivateChats,
@@ -50,6 +53,7 @@ from pipeline.collector import Collector
 from models.trainer import Trainer
 from models.learner import Learner
 from models.autotuner import AutoTuner
+from models.market_discovery import MARKET_SPECS
 from services.apifootball import raw_request
 from services.user_prefs import get_preferences
 
@@ -69,7 +73,8 @@ _PUBLIC_COMMANDS = [
 ]
 _ADMIN_COMMANDS = [
     BotCommand("start", "Abrir menu do bot"),
-    BotCommand("scan", "Buscar oportunidades agora"),
+    BotCommand("scan", "Rodar radar do dia"),
+    BotCommand("scan_final", "Liberar mercados T-30"),
     BotCommand("ao_vivo", "Status dos jogos previstos"),
     BotCommand("resultados", "Resultados recentes"),
     BotCommand("metricas", "Performance do modelo"),
@@ -81,10 +86,17 @@ _ADMIN_COMMANDS = [
     BotCommand("ajuda", "Ver todos os comandos"),
 ]
 
+_DISCOVERY_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "run_market_discovery_training.py"
+_DISCOVERY_RUNS_DIR = Path(__file__).resolve().parents[1] / "data" / "discovery_runs"
+
 # Carregar chat_id salvo (se existir)
 if TELEGRAM_CHAT_ID:
     _chat_ids.add(int(TELEGRAM_CHAT_ID))
     _ADMIN_CHAT_IDS.add(int(TELEGRAM_CHAT_ID))
+for _cid in _db.telegram_chat_ids():
+    _chat_ids.add(int(_cid))
+for _cid in _ADMIN_CHAT_IDS:
+    _db.salvar_telegram_chat(_cid, is_admin=True)
 
 
 # ══════════════════════════════════════════════
@@ -103,6 +115,8 @@ def _teclado_menu(chat_id: int | None = None) -> InlineKeyboardMarkup:
     ]
     if _is_admin_chat(chat_id):
         botoes = [
+            [InlineKeyboardButton("🗓️ Radar do dia", callback_data="cmd_scan"),
+             InlineKeyboardButton("🚨 Liberação T-30", callback_data="cmd_scan_final")],
             [InlineKeyboardButton("🔍 Scan — Oportunidades", callback_data="cmd_scan"),
              InlineKeyboardButton("⚽ Ao Vivo", callback_data="cmd_ao_vivo")],
             [InlineKeyboardButton("📊 Resultados", callback_data="cmd_resultados"),
@@ -304,7 +318,8 @@ def _formatar_ajuda_html() -> str:
     return (
         "<b>Comandos do FuteBot</b>\n\n"
         "<b>Operacao</b>\n"
-        "- <code>/scan</code> - buscar oportunidades agora\n"
+        "- <code>/scan</code> - radar do dia, sem revelar mercados\n"
+        "- <code>/scan_final</code> - liberar mercados da janela T-30\n"
         "- <code>/ao_vivo</code> - acompanhar jogos previstos\n"
         "- <code>/resultados</code> - ver resultados recentes\n\n"
         "<b>Monitoramento</b>\n"
@@ -312,7 +327,10 @@ def _formatar_ajuda_html() -> str:
         "- <code>/metricas</code> - performance acumulada\n"
         "- <code>/saude</code> - guard rails e degradacao\n\n"
         "<b>Manutencao</b>\n"
-        "- <code>/treinar</code> - forcar retreino\n"
+        "- <code>/treinar</code> - retreino global\n"
+        "- <code>/treinar 135 over35</code> - retreino focal por liga\n"
+        "- <code>/treinar descoberta</code> - treino sequencial liga x mercado em background\n"
+        "- <code>/treinar descoberta 253 over15</code> - descoberta focada\n"
         "- <code>/app</code> - abrir mini app\n"
         "- <code>/bulk</code> - status do bulk download\n\n"
         "<b>Rotina automatica</b>\n"
@@ -362,6 +380,32 @@ def _salvar_chat_id(chat_id: int):
             f.write(content)
     except Exception as e:
         print(f"[Bot] Erro ao salvar chat_id: {e}")
+
+
+def _registrar_chat(chat_id: int, username: str = None, first_name: str = None):
+    """Persiste qualquer chat conhecido; admin segue salvo tambem no .env."""
+    _chat_ids.add(int(chat_id))
+    _db.salvar_telegram_chat(
+        int(chat_id),
+        is_admin=_is_admin_chat(chat_id),
+        username=username,
+        first_name=first_name,
+    )
+    if _is_admin_chat(chat_id):
+        _salvar_chat_id(int(chat_id))
+
+
+def _registrar_update(update: Update):
+    """Registra chat e remetente sempre que houver interacao com o bot."""
+    chat = getattr(update, "effective_chat", None)
+    if not chat:
+        return
+    user = getattr(update, "effective_user", None)
+    _registrar_chat(
+        int(chat.id),
+        username=getattr(user, "username", None),
+        first_name=getattr(user, "first_name", None),
+    )
 
 
 # ══════════════════════════════════════════════
@@ -415,14 +459,145 @@ async def enviar_mensagem(texto: str, chat_id: int = None):
                 print(f"[Bot] Erro ao enviar para {cid}: {e2}")
 
 
+def _quebrar_texto(texto: str, limite: int = 3800) -> list[str]:
+    """Divide mensagem longa em blocos seguros para o Telegram."""
+    if len(texto) <= limite:
+        return [texto]
+
+    partes = []
+    atual = []
+    tamanho = 0
+    for linha in texto.splitlines():
+        extra = len(linha) + 1
+        if atual and tamanho + extra > limite:
+            partes.append("\n".join(atual).strip())
+            atual = [linha]
+            tamanho = extra
+        else:
+            atual.append(linha)
+            tamanho += extra
+    if atual:
+        partes.append("\n".join(atual).strip())
+    return partes
+
+
+def _formatar_scan_publico_html(data: str = None) -> list[str]:
+    """Monta o scan vigente do dia a partir do lote salvo no banco."""
+    from collections import defaultdict
+
+    data = data or datetime.now().strftime("%Y-%m-%d")
+    tips = _db.predictions_por_data(data)
+    combos = _db.combos_por_data(data)
+    data_br = Scanner._data_br(data)
+
+    aviso = (
+        "<b>Comunicado do FuteBot</b>\n"
+        "Hoje o bot exibiu inconsistencias em parte das mensagens de scan.\n"
+        "O problema foi corrigido, o lote invalido foi limpo e este eh o reenvio do scan valido de "
+        f"{data_br}.\n\n"
+        "Desculpa pelo ruido."
+    )
+
+    if not tips:
+        return [aviso, f"<b>Scan do dia {data_br}</b>\nNenhuma tip aprovada no lote atual."]
+
+    por_liga = defaultdict(lambda: defaultdict(list))
+    for tip in tips:
+        por_liga[tip.get("league_name") or f"Liga {tip.get('league_id', '?')}"][tip["fixture_id"]].append(tip)
+
+    blocos = [aviso]
+    header = [
+        f"<b>Scan validado do dia {data_br}</b>",
+        f"- Tips aprovadas: {len(tips)}",
+    ]
+    blocos.append("\n".join(header))
+
+    for nome_liga in sorted(por_liga):
+        linhas = [f"<b>{nome_liga}</b>"]
+        fixtures_ordenados = sorted(
+            por_liga[nome_liga].items(),
+            key=lambda item: item[1][0].get("fixture_date") or item[1][0].get("date") or "",
+        )
+        for _, fix_tips in fixtures_ordenados:
+            fix_tips.sort(key=lambda item: item.get("prob_modelo") or 0, reverse=True)
+            primeira = fix_tips[0]
+            horario = Scanner._horario_local(primeira.get("fixture_date") or primeira.get("date"))
+            agenda = f" ({horario})" if horario else ""
+            linhas.append(
+                f"\n<code>{primeira.get('home_name', '?')}</code> <b>x</b> "
+                f"<code>{primeira.get('away_name', '?')}</code>{agenda}"
+            )
+            for tip in fix_tips:
+                detalhes = [f"Conf {(tip.get('prob_modelo') or 0):.0%}"]
+                odd = tip.get("odd_usada")
+                ev = tip.get("ev_percent")
+                if odd and odd > 1:
+                    detalhes.append(f"Odd {odd:.2f}")
+                if ev is not None:
+                    detalhes.append(f"EV {ev:+.1f}%")
+                if tip.get("bookmaker"):
+                    detalhes.append(tip["bookmaker"])
+                linhas.append(f"• <b>{tip.get('mercado')}</b>")
+                linhas.append(f"  <i>{' | '.join(detalhes)}</i>")
+        blocos.extend(_quebrar_texto("\n".join(linhas).strip()))
+
+    if combos:
+        linhas_combo = [f"<b>Combos do dia {data_br}</b>"]
+        for idx, combo in enumerate(combos, start=1):
+            tipo = "Dupla" if combo.get("combo_type") == "dupla" else "Tripla"
+            linhas_combo.append(f"\n<b>{tipo} #{idx}</b> | Conf composta {(combo.get('prob_composta') or 0):.0%}")
+            for item in combo.get("items", []):
+                linhas_combo.append(
+                    f"• <code>{item.get('home_name', '?')}</code> <b>x</b> "
+                    f"<code>{item.get('away_name', '?')}</code>"
+                )
+                linhas_combo.append(
+                    f"  <i>{item.get('mercado')} | {(item.get('prob_modelo') or 0):.0%}</i>"
+                )
+        blocos.extend(_quebrar_texto("\n".join(linhas_combo).strip()))
+
+    return blocos
+
+
+async def broadcast_scan_publico(data: str = None) -> dict:
+    """Envia o scan validado do dia para todos os chats persistidos."""
+    destinos = sorted(set(_db.telegram_chat_ids()))
+    if not destinos:
+        return {"destinatarios": 0, "entregues": 0, "falhas": []}
+
+    bot = Bot(token=TELEGRAM_TOKEN)
+    blocos = _formatar_scan_publico_html(data=data)
+    entregues = 0
+    falhas = []
+
+    for chat_id in destinos:
+        try:
+            for bloco in blocos:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=bloco,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+            entregues += 1
+        except Exception as exc:
+            falhas.append({"chat_id": chat_id, "erro": str(exc)})
+
+    return {
+        "destinatarios": len(destinos),
+        "entregues": entregues,
+        "falhas": falhas,
+    }
+
+
 # ══════════════════════════════════════════════
 #  HANDLERS DE COMANDOS
 # ══════════════════════════════════════════════
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Registra o chat e mostra boas-vindas com menu de botoes."""
+    _registrar_update(update)
     chat_id = update.effective_chat.id
-    _salvar_chat_id(chat_id)
 
     try:
         await _configurar_menu(context.bot, chat_id=chat_id)
@@ -434,20 +609,22 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Mostra status geral do bot."""
+    _registrar_update(update)
     if not await _garantir_admin_message(update.message):
         return
     await _reply_html(update.message, _formatar_status_html(), reply_markup=_botao_voltar())
 
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Executa o scanner de oportunidades manualmente."""
+    """Executa a pré-seleção do dia sem revelar mercados."""
+    _registrar_update(update)
     if not await _garantir_admin_message(update.message):
         return
-    await update.message.reply_text("🔍 Executando scanner... aguarde.")
+    await update.message.reply_text("🗓️ Executando radar do dia... aguarde.")
 
     try:
         scanner = Scanner(_db)
-        resultado = scanner.executar()
+        resultado = scanner.executar(mode="preselect")
         msgs = scanner.formatar_relatorio(resultado)
         # Envia cada bloco como mensagem separada (com botões ✏️ Odd)
         for i, (texto, botoes) in enumerate(msgs):
@@ -468,7 +645,36 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def cmd_scan_final(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Força a liberação final dos mercados na janela T-30."""
+    _registrar_update(update)
+    if not await _garantir_admin_message(update.message):
+        return
+    await update.message.reply_text("🚨 Rodando liberação final T-30... aguarde.")
+
+    try:
+        scanner = Scanner(_db)
+        resultado = scanner.liberar_mercados()
+        msgs = scanner.formatar_relatorio(resultado)
+        for i, (texto, botoes) in enumerate(msgs):
+            kb = None
+            if botoes:
+                kb = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(label, callback_data=cb)] for label, cb in botoes]
+                )
+            elif i == len(msgs) - 1:
+                kb = _botao_voltar()
+            await update.message.reply_text(
+                texto, parse_mode=ParseMode.HTML, reply_markup=kb
+            )
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Erro na liberação final:\n{e}", reply_markup=_botao_voltar()
+        )
+
+
 async def cmd_resultados(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    _registrar_update(update)
     """Mostra resultados de ontem."""
     await update.message.reply_text("📥 Coletando resultados...")
 
@@ -486,6 +692,7 @@ async def cmd_resultados(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_metricas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    _registrar_update(update)
     """Mostra métricas de performance do modelo (HTML para suportar nomes com _)."""
     if not await _garantir_admin_message(update.message):
         return
@@ -497,17 +704,93 @@ async def cmd_metricas(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_treinar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Força retreino via AutoTuner (Optuna + strategy slicing)."""
+    _registrar_update(update)
+    """Força retreino via AutoTuner (global ou focal por liga)."""
     if not await _garantir_admin_message(update.message):
         return
-    await update.message.reply_text(
-        "🧠 Iniciando AutoTuner... Optuna (50 trials) + strategy slicing.\n"
-        "Isso pode demorar ~30-60 min. Você receberá o resultado aqui."
-    )
+
+    league_id = None
+    mercado = None
+    n_trials = None
+    if context.args:
+        if context.args[0].lower() == "descoberta":
+            args = context.args[1:]
+            league_ids = []
+            markets = []
+
+            if args:
+                try:
+                    league_ids.append(int(args[0]))
+                    args = args[1:]
+                except ValueError:
+                    league_ids = []
+            if args:
+                mercados_validos = {item.market_id for item in MARKET_SPECS}
+                markets = [item for item in args if item in mercados_validos]
+
+            _DISCOVERY_RUNS_DIR.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_path = _DISCOVERY_RUNS_DIR / f"run_{stamp}.log"
+            command = [sys.executable, str(_DISCOVERY_SCRIPT)]
+            if league_ids:
+                command.extend(["--league-ids", ",".join(str(item) for item in league_ids)])
+            if markets:
+                command.extend(["--markets", ",".join(markets)])
+
+            with open(log_path, "a", encoding="utf-8") as log_file:
+                subprocess.Popen(
+                    command,
+                    cwd=str(Path(__file__).resolve().parents[1]),
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                )
+
+            detalhe = []
+            if league_ids:
+                detalhe.append(f"liga(s): {', '.join(str(x) for x in league_ids)}")
+            if markets:
+                detalhe.append(f"mercado(s): {', '.join(markets)}")
+            alvo = "\n".join(f"- {item}" for item in detalhe) if detalhe else "- todas as ligas\n- todos os mercados"
+
+            await update.message.reply_text(
+                "🧠 Treino por descoberta iniciado em background.\n"
+                "Fluxo: liga por liga, mercado por mercado, com resumo por etapa no log.\n"
+                f"{alvo}\n\n"
+                f"Log: <code>{log_path}</code>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=_botao_voltar(),
+            )
+            return
+        try:
+            league_id = int(context.args[0])
+            mercado = context.args[1] if len(context.args) > 1 else None
+            n_trials = 8
+            detalhe = f" da liga {league_id}"
+            if mercado:
+                detalhe += f" para revisar o slice {mercado}"
+            await update.message.reply_text(
+                "🧠 Iniciando retreino focal"
+                f"{detalhe}.\n"
+                "Modo leve para VPS: AutoTuner só dessa liga, com menos trials.\n"
+                "As strategies da liga serão regeneradas sem mexer nas outras."
+            )
+        except ValueError:
+            await update.message.reply_text(
+                "Uso: /treinar ou /treinar <league_id> [mercado]"
+            )
+            return
+    else:
+        await update.message.reply_text(
+            "🧠 Iniciando AutoTuner global... Optuna + strategy slicing.\n"
+            "Isso pode demorar ~30-60 min. Você receberá o resultado aqui."
+        )
 
     try:
         tuner = AutoTuner(_db)
-        resultado = tuner.executar()
+        resultado = tuner.executar(
+            league_ids=[league_id] if league_id else None,
+            n_trials=n_trials,
+        )
         msg = AutoTuner.formatar_resultado(resultado)
         await update.message.reply_text(
             msg, parse_mode=ParseMode.HTML, reply_markup=_botao_voltar()
@@ -520,6 +803,7 @@ async def cmd_treinar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_bulk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    _registrar_update(update)
     """Status do bulk download."""
     if not await _garantir_admin_message(update.message):
         return
@@ -527,6 +811,7 @@ async def cmd_bulk(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    _registrar_update(update)
     """Abre a mini app quando configurada."""
     if not MINI_APP_URL:
         await update.message.reply_text(
@@ -547,11 +832,13 @@ async def cmd_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    _registrar_update(update)
     """Lista todos os comandos."""
     await _reply_html(update.message, _formatar_ajuda_html(), reply_markup=_teclado_menu(update.effective_chat.id))
 
 
 async def cmd_saude(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    _registrar_update(update)
     """Mostra saúde do modelo (guard rails, degradação, calibração)."""
     if not await _garantir_admin_message(update.message):
         return
@@ -568,6 +855,7 @@ async def cmd_saude(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_ao_vivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    _registrar_update(update)
     """
     Verifica status dos jogos previstos hoje/ontem.
     Mostra quais já finalizaram (acertou/errou) e quais estão em andamento.
@@ -767,6 +1055,7 @@ async def _logica_ao_vivo() -> str:
 # Mapeamento callback_data → função handler correspondente
 _CALLBACK_MAP = {
     "cmd_scan": cmd_scan,
+    "cmd_scan_final": cmd_scan_final,
     "cmd_resultados": cmd_resultados,
     "cmd_metricas": cmd_metricas,
     "cmd_saude": cmd_saude,
@@ -779,6 +1068,7 @@ _CALLBACK_MAP = {
 
 
 async def _callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    _registrar_update(update)
     """
     Handler central para todos os botões inline.
     Roteia o callback_data para o handler correto.
@@ -833,9 +1123,23 @@ async def _executar_via_callback(query, handler_fn, context):
 
     try:
         if handler_fn == cmd_scan:
-            await query.message.reply_text("🔍 Executando scanner... aguarde.")
+            await query.message.reply_text("🗓️ Executando radar do dia... aguarde.")
             scanner = Scanner(_db)
-            resultado = scanner.executar()
+            resultado = scanner.executar(mode="preselect")
+            msgs = scanner.formatar_relatorio(resultado)
+            for i, (texto, botoes) in enumerate(msgs):
+                kb = None
+                if botoes:
+                    kb = InlineKeyboardMarkup(
+                        [[InlineKeyboardButton(label, callback_data=cb)] for label, cb in botoes]
+                    )
+                elif i == len(msgs) - 1:
+                    kb = _botao_voltar()
+                await query.message.reply_text(texto, parse_mode=ParseMode.HTML, reply_markup=kb)
+        elif handler_fn == cmd_scan_final:
+            await query.message.reply_text("🚨 Rodando liberação final T-30... aguarde.")
+            scanner = Scanner(_db)
+            resultado = scanner.liberar_mercados()
             msgs = scanner.formatar_relatorio(resultado)
             for i, (texto, botoes) in enumerate(msgs):
                 kb = None
@@ -947,6 +1251,7 @@ def criar_bot() -> Application:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("scan", cmd_scan))
+    app.add_handler(CommandHandler("scan_final", cmd_scan_final))
     app.add_handler(CommandHandler("ao_vivo", cmd_ao_vivo))
     app.add_handler(CommandHandler("resultados", cmd_resultados))
     app.add_handler(CommandHandler("metricas", cmd_metricas))

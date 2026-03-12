@@ -22,10 +22,12 @@ Uso:
   resultado = scanner.executar()           # Pipeline completo
 """
 
+import json
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
+from zoneinfo import ZoneInfo
 from config import LEAGUES, TIMEZONE, TELEGRAM_CHAT_ID
-from config import ROI_PAUSE_THRESHOLD, ROI_PAUSE_MIN_BETS, LLM_MIN_EV_FOR_REVIEW
+from config import ROI_PAUSE_THRESHOLD, ROI_PAUSE_MIN_BETS, DEGRADATION_ACC_MIN
 from config import ODDS_SPORTS_MAP, PREFERRED_BOOKMAKER, PREFERRED_BOOKMAKER_LABEL
 from data.database import Database
 from services.apifootball import raw_request
@@ -124,6 +126,11 @@ COMBO_DUPLAS_MAX = 3
 COMBO_TRIPLAS_MAX = 3
 COMBO_PROB_MIN = 0.50         # Confiança composta mínima (produto das probs)
 COMBO_TIP_PROB_MIN = 0.70     # Prob mínima individual para entrar em combo
+PRESELECT_MAX_JOGOS = 18
+RELEASE_LOOKAHEAD_MINUTES = 30
+RELEASE_WINDOW_MINUTES = 45
+STRATEGY_EPSILON = 0.001
+STRATEGY_RELAX_PCT = 0.05
 
 
 # ──────────────────────────────────────────────
@@ -154,6 +161,52 @@ _MERCADO_ODDS_MAP = {
 }
 
 
+_STRATEGY_FEATURE_ALIASES = {
+    # Compatibilidade entre strategies do discovery (FeatureExtractor)
+    # e runtime do Predictor (FeatureFactory com features dinâmicas).
+    "home_goals_for_avg": "home_gf_5",
+    "home_goals_against_avg": "home_ga_5",
+    "away_goals_for_avg": "away_gf_5",
+    "away_goals_against_avg": "away_ga_5",
+    "home_goals_for_home": "home_gf_mando",
+    "home_goals_against_home": "home_ga_mando",
+    "away_goals_for_away": "away_gf_mando",
+    "away_goals_against_away": "away_ga_mando",
+    "home_clean_sheet_pct": "home_cs_5",
+    "away_clean_sheet_pct": "away_cs_5",
+    "home_failed_score_pct": "home_fts_5",
+    "away_failed_score_pct": "away_fts_5",
+    "home_btts_pct": "home_btts_5",
+    "away_btts_pct": "away_btts_5",
+    "home_over15_pct": "home_over15_5",
+    "away_over15_pct": "away_over15_5",
+    "home_over25_pct": "home_over25_5",
+    "away_over25_pct": "away_over25_5",
+    "home_over35_pct": "home_over35_5",
+    "away_over35_pct": "away_over35_5",
+    "home_xg_avg": "home_xg_5",
+    "away_xg_avg": "away_xg_5",
+    "home_shots_avg": "home_shots_5",
+    "away_shots_avg": "away_shots_5",
+    "home_shots_on_avg": "home_shots_on_5",
+    "away_shots_on_avg": "away_shots_on_5",
+    "home_possession_avg": "home_poss_5",
+    "away_possession_avg": "away_poss_5",
+    "home_corners_avg": "home_corners_5",
+    "away_corners_avg": "away_corners_5",
+    "home_yellows_avg": "home_yellows_5",
+    "away_yellows_avg": "away_yellows_5",
+    "home_fouls_avg": "home_fouls_5",
+    "away_fouls_avg": "away_fouls_5",
+    "home_goals_ht_avg": "home_goals_ht_5",
+    "away_goals_ht_avg": "away_goals_ht_5",
+    "h2h_total_jogos": "h2h_total",
+    "ref_yellows_avg": "ref_yellows",
+    "ref_fouls_avg": "ref_fouls",
+    "ref_total_jogos": "ref_jogos",
+}
+
+
 class Scanner:
     """Pipeline diário: scan → predict → strategy gate → LLM → Telegram."""
 
@@ -168,7 +221,7 @@ class Scanner:
         else:
             print("[Scanner] ⚠️ Sem estratégias — emitindo tips por confiança do modelo")
 
-    def executar(self, data: str = None, dias_adiante: int = 0) -> dict:
+    def executar(self, data: str = None, dias_adiante: int = 0, mode: str = "preselect") -> dict:
         """
         Executa o pipeline completo para uma data (ou apenas hoje).
 
@@ -181,7 +234,7 @@ class Scanner:
         if data is None:
             data = datetime.now().strftime("%Y-%m-%d")
 
-        print(f"🔍 Scanner iniciando para {data} (+{dias_adiante} dias)")
+        print(f"🔍 Scanner iniciando para {data} (+{dias_adiante} dias) [{mode}]")
 
         # ─── GUARD RAIL: Auto-pause se modelo está degradando ───
         pausado, motivo_pausa = self._verificar_auto_pause()
@@ -274,37 +327,105 @@ class Scanner:
                 "oportunidades": [], "ev_positivas": [], "data": data,
             }
 
-        # ─── ETAPA 5: Enriquecer com odds de referência + EV ───
-        print(f"\n📊 Etapa 5: Odds de referência + EV ({len(tips_gate)} tips)...")
-        tips_enriquecidas = self._enriquecer_odds(tips_gate)
+        if mode == "preselect":
+            return self._finalizar_preselecao(
+                data=data,
+                fixtures=fixtures,
+                previsoes=previsoes,
+                tips_raw=tips_raw,
+                tips_gate=tips_gate,
+                tips_brutas=tips_brutas,
+                tips_pos_filtros=tips_pos_filtros,
+            )
 
+        return self.liberar_mercados(
+            data=data,
+            reference_time=None,
+            tips_override=tips_gate,
+            base_result={
+                "fixtures": len(fixtures),
+                "previsoes": len(previsoes),
+                "tips_brutas": tips_brutas,
+                "tips_pos_filtros": tips_pos_filtros,
+            },
+        )
+
+    def liberar_mercados(
+        self,
+        data: str = None,
+        reference_time: datetime = None,
+        tips_override: list[dict] = None,
+        base_result: dict = None,
+        test_mode: bool = False,
+    ) -> dict:
+        """Libera mercados perto do jogo, após odds + Gemini + DeepSeek."""
+        if data is None:
+            data = datetime.now().strftime("%Y-%m-%d")
+        reference_time = reference_time or datetime.now(ZoneInfo(TIMEZONE))
+
+        if tips_override is None:
+            candidatos = self.db.candidatos_por_data(data, status="pending")
+            tips_base = [item.get("payload", {}) for item in candidatos]
+        else:
+            candidatos = []
+            tips_base = list(tips_override)
+
+        if base_result:
+            base_result = dict(base_result)
+        else:
+            fixture_ids = {
+                tip.get("fixture_id")
+                for tip in tips_base
+                if tip.get("fixture_id") is not None
+            }
+            base_result = {
+                "fixtures": len(fixture_ids),
+                "previsoes": len(fixture_ids),
+                "tips_brutas": len(tips_base),
+                "tips_pos_filtros": len(tips_base),
+            }
+
+        tips_janela = self._filtrar_janela_liberacao(tips_base, reference_time, test_mode=test_mode)
+        print(f"\n⏳ Etapa 5: Janela T-30 -> {len(tips_janela)} mercado(s) elegível(is)")
+
+        if not tips_janela:
+            return {
+                **base_result,
+                "tips_bloqueadas_ev": 0,
+                "tips_enviadas_llm": 0,
+                "tips_aprovadas_llm": 0,
+                "tips_rejeitadas_llm": [],
+                "tips_aprovadas": 0,
+                "ev_positivas": [],
+                "combos": [],
+                "data": data,
+                "mode": "release",
+                "preselecionados": [],
+                "release_reference": reference_time.isoformat(),
+            }
+
+        print(f"\n📊 Etapa 6: Odds de referência + EV ({len(tips_janela)} tips)...")
+        tips_enriquecidas = self._enriquecer_odds(tips_janela)
         bloqueadas_por_ev = 0
-        tips_revisao = []
-        for tip in tips_enriquecidas:
-            ev = tip.get("ev_percent")
-            if ev is not None and ev < LLM_MIN_EV_FOR_REVIEW:
-                bloqueadas_por_ev += 1
-                tip["llm_validacao"] = {
-                    "decisao": "REJECT",
-                    "confianca": 0.95,
-                    "motivo": f"EV abaixo do minimo configurado ({ev:+.1f}% < {LLM_MIN_EV_FOR_REVIEW:.1f}%).",
-                }
-                continue
-            tips_revisao.append(tip)
+        tips_revisao = tips_enriquecidas
 
-        if bloqueadas_por_ev:
-            print(f"   🚫 {bloqueadas_por_ev} tips bloqueadas por EV abaixo de {LLM_MIN_EV_FOR_REVIEW:.1f}%")
-
-        # ─── ETAPA 6: Validação LLM (DeepSeek) com odds/EV ───
         if tips_revisao and self.llm.ativo:
-            print(f"\n🤖 Etapa 6: Validação DeepSeek ({len(tips_revisao)} tips)...")
+            print(f"\n🤖 Etapa 7: Validação DeepSeek ({len(tips_revisao)} tips)...")
             tips_aprovadas = self.llm.validar_lote(tips_revisao)
             print(f"   Aprovadas pelo DeepSeek: {len(tips_aprovadas)}")
         else:
             tips_aprovadas = tips_revisao
 
-        tips_aprovadas = self._aplicar_preferencias_usuario(tips_aprovadas)
+        tips_rejeitadas_llm = [
+            tip for tip in tips_revisao
+            if (tip.get("llm_validacao") or {}).get("decisao") == "REJECT"
+        ]
+        tips_aprovadas_llm = [
+            tip for tip in tips_revisao
+            if (tip.get("llm_validacao") or {}).get("decisao") == "APPROVE"
+        ]
 
+        tips_aprovadas = self._aplicar_preferencias_usuario(tips_aprovadas)
         tips_aprovadas.sort(
             key=lambda t: (
                 t.get("ev_percent") is not None,
@@ -313,17 +434,18 @@ class Scanner:
             ),
             reverse=True,
         )
-
-        # ─── ETAPA 6b: Limite total de tips por dia ───
         if len(tips_aprovadas) > MAX_TIPS_DIA:
             print(f"   ✂️ Cortando de {len(tips_aprovadas)} para {MAX_TIPS_DIA} tips (limite diário)")
             tips_aprovadas = tips_aprovadas[:MAX_TIPS_DIA]
 
-        # ─── ETAPA 7: Salvar no banco ───
-        print("\n💾 Etapa 7: Salvando tips aprovadas...")
+        print("\n💾 Etapa 8: Salvando tips liberadas...")
         _treino = self.db.ultimo_treino()
         versao_atual = _treino["modelo_versao"] if _treino else "v1"
         self.db.limpar_lote_scan(data)
+        finais = {(tip.get("fixture_id"), tip.get("mercado")) for tip in tips_aprovadas}
+        for tip in tips_revisao:
+            tip["approved_final"] = (tip.get("fixture_id"), tip.get("mercado")) in finais
+        self.db.salvar_scan_audit(data, tips_revisao)
 
         for tip in tips_aprovadas:
             self.db.salvar_prediction({
@@ -345,28 +467,41 @@ class Scanner:
                 "modelo_versao": versao_atual,
                 "features": tip.get("features", {}),
             })
-        print(f"   ✅ {len(tips_aprovadas)} tips salvas (modelo {versao_atual})")
 
-        # ─── ETAPA 8: Gerar combos (acumuladas sugeridas) ───
-        combos = self._gerar_combos(tips_aprovadas)
+        if candidatos:
+            status_map = {
+                item["id"]: (
+                    "released"
+                    if (item.get("fixture_id"), item.get("mercado")) in finais else
+                    "rejected"
+                )
+                for item in candidatos
+            }
+            for status in ("released", "rejected"):
+                ids = [cid for cid, value in status_map.items() if value == status]
+                self.db.atualizar_status_candidatos(ids, status)
+
+        combos = self._gerar_combos_por_janela(tips_aprovadas)
         if combos:
-            print(f"\n🎰 Etapa 8: {len(combos)} combos gerados")
+            print(f"\n🎰 Etapa 9: {len(combos)} combos gerados")
             for combo in combos:
                 combo_payload = dict(combo)
                 combo_payload["date"] = data
                 self.db.salvar_combo(combo_payload)
 
         return {
-            "fixtures": len(fixtures),
-            "previsoes": len(previsoes),
-            "tips_brutas": tips_brutas,
-            "tips_pos_filtros": tips_pos_filtros,
+            **base_result,
             "tips_bloqueadas_ev": bloqueadas_por_ev,
             "tips_enviadas_llm": len(tips_revisao),
-            "oportunidades": tips_raw,
+            "tips_aprovadas_llm": len(tips_aprovadas_llm),
+            "tips_rejeitadas_llm": tips_rejeitadas_llm,
+            "tips_aprovadas": len(tips_aprovadas),
             "ev_positivas": tips_aprovadas,
             "combos": combos,
             "data": data,
+            "mode": "release",
+            "preselecionados": [],
+            "release_reference": reference_time.isoformat(),
         }
 
     # ══════════════════════════════════════════════
@@ -394,6 +529,139 @@ class Scanner:
             all_fixtures.extend(nossas)
 
         return all_fixtures
+
+    def _finalizar_preselecao(
+        self,
+        data: str,
+        fixtures: list[dict],
+        previsoes: list[dict],
+        tips_raw: list[dict],
+        tips_gate: list[dict],
+        tips_brutas: int,
+        tips_pos_filtros: int,
+    ) -> dict:
+        """Salva candidatos da manhã e devolve só os jogos pré-selecionados."""
+        candidatos = self._reduzir_para_jogos(tips_gate)
+        self.db.limpar_lote_scan(data)
+        self.db.salvar_scan_candidates(data, candidatos)
+        print(f"\n🗂️ Etapa 5: {len(candidatos)} jogo(s) pré-selecionado(s) para revisão T-30")
+        return {
+            "fixtures": len(fixtures),
+            "previsoes": len(previsoes),
+            "tips_brutas": tips_brutas,
+            "tips_pos_filtros": tips_pos_filtros,
+            "tips_bloqueadas_ev": 0,
+            "tips_enviadas_llm": 0,
+            "tips_aprovadas_llm": 0,
+            "tips_rejeitadas_llm": [],
+            "oportunidades": tips_raw,
+            "ev_positivas": [],
+            "combos": [],
+            "data": data,
+            "mode": "preselect",
+            "preselecionados": candidatos,
+        }
+
+    def _reduzir_para_jogos(self, tips: list[dict]) -> list[dict]:
+        """Escolhe os melhores candidatos por jogo para revisão posterior."""
+        por_fixture: dict[int, list[dict]] = {}
+        for tip in tips:
+            por_fixture.setdefault(tip.get("fixture_id"), []).append(tip)
+
+        candidatos = []
+        for _, grupo in por_fixture.items():
+            grupo.sort(key=lambda item: item.get("prob_modelo", 0), reverse=True)
+            melhores = grupo[: min(3, len(grupo))]
+            kickoff = melhores[0].get("date", "")
+            release_group = self._release_group(kickoff)
+            for tip in melhores:
+                novo = dict(tip)
+                novo["candidate_status"] = "pending"
+                novo["release_group"] = release_group
+                candidatos.append(novo)
+
+        candidatos.sort(
+            key=lambda item: (
+                item.get("prob_modelo", 0),
+                item.get("date", ""),
+            ),
+            reverse=True,
+        )
+        vistos = set()
+        jogos = []
+        for item in candidatos:
+            fid = item.get("fixture_id")
+            if fid in vistos:
+                jogos.append(item)
+                continue
+            vistos.add(fid)
+            jogos.append(item)
+            if len(vistos) >= PRESELECT_MAX_JOGOS:
+                break
+        allowed = {item.get("fixture_id") for item in jogos}
+        return [item for item in candidatos if item.get("fixture_id") in allowed]
+
+    def _filtrar_janela_liberacao(
+        self,
+        tips: list[dict],
+        reference_time: datetime,
+        test_mode: bool = False,
+    ) -> list[dict]:
+        """Seleciona candidatos cuja partida começa em cerca de 30 minutos."""
+        if test_mode:
+            return list(tips)
+        escolhidas = []
+        for tip in tips:
+            kickoff = self._parse_fixture_datetime(tip.get("date"))
+            if kickoff is None:
+                continue
+            delta = (kickoff - reference_time).total_seconds() / 60
+            if RELEASE_LOOKAHEAD_MINUTES - RELEASE_WINDOW_MINUTES <= delta <= RELEASE_LOOKAHEAD_MINUTES + RELEASE_WINDOW_MINUTES:
+                escolhidas.append(tip)
+        return escolhidas
+
+    def _gerar_combos_por_janela(self, tips: list[dict]) -> list[dict]:
+        """Gera combos apenas entre jogos com horários próximos."""
+        if not tips:
+            return []
+        tips_validas = []
+        for tip in tips:
+            kickoff = self._parse_fixture_datetime(tip.get("date"))
+            if kickoff is None:
+                continue
+            novo = dict(tip)
+            novo["_kickoff"] = kickoff
+            tips_validas.append(novo)
+
+        combos = self._gerar_combos(tips_validas)
+        combos_validos = []
+        for combo in combos:
+            horarios = sorted(item["_kickoff"] for item in combo["tips"])
+            if not horarios:
+                continue
+            janela = (horarios[-1] - horarios[0]).total_seconds() / 60
+            if janela <= RELEASE_WINDOW_MINUTES:
+                for item in combo["tips"]:
+                    item.pop("_kickoff", None)
+                combos_validos.append(combo)
+        return combos_validos
+
+    @staticmethod
+    def _parse_fixture_datetime(date_str: str) -> Optional[datetime]:
+        if not date_str:
+            return None
+        try:
+            dt_obj = datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
+            return dt_obj.astimezone(ZoneInfo(TIMEZONE))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _release_group(date_str: str) -> str:
+        kickoff = Scanner._parse_fixture_datetime(date_str)
+        if kickoff is None:
+            return ""
+        return kickoff.strftime("%Y-%m-%d %H:%M")
 
     # ══════════════════════════════════════════════
     #  ETAPA 2 (fallback): Previsões via API-Football
@@ -615,11 +883,57 @@ class Scanner:
 
         # Verificar se alguma estratégia cobre a faixa de confiança
         for s in relevantes:
-            if s["conf_min"] <= prob < s["conf_max"]:
+            if s["conf_min"] <= prob < s["conf_max"] and self._strategy_rule_match(s, tip):
                 return True  # Estratégia ativa encontrada — tip aprovada
 
         # Confiança fora de qualquer faixa ativa — bloquear
         return False
+
+    def _strategy_rule_match(self, strategy: dict, tip: dict) -> bool:
+        """Aplica condições extras da strategy sobre as features do jogo."""
+        params_raw = strategy.get("params_json") or strategy.get("params")
+        if not params_raw:
+            return True
+
+        if isinstance(params_raw, str):
+            try:
+                params = json.loads(params_raw)
+            except json.JSONDecodeError:
+                return True
+        else:
+            params = params_raw
+
+        conditions = params.get("conditions") or []
+        if not conditions:
+            return True
+
+        features = dict(tip.get("features") or {})
+        features["model_prob"] = float(tip.get("prob_modelo", 0) or 0)
+
+        for feature, op, threshold in conditions:
+            runtime_feature = _STRATEGY_FEATURE_ALIASES.get(feature, feature)
+            raw_value = features.get(runtime_feature)
+            if raw_value is None and runtime_feature != feature:
+                raw_value = features.get(feature)
+            value = float(raw_value or 0)
+            limit = float(threshold)
+            if op == ">=" and value < self._strategy_relaxed_limit(limit, op, runtime_feature):
+                return False
+            if op == "<=" and value > self._strategy_relaxed_limit(limit, op, runtime_feature):
+                return False
+        return True
+
+    def _strategy_relaxed_limit(self, threshold: float, op: str, feature: str) -> float:
+        """Aplica tolerância numérica e uma folga leve nas condições das strategies."""
+        if feature == "model_prob":
+            relax = min(0.01, threshold * 0.01)
+        else:
+            relax = max(STRATEGY_EPSILON, abs(threshold) * STRATEGY_RELAX_PCT)
+        if op == ">=":
+            return threshold - relax
+        if op == "<=":
+            return threshold + relax
+        return threshold
 
     # ══════════════════════════════════════════════
     #  ETAPA 6: Enriquecer tips com odds Pinnacle + EV
@@ -929,40 +1243,36 @@ class Scanner:
         ignorando histórico de modelos anteriores. Isso garante que
         após retreino, o scanner "reseta" sem arrastar ruído antigo.
 
-        Critérios de pausa (precisa de dados suficientes):
-          1. ROI acumulado < ROI_PAUSE_THRESHOLD (-15%)
-          2. Mínimo de ROI_PAUSE_MIN_BETS previsões resolvidas
+        Em vez de pausar o bot inteiro, coloca em quarentena apenas
+        slices liga × mercado degradados.
 
-        Retorna (pausado: bool, motivo: str).
+        Retorna (pausado: bool, motivo: str) por compatibilidade.
         """
-        # Obter versão do modelo ativo para filtrar
         treino = self.db.ultimo_treino()
         versao = treino["modelo_versao"] if treino else None
-
-        metricas = self.db.metricas_modelo(modelo_versao=versao)
-        total = metricas.get("total", 0)
-
-        # Não pausar se não tiver dados suficientes para julgar
-        if total < ROI_PAUSE_MIN_BETS:
+        slices_ruins = self.db.slices_degradados(
+            modelo_versao=versao,
+            min_amostras=max(5, ROI_PAUSE_MIN_BETS // 4),
+            roi_threshold=ROI_PAUSE_THRESHOLD,
+            acc_threshold=DEGRADATION_ACC_MIN * 100,
+        )
+        if not slices_ruins:
             return False, ""
 
-        roi = metricas.get("roi", 0)
-        accuracy = metricas.get("accuracy", 0)
+        desativados = []
+        for item in slices_ruins:
+            alteradas = self.db.desativar_strategia_slice(item["league_id"], item["mercado"])
+            if alteradas > 0:
+                desativados.append(item)
 
-        # Critério principal: ROI muito negativo
-        if roi < ROI_PAUSE_THRESHOLD:
-            return True, (
-                f"ROI acumulado ({roi:+.1f}%) abaixo do limiar ({ROI_PAUSE_THRESHOLD}%). "
-                f"Accuracy: {accuracy}% em {total} previsões (modelo {versao or 'v1'})."
+        if desativados:
+            self._strategies = self.db.strategies_ativas()
+            resumo = ", ".join(
+                f"L{item['league_id']}:{item['mercado']}"
+                for item in desativados[:4]
             )
-
-        # Critério secundário: accuracy abaixo de chute aleatório (33% para 1x2)
-        if accuracy < 30 and total >= ROI_PAUSE_MIN_BETS:
-            return True, (
-                f"Accuracy ({accuracy}%) abaixo de chute aleatório (33%). "
-                f"ROI: {roi:+.1f}% em {total} previsões (modelo {versao or 'v1'})."
-            )
-
+            extra = "..." if len(desativados) > 4 else ""
+            print(f"   🛡️ Quarentena seletiva: {len(desativados)} slice(s) desativados ({resumo}{extra})")
         return False, ""
 
     # ══════════════════════════════════════════════
@@ -1028,26 +1338,58 @@ class Scanner:
         data_raw = resultado.get("data", "hoje")
         data_br = self._data_br(data_raw)
         msgs: list[tuple[str, list]] = []
+        mode = resultado.get("mode", "release")
+
+        if mode == "preselect":
+            candidatos = resultado.get("preselecionados", [])
+            header = "\n".join([
+                f"<b>🗓️ Radar do dia {data_br}</b>",
+                f"• Jogos analisados: <b>{resultado['fixtures']}</b>",
+                f"• Jogos com previsão: <b>{resultado['previsoes']}</b>",
+                f"• Mercados candidatos: <b>{resultado.get('tips_brutas', 0)}</b>",
+                f"• Após filtros internos: <b>{resultado.get('tips_pos_filtros', 0)}</b>",
+                f"• Jogos pré-selecionados: <b>{len({tip.get('fixture_id') for tip in candidatos})}</b>",
+                "",
+                "ℹ️ Os mercados ficam ocultos agora.",
+                "⏳ A liberação final acontece 30 min antes do jogo.",
+            ])
+            msgs.append((header, []))
+            por_liga = defaultdict(dict)
+            for tip in candidatos:
+                por_liga[tip.get("league_id", 0)][tip.get("fixture_id")] = tip
+            for lid in sorted(por_liga.keys(), key=lambda item: _LEAGUE_NOME.get(item, f"Liga {item}")):
+                linhas = [f"<b>👀 {_LEAGUE_NOME.get(lid, f'Liga {lid}')}</b>"]
+                for tip in sorted(por_liga[lid].values(), key=lambda item: item.get("date", "")):
+                    horario = self._horario_local(tip.get("date", ""))
+                    linhas.append(
+                        f"• <code>{tip.get('home_name', '?')}</code> <b>x</b> <code>{tip.get('away_name', '?')}</code>"
+                        f" <i>({horario})</i>"
+                    )
+                msgs.append(("\n".join(linhas), []))
+            return msgs
 
         header_lines = [
-            f"<b>Tips do dia {data_br}</b>",
-            f"- Jogos analisados: {resultado['fixtures']}",
-            f"- Jogos com previsao: {resultado['previsoes']}",
+            f"<b>🚨 Liberação final {data_br}</b>",
+            f"• Jogos analisados: <b>{resultado['fixtures']}</b>",
+            f"• Jogos com previsão: <b>{resultado['previsoes']}</b>",
         ]
         if resultado.get("tips_brutas") is not None:
-            header_lines.append(f"- Mercados candidatos: {resultado['tips_brutas']}")
+            header_lines.append(f"• Mercados candidatos: <b>{resultado['tips_brutas']}</b>")
         if resultado.get("tips_pos_filtros") is not None:
-            header_lines.append(f"- Apos filtros internos: {resultado['tips_pos_filtros']}")
+            header_lines.append(f"• Após filtros internos: <b>{resultado['tips_pos_filtros']}</b>")
         if resultado.get("tips_bloqueadas_ev") is not None:
-            header_lines.append(f"- Bloqueadas por EV: {resultado['tips_bloqueadas_ev']}")
+            header_lines.append(f"• Bloqueadas por EV: <b>{resultado['tips_bloqueadas_ev']}</b>")
         if resultado.get("tips_enviadas_llm") is not None:
-            header_lines.append(f"- Enviadas ao DeepSeek: {resultado['tips_enviadas_llm']}")
+            header_lines.append(f"• Enviadas ao DeepSeek: <b>{resultado['tips_enviadas_llm']}</b>")
+        if resultado.get("tips_aprovadas_llm") is not None:
+            rejeitadas = len(resultado.get("tips_rejeitadas_llm", []))
+            header_lines.append(f"• DeepSeek: <b>{resultado['tips_aprovadas_llm']}</b> aprovadas | <b>{rejeitadas}</b> rejeitadas")
         header = "\n".join(header_lines)
 
         if not tips:
-            return [(header + "\n- Nenhuma tip aprovada hoje.", [])]
+            return [(header + "\n\n<i>Nenhum mercado liberado nesta janela.</i>", [])]
 
-        msgs.append((header + f"\n- Tips aprovadas: {len(tips)}", []))
+        msgs.append((header + f"\n• Mercados liberados: <b>{len(tips)}</b>", []))
 
         por_liga = defaultdict(lambda: defaultdict(list))
         for tip in tips:
@@ -1082,7 +1424,7 @@ class Scanner:
                 agenda_txt = f" ({' | '.join(agenda)})" if agenda else ""
 
                 linhas.append(
-                    f"\n<code>{primeira.get('home_name', '?')}</code> <b>x</b> "
+                    f"\n🏟️ <code>{primeira.get('home_name', '?')}</code> <b>x</b> "
                     f"<code>{primeira.get('away_name', '?')}</code>{agenda_txt}"
                 )
 
@@ -1111,10 +1453,10 @@ class Scanner:
 
         combos = resultado.get("combos", [])
         if combos:
-            linhas_combo = ["<b>Combos sugeridos</b>"]
+            linhas_combo = ["<b>🎰 Combos liberados</b>"]
             for i, combo in enumerate(combos, 1):
                 tipo_label = "Dupla" if combo["tipo"] == "dupla" else "Tripla"
-                linhas_combo.append(f"\n<b>{tipo_label} #{i}</b> | Conf composta {combo['prob_composta']:.0%}")
+                linhas_combo.append(f"\n<b>{tipo_label} #{i}</b> | 🔗 Conf composta {combo['prob_composta']:.0%}")
                 for t in combo["tips"]:
                     desc = t.get("descricao", t.get("mercado", "?"))
                     linhas_combo.append(
@@ -1127,11 +1469,36 @@ class Scanner:
         metricas = self.db.metricas_modelo()
         if metricas["total"] > 0:
             perf = (
-                "<b>Performance acumulada</b>\n"
-                f"- Accuracy: {metricas['accuracy']}% ({metricas['acertos']}/{metricas['total']})\n"
-                f"- ROI: {metricas['roi']:+.1f}%"
+                "<b>📈 Performance acumulada</b>\n"
+                f"• Accuracy: {metricas['accuracy']}% ({metricas['acertos']}/{metricas['total']})\n"
+                f"• ROI: {metricas['roi']:+.1f}%"
             )
             msgs.append((perf, []))
+
+        rejeitadas = resultado.get("tips_rejeitadas_llm", [])
+        if rejeitadas:
+            por_liga_rejeitada = defaultdict(list)
+            for tip in rejeitadas:
+                por_liga_rejeitada[tip.get("league_id", 0)].append(tip)
+
+            for lid in sorted(por_liga_rejeitada.keys(), key=lambda item: _LEAGUE_NOME.get(item, f"Liga {item}")):
+                nome_liga = _LEAGUE_NOME.get(lid, f"Liga {lid}")
+                linhas = [f"<b>Rejeitadas pelo DeepSeek | {nome_liga}</b>"]
+                tips_liga = sorted(
+                    por_liga_rejeitada[lid],
+                    key=lambda item: (item.get("date", ""), -item.get("prob_modelo", 0)),
+                )
+                for tip in tips_liga:
+                    llm = tip.get("llm_validacao") or {}
+                    linhas.append(
+                        f"\n<code>{tip.get('home_name', '?')}</code> <b>x</b> <code>{tip.get('away_name', '?')}</code>"
+                    )
+                    linhas.append(
+                        f"• <b>{tip.get('descricao', tip.get('mercado', '?'))}</b> | Conf {tip.get('prob_modelo', 0):.0%}"
+                    )
+                    if llm.get("motivo"):
+                        linhas.append(f"  <i>{llm['motivo']}</i>")
+                msgs.append(("\n".join(linhas).rstrip(), []))
 
         return msgs
 

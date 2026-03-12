@@ -28,8 +28,17 @@ from data.bulk_download import baixar_fixtures, baixar_stats, _check_limite
 from pipeline.scanner import Scanner
 from pipeline.collector import Collector
 from models.trainer import Trainer
+from models.autotuner import AutoTuner
+from models.market_discovery import MarketDiscoveryTrainer, MARKET_SPECS
 from models.learner import Learner
-from config import SCAN_HORA, RESULTADOS_HORA, RETREINO_DIA, RETREINO_HORA, BULK_HORA, MIN_FIXTURES_TREINO, TIMEZONE
+from config import (
+    SCAN_HORA, RESULTADOS_HORA, RETREINO_DIA, RETREINO_HORA, BULK_HORA,
+    MIN_FIXTURES_TREINO, TIMEZONE, AUTO_RETREINO_HORA_INICIO, AUTO_RETREINO_HORA_FIM,
+    AUTO_RETREINO_TRIALS, AUTO_RETREINO_MAX_LIGAS,
+    DISCOVERY_SEMANAL_DIA, DISCOVERY_SEMANAL_HORA, DISCOVERY_TARGET_PRECISION,
+    DISCOVERY_MIN_TRAIN_SAMPLES, DISCOVERY_MIN_TEST_SAMPLES, DISCOVERY_MIN_TEST_SAMPLES_COPA,
+    DISCOVERY_OPTUNA_TRIALS, DISCOVERY_CUP_LEAGUE_IDS, LEAGUES,
+)
 
 from services.apifootball import raw_request
 
@@ -61,6 +70,27 @@ class Scheduler:
             CronTrigger(hour=int(h_bulk), minute=int(m_bulk)),
             id="bulk_incremental",
             name="Bulk download incremental",
+            replace_existing=True,
+        )
+
+        self.scheduler.add_job(
+            self._job_retreino_quarentena,
+            CronTrigger(hour=f"{AUTO_RETREINO_HORA_INICIO}-{AUTO_RETREINO_HORA_FIM}", minute=0),
+            id="retreino_quarentena",
+            name="Retreino focal de ligas em quarentena",
+            replace_existing=True,
+        )
+
+        h_discovery, m_discovery = DISCOVERY_SEMANAL_HORA.split(":")
+        self.scheduler.add_job(
+            self._job_discovery_semanal,
+            CronTrigger(
+                day_of_week=DISCOVERY_SEMANAL_DIA,
+                hour=int(h_discovery),
+                minute=int(m_discovery),
+            ),
+            id="discovery_semanal",
+            name="Discovery semanal de strategies",
             replace_existing=True,
         )
 
@@ -128,6 +158,11 @@ class Scheduler:
         """
         print("⏰ Scheduler iniciado!")
         print(f"   📦 Bulk: {BULK_HORA} (diário, incremental)")
+        print(
+            f"   🧪 Retreino focal: {AUTO_RETREINO_HORA_INICIO:02d}:00-"
+            f"{AUTO_RETREINO_HORA_FIM:02d}:00 (horário, ligas em quarentena)"
+        )
+        print(f"   🧬 Discovery semanal: {DISCOVERY_SEMANAL_DIA} {DISCOVERY_SEMANAL_HORA}")
         print(f"   📥 Coleta: {RESULTADOS_HORA} (diário)")
         print(f"   🔍 Scanner: {SCAN_HORA} (diário)")
         print(f"   📋 Relatório: 06:45 (resultados de ontem)")
@@ -149,6 +184,116 @@ class Scheduler:
     def parar(self):
         """Para o scheduler."""
         self.scheduler.shutdown()
+
+    @staticmethod
+    def _priorizar_ligas_quarentena(slices_ruins: list[dict]) -> list[int]:
+        """
+        Ordena ligas em quarentena pela necessidade de manutenção.
+
+        Prioridade:
+          1. Mais slices ruins na liga
+          2. Pior ROI observado
+          3. Maior número de previsões no slice pior
+        """
+        ranking = {}
+        for item in slices_ruins:
+            lid = item["league_id"]
+            atual = ranking.setdefault(lid, {
+                "count": 0,
+                "worst_roi": 999.0,
+                "worst_total": 0,
+            })
+            atual["count"] += 1
+            atual["worst_roi"] = min(atual["worst_roi"], item.get("roi", 0))
+            atual["worst_total"] = max(atual["worst_total"], item.get("total", 0))
+
+        ordenadas = sorted(
+            ranking.items(),
+            key=lambda item: (item[1]["count"], -item[1]["worst_roi"], item[1]["worst_total"]),
+            reverse=True,
+        )
+        return [lid for lid, _ in ordenadas]
+
+    @staticmethod
+    def _liga_eh_copa(league_id: int) -> bool:
+        return int(league_id) in DISCOVERY_CUP_LEAGUE_IDS
+
+    @staticmethod
+    def _infer_conf_band(best_rule: dict | None) -> tuple[float, float]:
+        conf_min = 0.70
+        conf_max = 1.01
+        if not best_rule:
+            return conf_min, conf_max
+        for feature, op, threshold in best_rule.get("conditions", []):
+            if feature != "model_prob":
+                continue
+            if op == ">=":
+                conf_min = max(conf_min, float(threshold))
+            elif op == "<=":
+                conf_max = min(conf_max, float(threshold))
+        if conf_max <= conf_min:
+            conf_max = min(1.01, conf_min + 0.05)
+        return round(conf_min, 4), round(conf_max, 4)
+
+    def _estrategias_faltantes_por_liga(self) -> dict[int, list[str]]:
+        """
+        Retorna mercados sem strategy ativa por liga.
+
+        Considera apenas as ligas configuradas e o catálogo operacional atual.
+        """
+        ativos = self.db.strategies_ativas()
+        cobertura = defaultdict(set)
+        for item in ativos:
+            cobertura[int(item["league_id"])].add(item["mercado"])
+
+        todos_mercados = [item.market_id for item in MARKET_SPECS]
+        faltantes = {}
+        for info in LEAGUES.values():
+            lid = int(info["id"])
+            missing = sorted(set(todos_mercados) - cobertura.get(lid, set()))
+            if missing:
+                faltantes[lid] = missing
+        return faltantes
+
+    def _salvar_discovery_por_slice(self, run_summary: dict) -> int:
+        """
+        Promove apenas os slices aceitos do discovery, preservando o resto.
+        """
+        strategies = []
+        for league in run_summary.get("leagues", []):
+            if league.get("status") == "error":
+                continue
+            lid = int(league["league_id"])
+            for market in league.get("markets", []):
+                if market.get("status") != "accepted":
+                    continue
+                best = market.get("best_rule")
+                conf_min, conf_max = self._infer_conf_band(best)
+                test = best.get("test", {}) if best else {}
+                strategies.append({
+                    "mercado": market["market"],
+                    "league_id": lid,
+                    "conf_min": conf_min,
+                    "conf_max": conf_max,
+                    "accuracy": float(test.get("precision") or market.get("test_base_rate") or 0),
+                    "n_samples": int(test.get("samples") or market.get("test_base_samples") or 0),
+                    "ev_medio": 0,
+                    "ativo": 1,
+                    "params": {
+                        "source": "market_discovery",
+                        "rule": best.get("rule") if best else "",
+                        "conditions": best.get("conditions", []) if best else [],
+                        "train": best.get("train") if best else {},
+                        "test": best.get("test") if best else {},
+                        "run_id": run_summary.get("run_id"),
+                    },
+                    "modelo_versao": f"discovery_{run_summary.get('run_id')}",
+                })
+
+        if not strategies:
+            return 0
+        self.db.salvar_strategies_por_slice(strategies)
+        return len(strategies)
 
     # ══════════════════════════════════════════════
     #  JOBS
@@ -228,6 +373,132 @@ class Scheduler:
         except Exception as e:
             print(f"❌ Erro na coleta: {e}")
             self._enviar_telegram(f"❌ Erro na coleta de resultados:\n{e}")
+
+    def _job_retreino_quarentena(self):
+        """
+        Job: retreino focal automático de ligas em quarentena.
+
+        Mantém custo baixo:
+          - roda no máximo AUTO_RETREINO_MAX_LIGAS por execução
+          - usa poucos trials
+          - retreina apenas ligas com slices degradados
+        """
+        print(f"\n{'='*60}")
+        print(f"🧪 JOB: Retreino focal de quarentena — {datetime.now()}")
+        print(f"{'='*60}")
+
+        try:
+            treino = self.db.ultimo_treino()
+            versao = treino["modelo_versao"] if treino else None
+            ruins = self.db.slices_degradados(modelo_versao=versao)
+            if not ruins:
+                print("   ✅ Nenhum slice em quarentena")
+                return
+
+            league_ids = self._priorizar_ligas_quarentena(ruins)
+            league_ids = league_ids[:max(1, AUTO_RETREINO_MAX_LIGAS)]
+            print(f"   🎯 Ligas alvo: {league_ids}")
+
+            tuner = AutoTuner(self.db)
+            resultado = tuner.executar(
+                league_ids=league_ids,
+                n_trials=AUTO_RETREINO_TRIALS,
+            )
+
+            msg = (
+                "🧪 <b>Retreino focal automático concluído</b>\n\n"
+                f"Ligas: {', '.join(str(l) for l in league_ids)}\n"
+                f"Trials por modelo: {AUTO_RETREINO_TRIALS}\n"
+                f"Strategies ativas geradas: {resultado.get('strategies_ativas', 0)}"
+            )
+            self._enviar_telegram(msg)
+
+        except Exception as e:
+            print(f"❌ Erro no retreino focal: {e}")
+            self._enviar_telegram(f"❌ Erro no retreino focal automático:\n{e}")
+
+    def _job_discovery_semanal(self):
+        """
+        Job: discovery semanal de strategies.
+
+        Objetivos:
+          - buscar cobertura para mercados sem strategy ativa
+          - revisar slices degradados com dados mais novos
+          - rodar de forma sequencial e leve para a VPS
+        """
+        print(f"\n{'='*60}")
+        print(f"🧬 JOB: Discovery semanal — {datetime.now()}")
+        print(f"{'='*60}")
+
+        try:
+            faltantes = self._estrategias_faltantes_por_liga()
+            treino = self.db.ultimo_treino()
+            versao = treino["modelo_versao"] if treino else None
+            ruins = self.db.slices_degradados(modelo_versao=versao)
+            ligas_ruins = self._priorizar_ligas_quarentena(ruins)
+
+            candidate_leagues = []
+            seen = set()
+            for lid in ligas_ruins + sorted(faltantes.keys()):
+                if lid not in seen:
+                    candidate_leagues.append(lid)
+                    seen.add(lid)
+
+            if not candidate_leagues:
+                print("   ✅ Nenhuma liga precisando discovery")
+                return
+
+            trainer = MarketDiscoveryTrainer(self.db)
+            linhas_resumo = [
+                "🧬 <b>Discovery semanal iniciado</b>",
+                "",
+                f"Ligas alvo: {', '.join(str(lid) for lid in candidate_leagues)}",
+                f"Precisão mínima: {DISCOVERY_TARGET_PRECISION:.0%}",
+                f"Train min: {DISCOVERY_MIN_TRAIN_SAMPLES}",
+                f"Trials Optuna: {DISCOVERY_OPTUNA_TRIALS}",
+            ]
+            self._enviar_telegram("\n".join(linhas_resumo))
+
+            total_saved = 0
+            for lid in candidate_leagues:
+                min_test = DISCOVERY_MIN_TEST_SAMPLES_COPA if self._liga_eh_copa(lid) else DISCOVERY_MIN_TEST_SAMPLES
+                markets = faltantes.get(lid) or None
+                league_name = next(
+                    (info["nome"] for info in LEAGUES.values() if int(info["id"]) == lid),
+                    f"Liga {lid}",
+                )
+                print(f"   🎯 Discovery liga {lid} ({league_name}) | mercados={markets or 'todos'} | min_test={min_test}")
+                result = trainer.run(
+                    league_ids=[lid],
+                    markets=markets,
+                    target_precision=DISCOVERY_TARGET_PRECISION,
+                    min_train_samples=DISCOVERY_MIN_TRAIN_SAMPLES,
+                    min_test_samples=min_test,
+                    optuna_trials=DISCOVERY_OPTUNA_TRIALS,
+                )
+                saved = self._salvar_discovery_por_slice(result)
+                total_saved += saved
+
+                league_summary = result["leagues"][0] if result.get("leagues") else {}
+                msg = (
+                    f"🧬 <b>Discovery liga concluída</b>\n\n"
+                    f"Liga: {league_name} ({lid})\n"
+                    f"Mercados testados: {len(league_summary.get('markets', []))}\n"
+                    f"Mercados aceitos: {league_summary.get('accepted_markets', 0)}\n"
+                    f"Strategies promovidas: {saved}\n"
+                    f"Min test usado: {min_test}\n"
+                    f"Run: {result.get('run_id')}"
+                )
+                self._enviar_telegram(msg)
+
+            self._enviar_telegram(
+                "🧬 <b>Discovery semanal concluído</b>\n\n"
+                f"Ligas processadas: {len(candidate_leagues)}\n"
+                f"Strategies promovidas: {total_saved}"
+            )
+        except Exception as e:
+            print(f"❌ Erro no discovery semanal: {e}")
+            self._enviar_telegram(f"❌ Erro no discovery semanal:\n{e}")
 
     def _job_scanner(self):
         """Job: scanner de oportunidades."""

@@ -281,6 +281,58 @@ class Database:
                 ON combos(date);
             CREATE INDEX IF NOT EXISTS idx_combo_items_combo
                 ON combo_items(combo_id);
+
+            CREATE TABLE IF NOT EXISTS telegram_chats (
+                chat_id        INTEGER PRIMARY KEY,
+                is_admin       INTEGER NOT NULL DEFAULT 0,
+                username       TEXT,
+                first_name     TEXT,
+                created_at     TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_seen_at   TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS scan_audit (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_date      TEXT NOT NULL,
+                fixture_id     INTEGER NOT NULL,
+                league_id      INTEGER,
+                home_name      TEXT,
+                away_name      TEXT,
+                mercado        TEXT NOT NULL,
+                descricao      TEXT,
+                prob_modelo    REAL,
+                odd_usada      REAL,
+                ev_percent     REAL,
+                llm_decisao    TEXT,
+                llm_confianca  REAL,
+                llm_motivo     TEXT,
+                approved_final INTEGER NOT NULL DEFAULT 0,
+                contexto_json  TEXT,
+                created_at     TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_scan_audit_date
+                ON scan_audit(scan_date, llm_decisao, approved_final);
+
+            CREATE TABLE IF NOT EXISTS scan_candidates (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_date      TEXT NOT NULL,
+                fixture_id      INTEGER NOT NULL,
+                fixture_date    TEXT,
+                league_id       INTEGER,
+                home_name       TEXT,
+                away_name       TEXT,
+                mercado         TEXT NOT NULL,
+                descricao       TEXT,
+                prob_modelo     REAL,
+                payload_json    TEXT NOT NULL,
+                status          TEXT NOT NULL DEFAULT 'pending',
+                release_group   TEXT DEFAULT '',
+                created_at      TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_scan_candidates_date
+                ON scan_candidates(scan_date, status, fixture_date);
         """)
         self._aplicar_migracoes(conn)
         conn.commit()
@@ -294,6 +346,55 @@ class Database:
         }
         if "prob_modelo" not in cols:
             conn.execute("ALTER TABLE predictions ADD COLUMN prob_modelo REAL")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS telegram_chats (
+                chat_id        INTEGER PRIMARY KEY,
+                is_admin       INTEGER NOT NULL DEFAULT 0,
+                username       TEXT,
+                first_name     TEXT,
+                created_at     TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_seen_at   TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS scan_audit (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_date      TEXT NOT NULL,
+                fixture_id     INTEGER NOT NULL,
+                league_id      INTEGER,
+                home_name      TEXT,
+                away_name      TEXT,
+                mercado        TEXT NOT NULL,
+                descricao      TEXT,
+                prob_modelo    REAL,
+                odd_usada      REAL,
+                ev_percent     REAL,
+                llm_decisao    TEXT,
+                llm_confianca  REAL,
+                llm_motivo     TEXT,
+                approved_final INTEGER NOT NULL DEFAULT 0,
+                contexto_json  TEXT,
+                created_at     TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS scan_candidates (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_date      TEXT NOT NULL,
+                fixture_id      INTEGER NOT NULL,
+                fixture_date    TEXT,
+                league_id       INTEGER,
+                home_name       TEXT,
+                away_name       TEXT,
+                mercado         TEXT NOT NULL,
+                descricao       TEXT,
+                prob_modelo     REAL,
+                payload_json    TEXT NOT NULL,
+                status          TEXT NOT NULL DEFAULT 'pending',
+                release_group   TEXT DEFAULT '',
+                created_at      TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
     # ══════════════════════════════════════════════
     #  FIXTURES
@@ -659,8 +760,140 @@ class Database:
             "DELETE FROM predictions WHERE date LIKE ? AND acertou IS NULL",
             (f"{data}%",),
         )
+        conn.execute(
+            "DELETE FROM scan_audit WHERE scan_date = ?",
+            (data,),
+        )
+        conn.execute(
+            "DELETE FROM scan_candidates WHERE scan_date = ?",
+            (data,),
+        )
         conn.commit()
         conn.close()
+
+    def salvar_scan_candidates(self, data: str, tips: list[dict]):
+        """Persiste candidatos pré-selecionados do scan da manhã."""
+        if not tips:
+            return
+        conn = self._conn()
+        for tip in tips:
+            conn.execute("""
+                INSERT INTO scan_candidates (
+                    scan_date, fixture_id, fixture_date, league_id, home_name, away_name,
+                    mercado, descricao, prob_modelo, payload_json, status, release_group
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                data,
+                tip.get("fixture_id"),
+                tip.get("date"),
+                tip.get("league_id"),
+                tip.get("home_name"),
+                tip.get("away_name"),
+                tip.get("mercado"),
+                tip.get("descricao"),
+                tip.get("prob_modelo"),
+                json.dumps(tip, ensure_ascii=False),
+                tip.get("candidate_status", "pending"),
+                tip.get("release_group", ""),
+            ))
+        conn.commit()
+        conn.close()
+
+    def candidatos_por_data(self, data: str, status: str = None) -> list[dict]:
+        """Retorna candidatos pré-selecionados do dia."""
+        conn = self._conn()
+        sql = """
+            SELECT *
+            FROM scan_candidates
+            WHERE scan_date = ?
+        """
+        params = [data]
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY fixture_date ASC, prob_modelo DESC, id ASC"
+        rows = conn.execute(sql, params).fetchall()
+        conn.close()
+        out = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["payload"] = json.loads(item.get("payload_json") or "{}")
+            except json.JSONDecodeError:
+                item["payload"] = {}
+            out.append(item)
+        return out
+
+    def atualizar_status_candidatos(self, candidate_ids: list[int], status: str):
+        """Atualiza status de um lote de candidatos."""
+        if not candidate_ids:
+            return
+        conn = self._conn()
+        marks = ",".join("?" for _ in candidate_ids)
+        conn.execute(
+            f"UPDATE scan_candidates SET status = ? WHERE id IN ({marks})",
+            [status, *candidate_ids],
+        )
+        conn.commit()
+        conn.close()
+
+    def salvar_scan_audit(self, data: str, tips: list[dict]):
+        """Persiste a decisao do LLM para aprovadas e rejeitadas de um scan."""
+        if not tips:
+            return
+
+        conn = self._conn()
+        for tip in tips:
+            llm = tip.get("llm_validacao") or {}
+            contexto = tip.get("llm_contexto") or {}
+            conn.execute("""
+                INSERT INTO scan_audit (
+                    scan_date, fixture_id, league_id, home_name, away_name,
+                    mercado, descricao, prob_modelo, odd_usada, ev_percent,
+                    llm_decisao, llm_confianca, llm_motivo, approved_final, contexto_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                data,
+                tip.get("fixture_id"),
+                tip.get("league_id"),
+                tip.get("home_name"),
+                tip.get("away_name"),
+                tip.get("mercado"),
+                tip.get("descricao"),
+                tip.get("prob_modelo"),
+                tip.get("odd_pinnacle") or tip.get("odd_usada"),
+                tip.get("ev_percent"),
+                llm.get("decisao"),
+                llm.get("confianca"),
+                llm.get("motivo"),
+                1 if tip.get("approved_final") else 0,
+                json.dumps(contexto, ensure_ascii=False),
+            ))
+        conn.commit()
+        conn.close()
+
+    def scan_audit_por_data(self, data: str, decisao: str = None) -> list[dict]:
+        """Retorna a trilha do LLM para um scan especifico."""
+        conn = self._conn()
+        sql = """
+            SELECT *
+            FROM scan_audit
+            WHERE scan_date = ?
+        """
+        params = [data]
+        if decisao:
+            sql += " AND llm_decisao = ?"
+            params.append(decisao)
+        sql += """
+            ORDER BY
+                league_id ASC,
+                home_name ASC,
+                prob_modelo DESC,
+                id ASC
+        """
+        rows = conn.execute(sql, params).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
 
     def salvar_combo(self, combo: dict):
         """Salva um combo e seus itens vinculados às predictions já persistidas."""
@@ -820,6 +1053,27 @@ class Database:
         rows = conn.execute(
             "SELECT * FROM predictions WHERE acertou IS NULL ORDER BY date"
         ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def predictions_por_data(self, data: str) -> list[dict]:
+        """Retorna previsões salvas em uma data ISO, com nome da liga."""
+        conn = self._conn()
+        rows = conn.execute("""
+            SELECT
+                p.*,
+                COALESCE(f.league_name, 'Liga ' || p.league_id) AS league_name,
+                COALESCE(f.date, p.date) AS fixture_date
+            FROM predictions p
+            LEFT JOIN fixtures f ON f.fixture_id = p.fixture_id
+            WHERE p.date LIKE ?
+            ORDER BY
+                COALESCE(f.league_name, 'Liga ' || p.league_id) ASC,
+                COALESCE(f.date, p.date) ASC,
+                p.fixture_id ASC,
+                p.prob_modelo DESC,
+                p.id ASC
+        """, (f"{data}%",)).fetchall()
         conn.close()
         return [dict(r) for r in rows]
 
@@ -1007,7 +1261,8 @@ class Database:
         conn = self._conn()
         r = {}
         for tabela in ["fixtures", "fixture_stats", "fixture_events",
-                       "team_stats", "predictions", "odds_cache", "train_log"]:
+                       "team_stats", "predictions", "odds_cache", "train_log",
+                       "telegram_chats"]:
             row = conn.execute(f"SELECT COUNT(*) as n FROM {tabela}").fetchone()
             r[tabela] = row["n"]
         # Fixtures finalizados
@@ -1032,13 +1287,57 @@ class Database:
     #  STRATEGIES (AutoTuner)
     # ══════════════════════════════════════════════
 
-    def salvar_strategies(self, strategies: list[dict]):
+    def salvar_telegram_chat(self, chat_id: int, is_admin: bool = False,
+                             username: str = None, first_name: str = None):
+        """Cria ou atualiza um chat conhecido do Telegram."""
+        conn = self._conn()
+        conn.execute("""
+            INSERT INTO telegram_chats (
+                chat_id, is_admin, username, first_name, last_seen_at
+            ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                is_admin = CASE
+                    WHEN telegram_chats.is_admin = 1 OR excluded.is_admin = 1 THEN 1
+                    ELSE 0
+                END,
+                username = COALESCE(excluded.username, telegram_chats.username),
+                first_name = COALESCE(excluded.first_name, telegram_chats.first_name),
+                last_seen_at = CURRENT_TIMESTAMP
+        """, (
+            int(chat_id),
+            1 if is_admin else 0,
+            username,
+            first_name,
+        ))
+        conn.commit()
+        conn.close()
+
+    def telegram_chat_ids(self, apenas_admin: bool = False) -> list[int]:
+        """Lista chat_ids conhecidos, opcionalmente filtrando apenas admins."""
+        conn = self._conn()
+        sql = "SELECT chat_id FROM telegram_chats"
+        if apenas_admin:
+            sql += " WHERE is_admin = 1"
+        sql += " ORDER BY chat_id"
+        rows = conn.execute(sql).fetchall()
+        conn.close()
+        return [int(r["chat_id"]) for r in rows]
+
+    def salvar_strategies(self, strategies: list[dict], replace: bool = True,
+                          league_ids: list[int] = None):
         """
         Salva lista de estratégias (slices) geradas pelo AutoTuner.
-        Limpa estratégias anteriores e insere as novas (replace completo).
+        Pode substituir tudo ou apenas ligas específicas.
         """
         conn = self._conn()
-        conn.execute("DELETE FROM strategies")
+        if replace:
+            conn.execute("DELETE FROM strategies")
+        elif league_ids:
+            placeholders = ",".join("?" for _ in league_ids)
+            conn.execute(
+                f"DELETE FROM strategies WHERE league_id IN ({placeholders})",
+                tuple(league_ids),
+            )
         for s in strategies:
             conn.execute("""
                 INSERT INTO strategies (
@@ -1057,6 +1356,59 @@ class Database:
         conn.commit()
         conn.close()
 
+    def salvar_strategies_por_slice(self, strategies: list[dict]):
+        """
+        Substitui strategies apenas dos slices (liga x mercado) informados.
+
+        Mantém intactos os demais mercados da liga. Útil para discovery semanal,
+        onde alguns mercados acham regra nova e outros não.
+        """
+        if not strategies:
+            return
+
+        conn = self._conn()
+        slices = sorted({
+            (s["mercado"], s.get("league_id"))
+            for s in strategies
+        })
+
+        for mercado, league_id in slices:
+            conn.execute(
+                "DELETE FROM strategies WHERE mercado = ? AND league_id = ?",
+                (mercado, league_id),
+            )
+
+        for s in strategies:
+            conn.execute("""
+                INSERT INTO strategies (
+                    mercado, league_id, conf_min, conf_max,
+                    accuracy, n_samples, ev_medio, ativo,
+                    params_json, modelo_versao
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                s["mercado"], s.get("league_id"),
+                s["conf_min"], s["conf_max"],
+                s["accuracy"], s["n_samples"],
+                s.get("ev_medio", 0), s.get("ativo", 1),
+                json.dumps(s.get("params", {}), ensure_ascii=False),
+                s.get("modelo_versao", ""),
+            ))
+        conn.commit()
+        conn.close()
+
+    def desativar_strategia_slice(self, league_id: int, mercado: str) -> int:
+        """Desativa todas as strategies de um slice liga × mercado."""
+        conn = self._conn()
+        cur = conn.execute("""
+            UPDATE strategies
+            SET ativo = 0
+            WHERE league_id = ? AND mercado = ? AND ativo = 1
+        """, (league_id, mercado))
+        conn.commit()
+        alteradas = cur.rowcount
+        conn.close()
+        return alteradas
+
     def strategies_ativas(self) -> list[dict]:
         """Retorna todas as estratégias ativas para uso pelo Scanner."""
         conn = self._conn()
@@ -1068,6 +1420,25 @@ class Database:
             rows = []
         conn.close()
         return [dict(r) for r in rows]
+
+    def slices_degradados(self, modelo_versao: str = None,
+                          min_amostras: int = 5,
+                          roi_threshold: float = -15.0,
+                          acc_threshold: float = 35.0) -> list[dict]:
+        """
+        Retorna slices liga × mercado com performance ruim.
+
+        Usa apenas previsões resolvidas e já agregadas por mercado × liga.
+        """
+        dados = self.metricas_por_mercado_liga(
+            min_amostras=min_amostras,
+            modelo_versao=modelo_versao,
+        )
+        ruins = []
+        for item in dados:
+            if item["roi"] < roi_threshold or item["accuracy"] < acc_threshold:
+                ruins.append(item)
+        return ruins
 
     def strategies_resumo(self) -> dict:
         """Retorna resumo das estratégias para exibição."""
