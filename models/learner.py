@@ -17,6 +17,7 @@ Uso:
   relatorio = learner.relatorio_diario()
 """
 
+import json
 from datetime import datetime, timedelta
 from data.database import Database
 from services.apifootball import raw_request
@@ -31,6 +32,180 @@ class Learner:
 
     def __init__(self, db: Database):
         self.db = db
+
+    @staticmethod
+    def _avaliar_mercado(
+        mercado: str,
+        gols_home: int,
+        gols_away: int,
+        score_ht_h: int | None = None,
+        score_ht_a: int | None = None,
+        corners_total: int | None = None,
+    ) -> bool | None:
+        """Avalia se um mercado teria sido green com base no resultado final."""
+        total_gols = gols_home + gols_away
+
+        if mercado == "h2h_home":
+            return gols_home > gols_away
+        if mercado == "h2h_draw":
+            return gols_home == gols_away
+        if mercado == "h2h_away":
+            return gols_home < gols_away
+        if mercado == "over15":
+            return total_gols > 1
+        if mercado == "under15":
+            return total_gols < 2
+        if mercado == "over25":
+            return total_gols > 2
+        if mercado == "under25":
+            return total_gols < 3
+        if mercado == "over35":
+            return total_gols > 3
+        if mercado == "under35":
+            return total_gols < 4
+
+        if score_ht_h is not None and score_ht_a is not None:
+            total_ht = score_ht_h + score_ht_a
+            total_2t = total_gols - total_ht
+            if mercado == "ht_home":
+                return score_ht_h > score_ht_a
+            if mercado == "ht_draw":
+                return score_ht_h == score_ht_a
+            if mercado == "ht_away":
+                return score_ht_h < score_ht_a
+            if mercado == "over05_ht":
+                return total_ht > 0
+            if mercado == "under05_ht":
+                return total_ht < 1
+            if mercado == "over15_ht":
+                return total_ht > 1
+            if mercado == "under15_ht":
+                return total_ht < 2
+            if mercado == "over05_2t":
+                return total_2t > 0
+            if mercado == "under05_2t":
+                return total_2t < 1
+            if mercado == "over15_2t":
+                return total_2t > 1
+            if mercado == "under15_2t":
+                return total_2t < 2
+
+        if corners_total is not None:
+            if mercado == "corners_over_85":
+                return corners_total > 8.5
+            if mercado == "corners_under_85":
+                return corners_total < 8.5
+            if mercado == "corners_over_95":
+                return corners_total > 9.5
+            if mercado == "corners_under_95":
+                return corners_total < 9.5
+            if mercado == "corners_over_105":
+                return corners_total > 10.5
+            if mercado == "corners_under_105":
+                return corners_total < 10.5
+
+        return None
+
+    def _registrar_feedback_contextual_fixture(
+        self,
+        fixture_id: int,
+        gols_home: int,
+        gols_away: int,
+        fixture: dict | None = None,
+    ):
+        """Salva labels contextuais para mercados liberados e barrados do fixture."""
+        rows = self.db.scan_audit_por_fixture(fixture_id)
+        if not rows:
+            return
+
+        fixture = fixture or self.db.fixture_por_id(fixture_id) or {}
+        score_ht_h = fixture.get("score_ht_h")
+        score_ht_a = fixture.get("score_ht_a")
+
+        corners_total = None
+        stats = self.db.stats_partida(fixture_id)
+        if stats:
+            corners = [item.get("corners") for item in stats if item.get("corners") is not None]
+            if corners:
+                corners_total = sum(int(value) for value in corners)
+
+        feedbacks = []
+        for row in rows:
+            market_won = self._avaliar_mercado(
+                row["mercado"],
+                gols_home,
+                gols_away,
+                score_ht_h=score_ht_h,
+                score_ht_a=score_ht_a,
+                corners_total=corners_total,
+            )
+            if market_won is None:
+                continue
+
+            approved_final = bool(row.get("approved_final"))
+            if approved_final and market_won:
+                context_label = "good_release"
+            elif approved_final and not market_won:
+                context_label = "bad_release"
+            elif (not approved_final) and market_won:
+                context_label = "missed_opportunity"
+            else:
+                context_label = "good_block"
+
+            contexto = {}
+            raw_context = row.get("contexto_json")
+            if raw_context:
+                try:
+                    contexto = json.loads(raw_context)
+                except Exception:
+                    contexto = {}
+            market_lookup = contexto.get("market_lookup") or {}
+
+            feedbacks.append({
+                "scan_audit_id": row["id"],
+                "fixture_id": fixture_id,
+                "league_id": row.get("league_id"),
+                "mercado": row["mercado"],
+                "llm_decisao": row.get("llm_decisao"),
+                "approved_final": approved_final,
+                "market_won": bool(market_won),
+                "context_label": context_label,
+                "contextual_success": context_label in {"good_release", "good_block"},
+                "gols_home": gols_home,
+                "gols_away": gols_away,
+                "corners_total": corners_total,
+                "weather_summary": market_lookup.get("weather_summary"),
+                "field_conditions": market_lookup.get("field_conditions"),
+                "rotation_risk": market_lookup.get("rotation_risk"),
+                "motivation_context": market_lookup.get("motivation_context"),
+                "news_summary": market_lookup.get("news_summary"),
+                "risk_flags": market_lookup.get("risk_flags") or [],
+                "llm_motivo": row.get("llm_motivo"),
+                "contexto_json": contexto,
+            })
+
+        self.db.salvar_context_feedback(feedbacks)
+
+    def backfill_feedback_contextual(self) -> dict:
+        """Retropreenche labels contextuais para fixtures já finalizados."""
+        fixture_ids = self.db.scan_audit_fixtures_sem_feedback()
+        processados = 0
+
+        for fixture_id in fixture_ids:
+            fix = self.db.fixture_por_id(fixture_id)
+            if not fix or fix.get("status") != "FT":
+                continue
+            gh = fix.get("goals_home")
+            ga = fix.get("goals_away")
+            if gh is None or ga is None:
+                continue
+            self._registrar_feedback_contextual_fixture(fixture_id, gh, ga, fix)
+            processados += 1
+
+        return {
+            "fixtures_auditados": len(fixture_ids),
+            "fixtures_processados": processados,
+        }
 
     def resolver_pendentes(self) -> dict:
         """
@@ -76,6 +251,7 @@ class Learner:
 
                 # Atualizar fixture no banco
                 self.db.salvar_fixture(game)
+                fix = self.db.fixture_por_id(fixture_id)
 
                 gh = game.get("goals", {}).get("home")
                 ga = game.get("goals", {}).get("away")
@@ -93,6 +269,7 @@ class Learner:
 
             # Resolver a previsão
             n = self.db.resolver_prediction(fixture_id, resultado, gh, ga)
+            self._registrar_feedback_contextual_fixture(fixture_id, gh, ga, fix)
             resolvidos += n
 
             # Contar acertos (baseado no mercado previsto)

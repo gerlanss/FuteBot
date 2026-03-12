@@ -35,8 +35,6 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     MenuButtonCommands,
-    MenuButtonWebApp,
-    WebAppInfo,
 )
 from telegram.ext import (
     Application,
@@ -46,7 +44,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, TIMEZONE, MINI_APP_URL, ADMIN_CHAT_IDS
+from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, TIMEZONE, ADMIN_CHAT_IDS
 from data.database import Database
 from pipeline.scanner import Scanner
 from pipeline.collector import Collector
@@ -68,7 +66,6 @@ _chat_ids = set(_ADMIN_CHAT_IDS)
 _PUBLIC_COMMANDS = [
     BotCommand("start", "Abrir menu do bot"),
     BotCommand("resultados", "Resultados recentes"),
-    BotCommand("app", "Abrir mini app"),
     BotCommand("ajuda", "Ver como o bot funciona"),
 ]
 _ADMIN_COMMANDS = [
@@ -82,7 +79,6 @@ _ADMIN_COMMANDS = [
     BotCommand("status", "Status geral"),
     BotCommand("treinar", "Retreinar modelo"),
     BotCommand("bulk", "Status do bulk download"),
-    BotCommand("app", "Abrir mini app"),
     BotCommand("ajuda", "Ver todos os comandos"),
 ]
 
@@ -127,8 +123,6 @@ def _teclado_menu(chat_id: int | None = None) -> InlineKeyboardMarkup:
              InlineKeyboardButton("📦 Bulk Download", callback_data="cmd_bulk")],
             [InlineKeyboardButton("❓ Ajuda", callback_data="cmd_ajuda")],
         ]
-    if MINI_APP_URL:
-        botoes.insert(0, [InlineKeyboardButton("📲 Painel Mini App", web_app=WebAppInfo(url=MINI_APP_URL))])
     return InlineKeyboardMarkup(botoes)
 
 
@@ -147,10 +141,7 @@ async def _configurar_menu(bot, chat_id: int | None = None):
     for admin_chat_id in sorted(_ADMIN_CHAT_IDS):
         await bot.set_my_commands(_ADMIN_COMMANDS, scope=BotCommandScopeChat(admin_chat_id))
 
-    if MINI_APP_URL:
-        menu_button = MenuButtonWebApp("Painel", WebAppInfo(url=MINI_APP_URL))
-    else:
-        menu_button = MenuButtonCommands()
+    menu_button = MenuButtonCommands()
 
     if chat_id is None:
         await bot.set_chat_menu_button(menu_button=menu_button)
@@ -245,7 +236,7 @@ def _formatar_start_html(chat_id: int) -> str:
             "<b>FuteBot</b>\n"
             "Bot privado de analise.\n\n"
             "Seu acesso atual eh limitado.\n"
-            "Use o menu para abrir a Mini App ou ver a ajuda."
+            "Use o menu para ver resultados e a ajuda."
         )
 
     resumo = _db.resumo()
@@ -331,7 +322,6 @@ def _formatar_ajuda_html() -> str:
         "- <code>/treinar 135 over35</code> - retreino focal por liga\n"
         "- <code>/treinar descoberta</code> - treino sequencial liga x mercado em background\n"
         "- <code>/treinar descoberta 253 over15</code> - descoberta focada\n"
-        "- <code>/app</code> - abrir mini app\n"
         "- <code>/bulk</code> - status do bulk download\n\n"
         "<b>Rotina automatica</b>\n"
         "- 07:00 - scanner do dia\n"
@@ -810,27 +800,6 @@ async def cmd_bulk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _reply_html(update.message, _formatar_bulk_html(), reply_markup=_botao_voltar())
 
 
-async def cmd_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    _registrar_update(update)
-    """Abre a mini app quando configurada."""
-    if not MINI_APP_URL:
-        await update.message.reply_text(
-            "Mini App preparada, mas a URL HTTPS publica ainda nao foi configurada.",
-            reply_markup=_botao_voltar(),
-        )
-        return
-
-    teclado = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Abrir Painel", web_app=WebAppInfo(url=MINI_APP_URL))],
-        [InlineKeyboardButton("← Menu Principal", callback_data="cmd_menu")],
-    ])
-    await _reply_html(
-        update.message,
-        "<b>Mini App do FuteBot</b>\n\nAbra o painel para ver status, ultimas tips e preferencias.",
-        reply_markup=teclado,
-    )
-
-
 async def cmd_ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _registrar_update(update)
     """Lista todos os comandos."""
@@ -1258,7 +1227,6 @@ def criar_bot() -> Application:
     app.add_handler(CommandHandler("saude", cmd_saude))
     app.add_handler(CommandHandler("treinar", cmd_treinar))
     app.add_handler(CommandHandler("bulk", cmd_bulk))
-    app.add_handler(CommandHandler("app", cmd_app))
     app.add_handler(CommandHandler("ajuda", cmd_ajuda))
 
     # Handler de callbacks dos botões inline (deve vir depois dos comandos)

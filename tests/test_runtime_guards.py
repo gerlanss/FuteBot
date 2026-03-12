@@ -200,6 +200,62 @@ class LearnerConfidenceTests(unittest.TestCase):
             self.assertIn("<b>COMBOS</b>", relatorio)
             self.assertIn("Dupla #1", relatorio)
 
+    def test_context_feedback_labels_successful_release_and_block(self):
+        from data.database import Database
+        from models.learner import Learner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, "test.db"))
+            data = datetime.now().strftime("%Y-%m-%d")
+            self._insert_fixture(db, 21, data)
+
+            conn = db._conn()
+            conn.execute("""
+                UPDATE fixtures
+                SET score_ht_h = 0, score_ht_a = 0
+                WHERE fixture_id = 21
+            """)
+            conn.execute("""
+                INSERT INTO scan_audit (
+                    scan_date, fixture_id, league_id, home_name, away_name,
+                    mercado, llm_decisao, llm_motivo, approved_final, contexto_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                data, 21, 71, "Time 21A", "Time 21B",
+                "under35", "APPROVE", "Chuva forte favorece under", 1,
+                '{"market_lookup":{"weather_summary":"chuva forte","risk_flags":["rain"]}}',
+            ))
+            conn.execute("""
+                INSERT INTO scan_audit (
+                    scan_date, fixture_id, league_id, home_name, away_name,
+                    mercado, llm_decisao, llm_motivo, approved_final, contexto_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                data, 21, 71, "Time 21A", "Time 21B",
+                "over15", "REJECT", "Tempo ruim atrapalha gols", 0,
+                '{"market_lookup":{"weather_summary":"chuva forte","risk_flags":["rain"]}}',
+            ))
+            conn.commit()
+            conn.close()
+
+            learner = Learner(db)
+            learner._registrar_feedback_contextual_fixture(21, 0, 0, db.fixture_por_id(21))
+
+            resumo = {item["context_label"]: item["total"] for item in db.context_feedback_resumo()}
+            self.assertEqual(resumo.get("good_release"), 1)
+            self.assertEqual(resumo.get("good_block"), 1)
+
+            conn = db._conn()
+            rows = conn.execute("""
+                SELECT context_label, weather_summary
+                FROM context_feedback
+                ORDER BY context_label ASC
+            """).fetchall()
+            conn.close()
+            labels = {row["context_label"]: row["weather_summary"] for row in rows}
+            self.assertEqual(labels["good_release"], "chuva forte")
+            self.assertEqual(labels["good_block"], "chuva forte")
+
 
 class StrategySliceTests(unittest.TestCase):
     @staticmethod

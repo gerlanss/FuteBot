@@ -333,6 +333,34 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_scan_candidates_date
                 ON scan_candidates(scan_date, status, fixture_date);
+
+            CREATE TABLE IF NOT EXISTS context_feedback (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_audit_id       INTEGER NOT NULL UNIQUE,
+                fixture_id          INTEGER NOT NULL,
+                league_id           INTEGER,
+                mercado             TEXT NOT NULL,
+                llm_decisao         TEXT,
+                approved_final      INTEGER NOT NULL DEFAULT 0,
+                market_won          INTEGER NOT NULL,
+                context_label       TEXT NOT NULL,
+                contextual_success  INTEGER NOT NULL DEFAULT 0,
+                gols_home           INTEGER,
+                gols_away           INTEGER,
+                corners_total       INTEGER,
+                weather_summary     TEXT,
+                field_conditions    TEXT,
+                rotation_risk       TEXT,
+                motivation_context  TEXT,
+                news_summary        TEXT,
+                risk_flags_json     TEXT,
+                llm_motivo          TEXT,
+                contexto_json       TEXT,
+                created_at          TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_context_feedback_fixture
+                ON context_feedback(fixture_id, context_label);
         """)
         self._aplicar_migracoes(conn)
         conn.commit()
@@ -393,6 +421,32 @@ class Database:
                 status          TEXT NOT NULL DEFAULT 'pending',
                 release_group   TEXT DEFAULT '',
                 created_at      TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS context_feedback (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_audit_id       INTEGER NOT NULL UNIQUE,
+                fixture_id          INTEGER NOT NULL,
+                league_id           INTEGER,
+                mercado             TEXT NOT NULL,
+                llm_decisao         TEXT,
+                approved_final      INTEGER NOT NULL DEFAULT 0,
+                market_won          INTEGER NOT NULL,
+                context_label       TEXT NOT NULL,
+                contextual_success  INTEGER NOT NULL DEFAULT 0,
+                gols_home           INTEGER,
+                gols_away           INTEGER,
+                corners_total       INTEGER,
+                weather_summary     TEXT,
+                field_conditions    TEXT,
+                rotation_risk       TEXT,
+                motivation_context  TEXT,
+                news_summary        TEXT,
+                risk_flags_json     TEXT,
+                llm_motivo          TEXT,
+                contexto_json       TEXT,
+                created_at          TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
@@ -892,6 +946,92 @@ class Database:
                 id ASC
         """
         rows = conn.execute(sql, params).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def scan_audit_por_fixture(self, fixture_id: int) -> list[dict]:
+        """Retorna auditoria do scan para um fixture específico."""
+        conn = self._conn()
+        rows = conn.execute("""
+            SELECT *
+            FROM scan_audit
+            WHERE fixture_id = ?
+            ORDER BY created_at ASC, id ASC
+        """, (fixture_id,)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def scan_audit_fixtures_sem_feedback(self) -> list[int]:
+        """Lista fixtures auditados que já podem gerar label contextual e ainda não geraram."""
+        conn = self._conn()
+        rows = conn.execute("""
+            SELECT DISTINCT sa.fixture_id
+            FROM scan_audit sa
+            JOIN fixtures f
+              ON f.fixture_id = sa.fixture_id
+            LEFT JOIN context_feedback cf
+              ON cf.scan_audit_id = sa.id
+            WHERE f.status = 'FT'
+              AND f.goals_home IS NOT NULL
+              AND f.goals_away IS NOT NULL
+              AND cf.id IS NULL
+            ORDER BY sa.fixture_id ASC
+        """).fetchall()
+        conn.close()
+        return [int(r["fixture_id"]) for r in rows]
+
+    def salvar_context_feedback(self, feedbacks: list[dict]):
+        """Salva labels de sucesso/erro contextual derivados do scan_audit."""
+        if not feedbacks:
+            return
+        conn = self._conn()
+        for item in feedbacks:
+            conn.execute("""
+                INSERT OR IGNORE INTO context_feedback (
+                    scan_audit_id, fixture_id, league_id, mercado,
+                    llm_decisao, approved_final, market_won, context_label,
+                    contextual_success, gols_home, gols_away, corners_total,
+                    weather_summary, field_conditions, rotation_risk,
+                    motivation_context, news_summary, risk_flags_json,
+                    llm_motivo, contexto_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                item["scan_audit_id"],
+                item["fixture_id"],
+                item.get("league_id"),
+                item["mercado"],
+                item.get("llm_decisao"),
+                1 if item.get("approved_final") else 0,
+                1 if item.get("market_won") else 0,
+                item["context_label"],
+                1 if item.get("contextual_success") else 0,
+                item.get("gols_home"),
+                item.get("gols_away"),
+                item.get("corners_total"),
+                item.get("weather_summary"),
+                item.get("field_conditions"),
+                item.get("rotation_risk"),
+                item.get("motivation_context"),
+                item.get("news_summary"),
+                json.dumps(item.get("risk_flags", []), ensure_ascii=False),
+                item.get("llm_motivo"),
+                json.dumps(item.get("contexto_json", {}), ensure_ascii=False),
+            ))
+        conn.commit()
+        conn.close()
+
+    def context_feedback_resumo(self) -> list[dict]:
+        """Resume labels contextuais já consolidados."""
+        conn = self._conn()
+        rows = conn.execute("""
+            SELECT
+                context_label,
+                COUNT(*) AS total,
+                SUM(contextual_success) AS sucessos
+            FROM context_feedback
+            GROUP BY context_label
+            ORDER BY total DESC, context_label ASC
+        """).fetchall()
         conn.close()
         return [dict(r) for r in rows]
 

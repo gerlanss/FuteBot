@@ -24,7 +24,6 @@ from config import TELEGRAM_TOKEN, MIN_FIXTURES_TREINO
 from data.database import Database
 from data.bulk_download import baixar_fixtures, baixar_stats, _check_limite
 from services.telegram_bot import criar_bot, enviar_mensagem
-from services.miniapp import MiniAppServer
 from pipeline.scheduler import Scheduler
 from models.trainer import Trainer
 
@@ -114,8 +113,6 @@ async def main():
     """
     # Inicializar banco
     db = Database()
-    miniapp = MiniAppServer(db)
-    await miniapp.start()
     resumo = db.resumo()
     print(f"📦 Banco: {resumo['fixtures']:,} fixtures, {resumo['fixtures_ft']:,} FT, "
           f"{resumo['fixtures_com_stats']:,} com stats")
@@ -173,7 +170,6 @@ async def main():
         print("\n⏹️  Parando bot...")
         if usar_scheduler:
             scheduler.parar()
-        await miniapp.stop()
         await app.updater.stop()
         await app.stop()
         await app.shutdown()
