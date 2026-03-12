@@ -18,7 +18,7 @@ def _latest_run(root: Path) -> Path:
 
 
 def _infer_conf_band(best_rule: dict | None) -> tuple[float, float]:
-    conf_min = 0.70
+    conf_min = 0.65
     conf_max = 1.01
     if not best_rule:
         return conf_min, conf_max
@@ -57,6 +57,8 @@ def main():
         touched_leagues.add(lid)
         for market in league.get("markets", []):
             if market.get("status") != "accepted":
+                continue
+            if market["market"] in {"btts_yes", "btts_no"}:
                 continue
             best = market.get("best_rule")
             conf_min, conf_max = _infer_conf_band(best)

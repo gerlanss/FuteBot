@@ -356,7 +356,7 @@ class ScannerSelectionTests(unittest.TestCase):
         header, body = msgs[0][0], msgs[1][0]
         self.assertIn("Mercados candidatos: <b>187</b>", header)
         self.assertIn("Bloqueadas por EV: <b>2</b>", header)
-        self.assertIn("Enviadas ao DeepSeek: <b>117</b>", header)
+        self.assertIn("Mercados revisados pelo FuteBot: <b>117</b>", header)
         self.assertIn("<code>RB Leipzig</code> <b>x</b> <code>FC Augsburg</code>", body)
 
 
@@ -480,7 +480,7 @@ class MarketDiscoveryTests(unittest.TestCase):
             ]
         })
 
-        self.assertEqual(conf_min, 0.70)
+        self.assertEqual(conf_min, 0.654)
         self.assertEqual(conf_max, 1.01)
 
     def test_strategy_rule_match_checks_tip_features(self):
@@ -575,8 +575,8 @@ class ScannerAuditFormattingTests(unittest.TestCase):
         })
 
         joined = "\n\n".join(texto for texto, _ in msgs)
-        self.assertIn("DeepSeek: <b>2</b> aprovadas | <b>1</b> rejeitadas", joined)
-        self.assertIn("Rejeitadas pelo DeepSeek", joined)
+        self.assertIn("Revisão final: <b>2</b> liberados | <b>1</b> barrados", joined)
+        self.assertIn("🚫 Barrados na revisão", joined)
         self.assertIn("Desfalques ofensivos importantes.", joined)
 
 

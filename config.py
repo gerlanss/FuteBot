@@ -188,6 +188,7 @@ EV_THRESHOLD = 0.03           # EV mínimo para considerar oportunidade (3%)
 PREFERRED_BOOKMAKER = "pinnacle"
 PREFERRED_BOOKMAKER_LABEL = "Pinnacle"
 SCAN_HORA = "07:00"           # Horário do scan diário
+LIBERACAO_T30_INTERVALO_MIN = _get_env_int("LIBERACAO_T30_INTERVALO_MIN", 5)
 RESULTADOS_HORA = "06:00"     # Horário da coleta de resultados
 RETREINO_DIA = "sun"           # Dia do retreino mensal (domingo — termina antes do scanner de segunda)
 RETREINO_HORA = "14:00"        # Horário do retreino mensal (14h dom → termina ~03h seg, 4h antes do scanner)
@@ -211,7 +212,7 @@ AUTO_RETREINO_MAX_LIGAS = _get_env_int("AUTO_RETREINO_MAX_LIGAS", 1)
 # Discovery semanal de strategies (liga x mercado)
 DISCOVERY_SEMANAL_DIA = _get_env_str("DISCOVERY_SEMANAL_DIA", "sun")
 DISCOVERY_SEMANAL_HORA = _get_env_str("DISCOVERY_SEMANAL_HORA", "22:00")
-DISCOVERY_TARGET_PRECISION = _get_env_float("DISCOVERY_TARGET_PRECISION", 0.70)
+DISCOVERY_TARGET_PRECISION = _get_env_float("DISCOVERY_TARGET_PRECISION", 0.65)
 DISCOVERY_MIN_TRAIN_SAMPLES = _get_env_int("DISCOVERY_MIN_TRAIN_SAMPLES", 30)
 DISCOVERY_MIN_TEST_SAMPLES = _get_env_int("DISCOVERY_MIN_TEST_SAMPLES", 10)
 DISCOVERY_MIN_TEST_SAMPLES_COPA = _get_env_int("DISCOVERY_MIN_TEST_SAMPLES_COPA", 8)

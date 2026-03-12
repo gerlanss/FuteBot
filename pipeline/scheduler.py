@@ -37,7 +37,7 @@ from config import (
     AUTO_RETREINO_TRIALS, AUTO_RETREINO_MAX_LIGAS,
     DISCOVERY_SEMANAL_DIA, DISCOVERY_SEMANAL_HORA, DISCOVERY_TARGET_PRECISION,
     DISCOVERY_MIN_TRAIN_SAMPLES, DISCOVERY_MIN_TEST_SAMPLES, DISCOVERY_MIN_TEST_SAMPLES_COPA,
-    DISCOVERY_OPTUNA_TRIALS, DISCOVERY_CUP_LEAGUE_IDS, LEAGUES,
+    DISCOVERY_OPTUNA_TRIALS, DISCOVERY_CUP_LEAGUE_IDS, LEAGUES, LIBERACAO_T30_INTERVALO_MIN,
 )
 
 from services.apifootball import raw_request
@@ -112,6 +112,14 @@ class Scheduler:
             replace_existing=True,
         )
 
+        self.scheduler.add_job(
+            self._job_liberacao_t30,
+            CronTrigger(minute=f"*/{max(1, LIBERACAO_T30_INTERVALO_MIN)}"),
+            id="liberacao_t30",
+            name="Liberação final T-30",
+            replace_existing=True,
+        )
+
         # 3. Relatório diário (06:45 — após coleta das 06:00, com resultados do dia anterior)
         self.scheduler.add_job(
             self._job_relatorio,
@@ -165,6 +173,7 @@ class Scheduler:
         print(f"   🧬 Discovery semanal: {DISCOVERY_SEMANAL_DIA} {DISCOVERY_SEMANAL_HORA}")
         print(f"   📥 Coleta: {RESULTADOS_HORA} (diário)")
         print(f"   🔍 Scanner: {SCAN_HORA} (diário)")
+        print(f"   ⏳ Liberação T-30: a cada {LIBERACAO_T30_INTERVALO_MIN} min")
         print(f"   📋 Relatório: 06:45 (resultados de ontem)")
         print(f"   ⚽ Ao vivo: a cada 2h 10:30-23:30")
         print(f"   🤖 Retreino: 1º {RETREINO_DIA} do mês {RETREINO_HORA} per-league (mensal)")
@@ -220,7 +229,7 @@ class Scheduler:
 
     @staticmethod
     def _infer_conf_band(best_rule: dict | None) -> tuple[float, float]:
-        conf_min = 0.70
+        conf_min = 0.65
         conf_max = 1.01
         if not best_rule:
             return conf_min, conf_max
@@ -522,11 +531,46 @@ class Scheduler:
                             for label, cb in botoes
                         ]
                     }
-                self._enviar_telegram(texto, reply_markup=reply_markup)
+                self._enviar_telegram_publico(texto, reply_markup=reply_markup)
 
         except Exception as e:
             print(f"❌ Erro no scanner: {e}")
             self._enviar_telegram(f"❌ Erro no scanner:\n{e}")
+
+    def _job_liberacao_t30(self):
+        """Job: libera os mercados na janela T-30 e publica o lote final."""
+        print(f"\n{'='*60}")
+        print(f"⏳ JOB: Liberação T-30 — {datetime.now()}")
+        print(f"{'='*60}")
+
+        try:
+            scanner = Scanner(self.db)
+            resultado = scanner.liberar_mercados()
+
+            if not any([
+                resultado.get("tips_enviadas_llm"),
+                resultado.get("tips_aprovadas"),
+                resultado.get("tips_rejeitadas_llm"),
+                resultado.get("combos"),
+            ]):
+                print("   ✅ Nenhum candidato elegível nesta janela")
+                return
+
+            msgs = scanner.formatar_relatorio(resultado)
+            for texto, botoes in msgs:
+                reply_markup = None
+                if botoes:
+                    reply_markup = {
+                        "inline_keyboard": [
+                            [{"text": label, "callback_data": cb}]
+                            for label, cb in botoes
+                        ]
+                    }
+                self._enviar_telegram_publico(texto, reply_markup=reply_markup)
+
+        except Exception as e:
+            print(f"❌ Erro na liberação T-30: {e}")
+            self._enviar_telegram(f"❌ Erro na liberação T-30:\n{e}")
 
     def _job_relatorio(self):
         """Job: relatório diário — resultados do dia ANTERIOR.
@@ -803,8 +847,35 @@ class Scheduler:
             print(f"❌ Erro no check ao vivo: {e}")
             self._enviar_telegram(f"❌ Erro no check ao vivo:\n{e}")
 
+    def _post_telegram(self, chat_id: int, texto: str, reply_markup: dict | None = None) -> bool:
+        """Envia uma mensagem para um chat específico via API HTTP do Telegram."""
+        from config import TELEGRAM_TOKEN
+        if not TELEGRAM_TOKEN:
+            print("[Scheduler] ⚠️ TELEGRAM_TOKEN ausente, msg não enviada")
+            return False
+
+        try:
+            import requests
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+            msg = texto[:4000] + "\n\n... (truncado)" if len(texto) > 4000 else texto
+            payload = {
+                "chat_id": int(chat_id),
+                "text": msg,
+                "parse_mode": "HTML",
+            }
+            if reply_markup:
+                import json as _json
+                payload["reply_markup"] = _json.dumps(reply_markup)
+            resp = requests.post(url, json=payload, timeout=15)
+            if resp.status_code == 200:
+                return True
+            print(f"[Scheduler] ⚠️ Telegram API {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            print(f"[Scheduler] ❌ Erro ao enviar Telegram: {e}")
+        return False
+
     def _enviar_telegram(self, texto: str, reply_markup: dict | None = None):
-        """Envia mensagem via API HTTP direta do Telegram (síncrono).
+        """Envia mensagem operacional ao chat admin principal.
 
         Não depende de _app_instance nem do event loop do bot.
         APScheduler roda jobs em ThreadPoolExecutor, então usamos
@@ -814,30 +885,28 @@ class Scheduler:
           texto: mensagem HTML
           reply_markup: dict com inline_keyboard (opcional, para botões ✏️ Odd)
         """
-        from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
-        if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-            try:
-                import requests
-                url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-                # Truncar se necessário (limite Telegram: 4096 chars)
-                msg = texto[:4000] + "\n\n... (truncado)" if len(texto) > 4000 else texto
-                payload = {
-                    "chat_id": int(TELEGRAM_CHAT_ID),
-                    "text": msg,
-                    "parse_mode": "HTML",
-                }
-                if reply_markup:
-                    import json as _json
-                    payload["reply_markup"] = _json.dumps(reply_markup)
-                resp = requests.post(url, json=payload, timeout=15)
-                if resp.status_code == 200:
-                    print(f"[Scheduler] ✅ Msg enviada ao Telegram")
-                else:
-                    print(f"[Scheduler] ⚠️ Telegram API {resp.status_code}: {resp.text[:200]}")
-            except Exception as e:
-                print(f"[Scheduler] ❌ Erro ao enviar Telegram: {e}")
+        from config import TELEGRAM_CHAT_ID
+        if TELEGRAM_CHAT_ID:
+            ok = self._post_telegram(int(TELEGRAM_CHAT_ID), texto, reply_markup=reply_markup)
+            if ok:
+                print("[Scheduler] ✅ Msg enviada ao Telegram")
         else:
             print("[Scheduler] ⚠️ TELEGRAM_TOKEN ou CHAT_ID ausente, msg não enviada")
+        print(texto)
+
+    def _enviar_telegram_publico(self, texto: str, reply_markup: dict | None = None):
+        """Envia radar/tips para todos os chats registrados."""
+        chat_ids = self.db.telegram_chat_ids()
+        if not chat_ids:
+            print("[Scheduler] ⚠️ Nenhum chat registrado, fallback para admin")
+            self._enviar_telegram(texto, reply_markup=reply_markup)
+            return
+
+        entregues = 0
+        for chat_id in chat_ids:
+            if self._post_telegram(chat_id, texto, reply_markup=reply_markup):
+                entregues += 1
+        print(f"[Scheduler] ✅ Msg pública enviada para {entregues}/{len(chat_ids)} chats")
         print(texto)
 
     # ══════════════════════════════════════════════
@@ -853,6 +922,7 @@ class Scheduler:
         """
         jobs = {
             "scanner": self._job_scanner,
+            "liberacao_t30": self._job_liberacao_t30,
             "coletar": self._job_coletar,
             "relatorio": self._job_relatorio,
             "retreinar": self._job_retreinar,

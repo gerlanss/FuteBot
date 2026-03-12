@@ -15,7 +15,7 @@ def main():
     parser = argparse.ArgumentParser(description="Treino sequencial por liga e mercado com descoberta de padrões.")
     parser.add_argument("--league-ids", default="")
     parser.add_argument("--markets", default="")
-    parser.add_argument("--target-precision", type=float, default=0.70)
+    parser.add_argument("--target-precision", type=float, default=0.65)
     parser.add_argument("--min-train-samples", type=int, default=30)
     parser.add_argument("--min-test-samples", type=int, default=10)
     parser.add_argument("--optuna-trials", type=int, default=20)

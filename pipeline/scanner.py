@@ -63,9 +63,6 @@ MERCADOS = [
     ("under05_2t","prob_under05_2t","2T Under 0.5 gols"),
     ("over15_2t", "prob_over15_2t", "2T Over 1.5 gols"),
     ("under15_2t","prob_under15_2t","2T Under 1.5 gols"),
-    # ── BTTS ──
-    ("btts_yes",  "prob_btts_yes",  "Ambos Marcam — Sim"),
-    ("btts_no",   "prob_btts_no",   "Ambos Marcam — Não"),
     # ── 1x2 Primeiro Tempo ──
     ("ht_home",   "prob_ht_home",   "1T Vitória {home}"),
     ("ht_draw",   "prob_ht_draw",   "1T Empate"),
@@ -80,11 +77,11 @@ MERCADOS = [
 ]
 
 # Probabilidade mínima para considerar uma tip (filtra ruído)
-# Elevado para 0.70 para priorizar apenas tips mais fortes
-PROB_MIN = 0.70
+# Elevado para 0.65 para ampliar o volume sem abrir demais a porteira
+PROB_MIN = 0.65
 
 # Confiança mínima absoluta — mesmo com strategy gate, bloqueia abaixo disso
-CONF_MIN_ABSOLUTA = 0.70
+CONF_MIN_ABSOLUTA = 0.65
 
 # Limite de tips por fixture (evita spam no mesmo jogo)
 MAX_TIPS_POR_JOGO = None
@@ -100,7 +97,6 @@ CATEGORIAS_CONFLITO = {
     "gols_1t":   {"over05_ht", "under05_ht", "over15_ht", "under15_ht"},
     "gols_2t":   {"over05_2t", "under05_2t", "over15_2t", "under15_2t"},
     "resultado": {"h2h_home", "h2h_draw", "h2h_away"},
-    "btts":      {"btts_yes", "btts_no"},
     "ht":        {"ht_home", "ht_draw", "ht_away"},
     "escanteios": {"corners_over_85", "corners_under_85",
                    "corners_over_95", "corners_under_95",
@@ -125,10 +121,10 @@ COMBO_MAX_TOTAL = 3
 COMBO_DUPLAS_MAX = 3
 COMBO_TRIPLAS_MAX = 3
 COMBO_PROB_MIN = 0.50         # Confiança composta mínima (produto das probs)
-COMBO_TIP_PROB_MIN = 0.70     # Prob mínima individual para entrar em combo
+COMBO_TIP_PROB_MIN = 0.65     # Prob mínima individual para entrar em combo
 PRESELECT_MAX_JOGOS = 18
 RELEASE_LOOKAHEAD_MINUTES = 30
-RELEASE_WINDOW_MINUTES = 45
+RELEASE_WINDOW_MINUTES = 5
 STRATEGY_EPSILON = 0.001
 STRATEGY_RELAX_PCT = 0.05
 
@@ -151,9 +147,6 @@ _MERCADO_ODDS_MAP = {
     "under25":   ("totals", "Under", 2.5),
     "over35":    ("totals", "Over",  3.5),
     "under35":   ("totals", "Under", 3.5),
-    # BTTS — market_key='btts', outcome='Yes'/'No'
-    "btts_yes":  ("btts", "Yes", None),
-    "btts_no":   ("btts", "No",  None),
     # 1x2 Primeiro Tempo — market_key='h2h_h1'
     "ht_home":   ("h2h_h1", "HOME", None),
     "ht_draw":   ("h2h_h1", "Draw", None),
@@ -1305,6 +1298,26 @@ class Scanner:
             return ""
 
     @staticmethod
+    def _emoji_mercado(mercado: str) -> str:
+        if mercado in {"over15", "under15", "over25", "under25", "over35", "under35",
+                       "over05_ht", "under05_ht", "over15_ht", "under15_ht",
+                       "over05_2t", "under05_2t", "over15_2t", "under15_2t"}:
+            return "⚽"
+        if mercado in {"corners_over_85", "corners_under_85", "corners_over_95",
+                       "corners_under_95", "corners_over_105", "corners_under_105"}:
+            return "⛳"
+        if mercado in {"h2h_home", "h2h_draw", "h2h_away", "ht_home", "ht_draw", "ht_away"}:
+            return "🎯"
+        return "📌"
+
+    def _descricao_mercado(self, tip: dict) -> str:
+        desc = tip.get("descricao", tip.get("mercado", "?"))
+        emoji = self._emoji_mercado(tip.get("mercado", ""))
+        if desc.startswith(("⚽", "⛳", "🎯", "🤝", "📌")):
+            return desc
+        return f"{emoji} {desc}"
+
+    @staticmethod
     def _data_local(date_str: str) -> str:
         """Extrai data local (DD/MM) de uma data ISO."""
         if not date_str:
@@ -1368,8 +1381,10 @@ class Scanner:
                 msgs.append(("\n".join(linhas), []))
             return msgs
 
+        aprovadas_revisao = int(resultado.get("tips_aprovadas_llm") or 0)
+        rejeitadas_revisao = len(resultado.get("tips_rejeitadas_llm", []))
         header_lines = [
-            f"<b>🚨 Liberação final {data_br}</b>",
+            f"<b>🚨 Revisão final {data_br}</b>",
             f"• Jogos analisados: <b>{resultado['fixtures']}</b>",
             f"• Jogos com previsão: <b>{resultado['previsoes']}</b>",
         ]
@@ -1380,16 +1395,22 @@ class Scanner:
         if resultado.get("tips_bloqueadas_ev") is not None:
             header_lines.append(f"• Bloqueadas por EV: <b>{resultado['tips_bloqueadas_ev']}</b>")
         if resultado.get("tips_enviadas_llm") is not None:
-            header_lines.append(f"• Enviadas ao DeepSeek: <b>{resultado['tips_enviadas_llm']}</b>")
+            header_lines.append(f"• Mercados revisados pelo FuteBot: <b>{resultado['tips_enviadas_llm']}</b>")
         if resultado.get("tips_aprovadas_llm") is not None:
-            rejeitadas = len(resultado.get("tips_rejeitadas_llm", []))
-            header_lines.append(f"• DeepSeek: <b>{resultado['tips_aprovadas_llm']}</b> aprovadas | <b>{rejeitadas}</b> rejeitadas")
+            header_lines.append(
+                f"• Revisão final: <b>{aprovadas_revisao}</b> liberados | <b>{rejeitadas_revisao}</b> barrados"
+            )
         header = "\n".join(header_lines)
 
         if not tips:
-            return [(header + "\n\n<i>Nenhum mercado liberado nesta janela.</i>", [])]
-
-        msgs.append((header + f"\n• Mercados liberados: <b>{len(tips)}</b>", []))
+            resumo_sem_liberacao = (
+                header
+                + "\n\n<b>🚫 Nenhum mercado foi liberado nesta janela.</b>\n"
+                + "<i>Os jogos seguiram para revisão final do FuteBot, mas os mercados foram barrados pelo contexto do momento.</i>"
+            )
+            msgs.append((resumo_sem_liberacao, []))
+        else:
+            msgs.append((header + f"\n• Mercados liberados: <b>{len(tips)}</b>", []))
 
         por_liga = defaultdict(lambda: defaultdict(list))
         for tip in tips:
@@ -1403,7 +1424,7 @@ class Scanner:
         for lid in ligas_ordenadas:
             fixtures_da_liga = por_liga[lid]
             nome_liga = _LEAGUE_NOME.get(lid, f"Liga {lid}")
-            linhas = [f"<b>{nome_liga}</b>"]
+            linhas = [f"<b>✅ Liberados | {nome_liga}</b>"]
 
             fixtures_ordenados = sorted(
                 fixtures_da_liga.items(),
@@ -1430,7 +1451,7 @@ class Scanner:
 
                 for tip in fix_tips:
                     prob = tip.get("prob_modelo", 0)
-                    desc = tip.get("descricao", tip.get("mercado", "?"))
+                    desc = self._descricao_mercado(tip)
                     odd = tip.get("odd_pinnacle") or tip.get("odd") or 0
                     ev = tip.get("ev_percent")
                     casa = tip.get("odd_fonte") or tip.get("bookmaker") or PREFERRED_BOOKMAKER_LABEL
@@ -1447,7 +1468,7 @@ class Scanner:
 
                     llm = tip.get("llm_validacao")
                     if llm and llm.get("motivo") and "desativado" not in llm.get("motivo", ""):
-                        linhas.append(f"  <i>{llm['motivo']}</i>")
+                        linhas.append(f"  <i>Motivo da liberação: {llm['motivo']}</i>")
 
             msgs.append(("\n".join(linhas).rstrip(), []))
 
@@ -1458,7 +1479,7 @@ class Scanner:
                 tipo_label = "Dupla" if combo["tipo"] == "dupla" else "Tripla"
                 linhas_combo.append(f"\n<b>{tipo_label} #{i}</b> | 🔗 Conf composta {combo['prob_composta']:.0%}")
                 for t in combo["tips"]:
-                    desc = t.get("descricao", t.get("mercado", "?"))
+                    desc = self._descricao_mercado(t)
                     linhas_combo.append(
                         f"• <code>{t.get('home_name', '?')}</code> <b>x</b> "
                         f"<code>{t.get('away_name', '?')}</code>"
@@ -1483,7 +1504,7 @@ class Scanner:
 
             for lid in sorted(por_liga_rejeitada.keys(), key=lambda item: _LEAGUE_NOME.get(item, f"Liga {item}")):
                 nome_liga = _LEAGUE_NOME.get(lid, f"Liga {lid}")
-                linhas = [f"<b>Rejeitadas pelo DeepSeek | {nome_liga}</b>"]
+                linhas = [f"<b>🚫 Barrados na revisão | {nome_liga}</b>"]
                 tips_liga = sorted(
                     por_liga_rejeitada[lid],
                     key=lambda item: (item.get("date", ""), -item.get("prob_modelo", 0)),
@@ -1494,10 +1515,10 @@ class Scanner:
                         f"\n<code>{tip.get('home_name', '?')}</code> <b>x</b> <code>{tip.get('away_name', '?')}</code>"
                     )
                     linhas.append(
-                        f"• <b>{tip.get('descricao', tip.get('mercado', '?'))}</b> | Conf {tip.get('prob_modelo', 0):.0%}"
+                        f"• <b>{self._descricao_mercado(tip)}</b> | Conf {tip.get('prob_modelo', 0):.0%}"
                     )
                     if llm.get("motivo"):
-                        linhas.append(f"  <i>{llm['motivo']}</i>")
+                        linhas.append(f"  <i>Motivo do bloqueio: {llm['motivo']}</i>")
                 msgs.append(("\n".join(linhas).rstrip(), []))
 
         return msgs
