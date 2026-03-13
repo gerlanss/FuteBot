@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import xgboost as xgb
 
-from config import LEAGUES
+from config import LEAGUES, DISCOVERY_CUP_LEAGUE_IDS
 from data.database import Database
 from models.features import FeatureExtractor
 
@@ -41,6 +41,14 @@ KEY_FEATURES = [
     "away_xg_avg",
     "home_shots_on_avg",
     "away_shots_on_avg",
+    "total_xg_avg",
+    "total_shots_on_avg",
+    "shots_on_diff",
+    "home_xg_per_shot_on",
+    "away_xg_per_shot_on",
+    "home_attack_vs_away_def",
+    "away_attack_vs_home_def",
+    "over15_env",
     "model_prob",
 ]
 
@@ -90,11 +98,94 @@ class MarketDiscoveryTrainer:
         self.extractor = FeatureExtractor(self.db)
         self.feature_names = FeatureExtractor.feature_names()
 
+    @staticmethod
+    def _is_cup(league_id: int) -> bool:
+        return int(league_id) in DISCOVERY_CUP_LEAGUE_IDS
+
+    @staticmethod
+    def _date_to_sort_key(value) -> str:
+        return str(value or "")
+
+    def _build_temporal_split(self, league_id: int, rows: list[dict], seasons: list[int]) -> dict:
+        is_cup = self._is_cup(league_id)
+
+        if not is_cup:
+            if len(seasons) < 2:
+                return {"error": "liga sem seasons suficientes para split temporal"}
+            test_seasons = [seasons[-1]]
+            train_seasons = seasons[:-1]
+            train_mask = np.asarray([row["_season"] in train_seasons for row in rows], dtype=bool)
+            test_mask = np.asarray([row["_season"] in test_seasons for row in rows], dtype=bool)
+            return {
+                "competition_type": "league",
+                "split_mode": "last_season",
+                "train_seasons": train_seasons,
+                "test_seasons": test_seasons,
+                "test_season": test_seasons[-1],
+                "train_mask": train_mask,
+                "test_mask": test_mask,
+            }
+
+        if len(seasons) >= 3:
+            test_seasons = seasons[-2:]
+            train_seasons = seasons[:-2]
+            train_mask = np.asarray([row["_season"] in train_seasons for row in rows], dtype=bool)
+            test_mask = np.asarray([row["_season"] in test_seasons for row in rows], dtype=bool)
+            return {
+                "competition_type": "cup",
+                "split_mode": "last_two_seasons",
+                "train_seasons": train_seasons,
+                "test_seasons": test_seasons,
+                "test_season": ",".join(str(item) for item in test_seasons),
+                "train_mask": train_mask,
+                "test_mask": test_mask,
+            }
+
+        if len(seasons) == 2:
+            test_seasons = [seasons[-1]]
+            train_seasons = [seasons[0]]
+            train_mask = np.asarray([row["_season"] in train_seasons for row in rows], dtype=bool)
+            test_mask = np.asarray([row["_season"] in test_seasons for row in rows], dtype=bool)
+            return {
+                "competition_type": "cup",
+                "split_mode": "two_seasons",
+                "train_seasons": train_seasons,
+                "test_seasons": test_seasons,
+                "test_season": test_seasons[-1],
+                "train_mask": train_mask,
+                "test_mask": test_mask,
+            }
+
+        ordered_idx = sorted(range(len(rows)), key=lambda idx: self._date_to_sort_key(rows[idx].get("_date")))
+        if len(ordered_idx) < 2:
+            return {"error": "copa sem dados suficientes para split cronologico"}
+
+        test_size = max(1, int(round(len(ordered_idx) * 0.30)))
+        test_size = min(test_size, max(1, len(ordered_idx) - 1))
+        train_size = len(ordered_idx) - test_size
+        if train_size <= 0:
+            return {"error": "copa sem dados suficientes para split cronologico"}
+
+        train_idx = set(ordered_idx[:train_size])
+        test_idx = set(ordered_idx[train_size:])
+        train_mask = np.asarray([idx in train_idx for idx in range(len(rows))], dtype=bool)
+        test_mask = np.asarray([idx in test_idx for idx in range(len(rows))], dtype=bool)
+        season = seasons[0] if seasons else None
+        return {
+            "competition_type": "cup",
+            "split_mode": "chronological_single_season",
+            "train_seasons": [season] if season is not None else [],
+            "test_seasons": [season] if season is not None else [],
+            "test_season": season,
+            "train_mask": train_mask,
+            "test_mask": test_mask,
+        }
+
     def run(
         self,
         league_ids: list[int] | None = None,
         markets: list[str] | None = None,
-        target_precision: float = 0.65,
+        target_precision: float = 0.70,
         min_train_samples: int = 30,
         min_test_samples: int = 10,
         optuna_trials: int = 20,
@@ -142,7 +233,10 @@ class MarketDiscoveryTrainer:
             league_result = {
                 "league_id": league_id,
                 "league_name": league_name,
+                "competition_type": league_data["competition_type"],
+                "split_mode": league_data["split_mode"],
                 "train_seasons": league_data["train_seasons"],
+                "test_seasons": league_data["test_seasons"],
                 "test_season": league_data["test_season"],
                 "rows": len(league_data["rows"]),
                 "markets": [],
@@ -206,14 +300,19 @@ class MarketDiscoveryTrainer:
     def _load_league_data(self, league_id: int) -> dict:
         fixtures = self.db.fixtures_finalizados(league_id=league_id)
         seasons = sorted({int(item["season"]) for item in fixtures if item.get("season")})
-        if len(seasons) < 2:
+        fixture_meta = {
+            int(item["fixture_id"]): {
+                "season": int(item.get("season") or 0),
+                "date": item.get("date") or "",
+            }
+            for item in fixtures
+        }
+        if not seasons:
             return {"error": "liga sem seasons suficientes para split temporal"}
 
-        test_season = seasons[-1]
-        train_seasons = seasons[:-1]
         features, labels = self.extractor.build_dataset(
             league_id=league_id,
-            seasons=train_seasons + [test_season],
+            seasons=seasons,
         )
         if len(features) < 50:
             return {"error": f"dados insuficientes ({len(features)} jogos com features)"}
@@ -222,18 +321,30 @@ class MarketDiscoveryTrainer:
         matrix = []
         for feat, label in zip(features, labels):
             row = {name: float(feat.get(name, 0) or 0) for name in self.feature_names}
-            row["_season"] = int(feat.get("_season") or 0)
-            row["_fixture_id"] = int(label["fixture_id"])
+            fixture_id = int(label["fixture_id"])
+            meta = fixture_meta.get(fixture_id, {})
+            row["_season"] = int(feat.get("_season") or meta.get("season") or 0)
+            row["_fixture_id"] = fixture_id
+            row["_date"] = meta.get("date") or ""
             row["_labels"] = label
             rows.append(row)
             matrix.append([row[name] for name in self.feature_names])
 
+        split = self._build_temporal_split(league_id, rows, seasons)
+        if "error" in split:
+            return split
+
         return {
             "league_id": league_id,
-            "train_seasons": train_seasons,
-            "test_season": test_season,
+            "competition_type": split["competition_type"],
+            "split_mode": split["split_mode"],
+            "train_seasons": split["train_seasons"],
+            "test_seasons": split["test_seasons"],
+            "test_season": split["test_season"],
             "rows": rows,
             "matrix": np.asarray(matrix, dtype=np.float32),
+            "train_mask": split["train_mask"],
+            "test_mask": split["test_mask"],
         }
 
     def _run_market(
@@ -248,8 +359,8 @@ class MarketDiscoveryTrainer:
         started = time.time()
         rows = league_data["rows"]
         X = league_data["matrix"]
-        train_mask = np.asarray([row["_season"] in league_data["train_seasons"] for row in rows], dtype=bool)
-        test_mask = np.asarray([row["_season"] == league_data["test_season"] for row in rows], dtype=bool)
+        train_mask = league_data["train_mask"]
+        test_mask = league_data["test_mask"]
         y = np.asarray(
             [1 if row["_labels"][market_spec.label_key] == market_spec.green_value else 0 for row in rows],
             dtype=np.int64,
@@ -539,8 +650,10 @@ class MarketDiscoveryTrainer:
     def _format_league_markdown(self, idx: int, total: int, league_result: dict) -> str:
         lines = [
             f"# Liga {idx}/{total} - {league_result['league_name']} ({league_result['league_id']})",
+            f"- Tipo: {league_result.get('competition_type', 'league')}",
+            f"- Split: {league_result.get('split_mode', 'last_season')}",
             f"- Seasons treino: {', '.join(str(x) for x in league_result.get('train_seasons', []))}",
-            f"- Season teste: {league_result.get('test_season')}",
+            f"- Seasons teste: {', '.join(str(x) for x in league_result.get('test_seasons', [])) or league_result.get('test_season')}",
             f"- Jogos com features: {league_result.get('rows', 0)}",
             f"- Mercados aceitos: {league_result.get('accepted_markets', 0)}/{len(league_result.get('markets', []))}",
             "",

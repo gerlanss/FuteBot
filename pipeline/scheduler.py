@@ -36,7 +36,8 @@ from config import (
     MIN_FIXTURES_TREINO, TIMEZONE, AUTO_RETREINO_HORA_INICIO, AUTO_RETREINO_HORA_FIM,
     AUTO_RETREINO_TRIALS, AUTO_RETREINO_MAX_LIGAS,
     DISCOVERY_SEMANAL_DIA, DISCOVERY_SEMANAL_HORA, DISCOVERY_TARGET_PRECISION,
-    DISCOVERY_MIN_TRAIN_SAMPLES, DISCOVERY_MIN_TEST_SAMPLES, DISCOVERY_MIN_TEST_SAMPLES_COPA,
+    DISCOVERY_TARGET_PRECISION_COPA, DISCOVERY_MIN_TRAIN_SAMPLES, DISCOVERY_MIN_TRAIN_SAMPLES_COPA,
+    DISCOVERY_MIN_TEST_SAMPLES, DISCOVERY_MIN_TEST_SAMPLES_COPA,
     DISCOVERY_OPTUNA_TRIALS, DISCOVERY_CUP_LEAGUE_IDS, LEAGUES, LIBERACAO_T30_INTERVALO_MIN,
     LIVE_CHECK_INTERVALO_MIN,
 )
@@ -231,7 +232,7 @@ class Scheduler:
 
     @staticmethod
     def _infer_conf_band(best_rule: dict | None) -> tuple[float, float]:
-        conf_min = 0.65
+        conf_min = 0.70
         conf_max = 1.01
         if not best_rule:
             return conf_min, conf_max
@@ -472,18 +473,23 @@ class Scheduler:
 
             total_saved = 0
             for lid in candidate_leagues:
+                target_precision = DISCOVERY_TARGET_PRECISION_COPA if self._liga_eh_copa(lid) else DISCOVERY_TARGET_PRECISION
+                min_train = DISCOVERY_MIN_TRAIN_SAMPLES_COPA if self._liga_eh_copa(lid) else DISCOVERY_MIN_TRAIN_SAMPLES
                 min_test = DISCOVERY_MIN_TEST_SAMPLES_COPA if self._liga_eh_copa(lid) else DISCOVERY_MIN_TEST_SAMPLES
                 markets = faltantes.get(lid) or None
                 league_name = next(
                     (info["nome"] for info in LEAGUES.values() if int(info["id"]) == lid),
                     f"Liga {lid}",
                 )
-                print(f"   🎯 Discovery liga {lid} ({league_name}) | mercados={markets or 'todos'} | min_test={min_test}")
+                print(
+                    f"   🎯 Discovery liga {lid} ({league_name}) | mercados={markets or 'todos'} "
+                    f"| target={target_precision:.0%} | min_train={min_train} | min_test={min_test}"
+                )
                 result = trainer.run(
                     league_ids=[lid],
                     markets=markets,
-                    target_precision=DISCOVERY_TARGET_PRECISION,
-                    min_train_samples=DISCOVERY_MIN_TRAIN_SAMPLES,
+                    target_precision=target_precision,
+                    min_train_samples=min_train,
                     min_test_samples=min_test,
                     optuna_trials=DISCOVERY_OPTUNA_TRIALS,
                 )
@@ -497,6 +503,8 @@ class Scheduler:
                     f"Mercados testados: {len(league_summary.get('markets', []))}\n"
                     f"Mercados aceitos: {league_summary.get('accepted_markets', 0)}\n"
                     f"Strategies promovidas: {saved}\n"
+                    f"Precisão alvo: {target_precision:.0%}\n"
+                    f"Min train usado: {min_train}\n"
                     f"Min test usado: {min_test}\n"
                     f"Run: {result.get('run_id')}"
                 )
@@ -756,8 +764,19 @@ class Scheduler:
                     if veredito in {"sinal_live", "cancelar", "monitorar_forte"}:
                         repetir = last_verdict == veredito and last_minute == elapsed
                         if not repetir:
-                            emoji = "🟢" if veredito == "sinal_live" else "🔴" if veredito == "cancelar" else "🟡"
-                            titulo = "Leitura live" if item.get("watch_type") == "approved_prelive" else "Reavaliacao live"
+                            if veredito == "sinal_live":
+                                if item.get("watch_type") == "approved_prelive":
+                                    emoji = "🟢"
+                                    titulo = "Entrada live liberada"
+                                else:
+                                    emoji = "🟡"
+                                    titulo = "Reavaliacao live"
+                            elif veredito == "cancelar":
+                                emoji = "🔴"
+                                titulo = "Leitura cancelada"
+                            else:
+                                emoji = "🟡"
+                                titulo = "Observacao live"
                             alertas_admin.append(
                                 f"{emoji} <b>{titulo}</b>\n"
                                 f"<b>{home_name} x {away_name}</b>\n"

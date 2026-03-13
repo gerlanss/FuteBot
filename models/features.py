@@ -173,6 +173,26 @@ class FeatureExtractor:
         feats["ref_fouls_avg"] = arb[1]
         feats["ref_total_jogos"] = arb[2]
 
+        # 18. FEATURES DERIVADAS DE PRESSAO/QUALIDADE
+        feats["total_xg_avg"] = round(feats["home_xg_avg"] + feats["away_xg_avg"], 2)
+        feats["total_shots_on_avg"] = round(feats["home_shots_on_avg"] + feats["away_shots_on_avg"], 2)
+        feats["shots_on_diff"] = round(feats["home_shots_on_avg"] - feats["away_shots_on_avg"], 2)
+        feats["home_xg_per_shot_on"] = round(
+            feats["home_xg_avg"] / max(feats["home_shots_on_avg"], 0.1), 3
+        )
+        feats["away_xg_per_shot_on"] = round(
+            feats["away_xg_avg"] / max(feats["away_shots_on_avg"], 0.1), 3
+        )
+        feats["home_attack_vs_away_def"] = round(
+            feats["home_goals_for_home"] * max(feats["away_goals_against_away"], 0.1), 3
+        )
+        feats["away_attack_vs_home_def"] = round(
+            feats["away_goals_for_away"] * max(feats["home_goals_against_home"], 0.1), 3
+        )
+        feats["over15_env"] = round(
+            feats["home_over15_pct"] * feats["away_over15_pct"], 3
+        )
+
         return feats
 
     def build_dataset(self, league_id: int = None,
@@ -612,4 +632,9 @@ class FeatureExtractor:
             "home_over35_pct", "away_over35_pct",
             # Árbitro
             "ref_yellows_avg", "ref_fouls_avg", "ref_total_jogos",
+            # Pressao/qualidade derivados
+            "total_xg_avg", "total_shots_on_avg", "shots_on_diff",
+            "home_xg_per_shot_on", "away_xg_per_shot_on",
+            "home_attack_vs_away_def", "away_attack_vs_home_def",
+            "over15_env",
         ]

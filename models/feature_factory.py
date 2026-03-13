@@ -157,6 +157,9 @@ class FeatureFactory(FeatureExtractor):
             feats[f"away_finish_eff_{w}"] = round(a_gf / max(a_xg, 0.1), 3)
 
             # ── 10. Diffs entre times ──
+            feats[f"shots_on_diff_{w}"] = round(h_shots_on - a_shots_on, 2)
+            feats[f"total_shots_on_{w}"] = round(h_shots_on + a_shots_on, 2)
+            feats[f"total_xg_{w}"] = round(h_xg + a_xg, 2)
             feats[f"shots_diff_{w}"] = round(h_shots - a_shots, 2)
             feats[f"poss_diff_{w}"] = round(
                 feats[f"home_poss_{w}"] - feats[f"away_poss_{w}"], 2
@@ -165,6 +168,10 @@ class FeatureFactory(FeatureExtractor):
                 feats[f"home_corners_{w}"] - feats[f"away_corners_{w}"], 2
             )
             feats[f"xg_diff_{w}"] = round(h_xg - a_xg, 2)
+            feats[f"home_xg_per_shot_on_{w}"] = round(h_xg / max(h_shots_on, 0.1), 3)
+            feats[f"away_xg_per_shot_on_{w}"] = round(a_xg / max(a_shots_on, 0.1), 3)
+            feats[f"home_attack_vs_away_def_{w}"] = round(h_gf * max(a_ga, 0.1), 3)
+            feats[f"away_attack_vs_home_def_{w}"] = round(a_gf * max(h_ga, 0.1), 3)
 
         # ════════════════════════════════════════
         #  FEATURES NÃO-JANELADAS (fixas)
@@ -246,6 +253,9 @@ class FeatureFactory(FeatureExtractor):
             feats[f"int_over25_{w}"] = round(
                 feats[f"home_over25_{w}"] * feats[f"away_over25_{w}"], 3
             )
+            feats[f"int_over15_{w}"] = round(
+                feats[f"home_over15_{w}"] * feats[f"away_over15_{w}"], 3
+            )
 
         # BTTS de ambos (se ambos marcam frequentemente)
         for w in JANELAS:
@@ -296,10 +306,17 @@ class FeatureFactory(FeatureExtractor):
                 nomes.append(f"{lado}_shot_acc_{w}")
                 nomes.append(f"{lado}_finish_eff_{w}")
             # Diffs derivados
+            nomes.append(f"shots_on_diff_{w}")
+            nomes.append(f"total_shots_on_{w}")
+            nomes.append(f"total_xg_{w}")
             nomes.append(f"shots_diff_{w}")
             nomes.append(f"poss_diff_{w}")
             nomes.append(f"corners_diff_{w}")
             nomes.append(f"xg_diff_{w}")
+            nomes.append(f"home_xg_per_shot_on_{w}")
+            nomes.append(f"away_xg_per_shot_on_{w}")
+            nomes.append(f"home_attack_vs_away_def_{w}")
+            nomes.append(f"away_attack_vs_home_def_{w}")
 
         # ── Features não-janeladas ──
         nomes.extend([
@@ -326,6 +343,8 @@ class FeatureFactory(FeatureExtractor):
         ])
         for w in JANELAS:
             nomes.append(f"int_over25_{w}")
+        for w in JANELAS:
+            nomes.append(f"int_over15_{w}")
         for w in JANELAS:
             nomes.append(f"int_btts_{w}")
 

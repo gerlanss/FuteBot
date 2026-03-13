@@ -8,6 +8,7 @@ from config import (
     GEMINI_API_KEY,
     GEMINI_BASE_URL,
     GEMINI_MODEL,
+    LEAGUES,
     USE_GEMINI_MARKET_LOOKUP,
 )
 
@@ -18,6 +19,17 @@ _BOOKMAKERS = ["Bet365", "Betano", "1xBet", "Pinnacle", "Sportingbet", "Betfair"
 class GeminiMarketLookup:
     def __init__(self):
         self.ativo = bool(GEMINI_API_KEY) and USE_GEMINI_MARKET_LOOKUP
+
+    @staticmethod
+    def _league_name(league_id) -> str:
+        try:
+            lid = int(league_id)
+        except (TypeError, ValueError):
+            return ""
+        for info in LEAGUES.values():
+            if int(info["id"]) == lid:
+                return info["nome"]
+        return ""
 
     def lookup_market(self, oportunidade: dict) -> dict:
         debug = self.debug_lookup_market(oportunidade)
@@ -96,9 +108,11 @@ class GeminiMarketLookup:
         }
 
     def _build_prompt(self, oportunidade: dict, stage: str) -> str:
+        league_name = self._league_name(oportunidade.get("league_id"))
         base = (
             f"Jogo: {oportunidade.get('home_name', '?')} vs {oportunidade.get('away_name', '?')}. "
             f"Data: {oportunidade.get('date', '')}. "
+            f"Competicao: {league_name or 'desconhecida'}. "
             f"Liga ID: {oportunidade.get('league_id', '')}. "
             f"Mercado interno: {oportunidade.get('mercado', '?')}. "
             f"Descricao: {oportunidade.get('descricao', oportunidade.get('mercado', '?'))}."

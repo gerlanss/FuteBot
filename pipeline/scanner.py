@@ -77,12 +77,8 @@ MERCADOS = [
     ("corners_under_105","prob_corners_under_105","⛳ Under 10.5 escanteios"),
 ]
 
-# Probabilidade mínima para considerar uma tip (filtra ruído)
-# Elevado para 0.65 para ampliar o volume sem abrir demais a porteira
-PROB_MIN = 0.65
-
-# Confiança mínima absoluta — mesmo com strategy gate, bloqueia abaixo disso
-CONF_MIN_ABSOLUTA = 0.65
+# Sem strategy ativa, ainda usamos um fallback conservador para não abrir ruído total.
+NO_STRATEGY_PROB_MIN = 0.70
 
 # Limite de tips por fixture (evita spam no mesmo jogo)
 MAX_TIPS_POR_JOGO = None
@@ -289,9 +285,13 @@ class Scanner:
 
         # ─── ETAPA 3: Expandir em tips por mercado ───
         print("\n🎯 Etapa 3: Expandindo mercados...")
-        tips_raw = self._expandir_mercados(previsoes)
+        min_prob = 0.0 if self._strategies else NO_STRATEGY_PROB_MIN
+        tips_raw = self._expandir_mercados(previsoes, min_prob=min_prob)
         tips_brutas = len(tips_raw)
-        print(f"   Tips brutas (prob >= {PROB_MIN:.0%}): {tips_brutas}")
+        if self._strategies:
+            print(f"   Tips brutas: {tips_brutas}")
+        else:
+            print(f"   Tips brutas (fallback sem strategy >= {NO_STRATEGY_PROB_MIN:.0%}): {tips_brutas}")
 
         # ─── ETAPA 4: Strategy Gate ───
         print("\n🛡️ Etapa 4: Filtrando pelo Strategy Gate...")
@@ -300,15 +300,8 @@ class Scanner:
             bloqueadas = len(tips_raw) - len(tips_gate)
             print(f"   ✅ Aprovadas: {len(tips_gate)} | 🚫 Bloqueadas: {bloqueadas}")
         else:
-            # Sem estratégias: usa limiar de confiança mais alto
-            tips_gate = [t for t in tips_raw if t["prob_modelo"] >= CONF_MIN_ABSOLUTA]
-            print(f"   ⚠️ Sem strategy gate — usando confiança >= {CONF_MIN_ABSOLUTA:.0%}: {len(tips_gate)} tips")
-
-        # Confiança mínima absoluta (safety net mesmo com strategy gate)
-        antes = len(tips_gate)
-        tips_gate = [t for t in tips_gate if t["prob_modelo"] >= CONF_MIN_ABSOLUTA]
-        if antes != len(tips_gate):
-            print(f"   🔒 Removidas {antes - len(tips_gate)} tips abaixo de {CONF_MIN_ABSOLUTA:.0%}")
+            tips_gate = tips_raw
+            print(f"   ⚠️ Sem strategy gate — mantendo fallback sem strategy: {len(tips_gate)} tips")
 
         # ─── ETAPA 4b: Resolver conflitos + limitar por jogo ───
         tips_gate = self._filtrar_conflitos_e_limites(tips_gate)
@@ -782,10 +775,10 @@ class Scanner:
     #  ETAPA 3: Expandir previsões em tips por mercado
     # ══════════════════════════════════════════════
 
-    def _expandir_mercados(self, previsoes: list[dict]) -> list[dict]:
+    def _expandir_mercados(self, previsoes: list[dict], min_prob: float = 0.0) -> list[dict]:
         """
         Transforma cada previsão (1 jogo com N probabilidades) em
-        N tips individuais (1 por mercado), filtrando por PROB_MIN.
+        N tips individuais (1 por mercado), filtrando pelo mínimo informado.
 
         Isso substitui o antigo _buscar_odds_e_ev: em vez de cruzar
         prob × odd para calcular EV, simplesmente emite a tip se a
@@ -798,7 +791,7 @@ class Scanner:
 
             for mercado_id, prob_key, desc_tpl in MERCADOS:
                 prob = pred.get(prob_key, 0)
-                if not prob or prob < PROB_MIN:
+                if not prob or prob < min_prob:
                     continue
 
                 tips.append({
@@ -1496,30 +1489,39 @@ class Scanner:
 
         if mode == "preselect":
             candidatos = resultado.get("preselecionados", [])
+            total_jogos = len({tip.get("fixture_id") for tip in candidatos})
+            total_mercados = len(candidatos)
             header = "\n".join([
                 f"<b>🗓️ Observação do dia {data_br}</b>",
-                f"Hoje separei <b>{len({tip.get('fixture_id') for tip in candidatos})}</b> jogo(s) para observar.",
+                f"Hoje separei <b>{total_jogos}</b> jogo(s) para observar.",
                 f"• Jogos analisados: <b>{resultado['fixtures']}</b>",
                 f"• Jogos com previsão: <b>{resultado['previsoes']}</b>",
                 f"• Mercados candidatos: <b>{resultado.get('tips_brutas', 0)}</b>",
                 f"• Após filtros internos: <b>{resultado.get('tips_pos_filtros', 0)}</b>",
+                f"• No radar agora: <b>{total_mercados}</b> mercado(s) em <b>{total_jogos}</b> jogo(s)",
                 "",
                 "ℹ️ Por enquanto vou deixar só os jogos no radar.",
                 "⏳ Os mercados saem na revisão final, 30 min antes de cada partida.",
             ])
             msgs.append((header, []))
-            por_liga = defaultdict(dict)
+            por_liga = defaultdict(lambda: defaultdict(list))
             for tip in candidatos:
-                por_liga[tip.get("league_id", 0)][tip.get("fixture_id")] = tip
+                por_liga[tip.get("league_id", 0)][tip.get("fixture_id")].append(tip)
             for lid in sorted(por_liga.keys(), key=lambda item: _LEAGUE_NOME.get(item, f"Liga {item}")):
                 linhas = [f"<b>👀 {_LEAGUE_NOME.get(lid, f'Liga {lid}')}</b>"]
-                for tip in sorted(por_liga[lid].values(), key=lambda item: item.get("date", "")):
+                fixtures_ordenados = sorted(
+                    por_liga[lid].values(),
+                    key=lambda items: items[0].get("date", "") if items else "",
+                )
+                for tips_fixture in fixtures_ordenados:
+                    tip = max(tips_fixture, key=lambda item: item.get("prob_modelo", 0))
                     horario = self._horario_local(tip.get("date", ""))
                     linhas.append(
                         f"• <code>{tip.get('home_name', '?')}</code> <b>x</b> <code>{tip.get('away_name', '?')}</code>"
                         f" <i>({horario})</i>"
                     )
-                    linhas.append(f"  🔗 {self._link_bet365_html(tip)}")
+                    if len(tips_fixture) > 1:
+                        linhas.append(f"  <i>{len(tips_fixture)} mercados em observação nesta partida.</i>")
                 msgs.append(("\n".join(linhas), []))
             return msgs
 

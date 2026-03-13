@@ -592,7 +592,7 @@ class MarketDiscoveryTests(unittest.TestCase):
             ]
         })
 
-        self.assertEqual(conf_min, 0.654)
+        self.assertEqual(conf_min, 0.70)
         self.assertEqual(conf_max, 1.01)
 
     def test_strategy_rule_match_checks_tip_features(self):
@@ -611,6 +611,42 @@ class MarketDiscoveryTests(unittest.TestCase):
             "prob_modelo": 0.8,
             "features": {"away_btts_pct": 0.2},
         }))
+
+    def test_cup_split_uses_last_two_seasons_when_available(self):
+        from models.market_discovery import MarketDiscoveryTrainer
+
+        trainer = MarketDiscoveryTrainer.__new__(MarketDiscoveryTrainer)
+        rows = [
+            {"_season": 2022, "_date": "2022-06-01"},
+            {"_season": 2023, "_date": "2023-06-01"},
+            {"_season": 2024, "_date": "2024-06-01"},
+            {"_season": 2025, "_date": "2025-06-01"},
+        ]
+
+        split = trainer._build_temporal_split(13, rows, [2022, 2023, 2024, 2025])
+
+        self.assertEqual(split["competition_type"], "cup")
+        self.assertEqual(split["split_mode"], "last_two_seasons")
+        self.assertEqual(split["train_seasons"], [2022, 2023])
+        self.assertEqual(split["test_seasons"], [2024, 2025])
+        self.assertEqual(int(split["train_mask"].sum()), 2)
+        self.assertEqual(int(split["test_mask"].sum()), 2)
+
+    def test_cup_single_season_uses_chronological_split(self):
+        from models.market_discovery import MarketDiscoveryTrainer
+
+        trainer = MarketDiscoveryTrainer.__new__(MarketDiscoveryTrainer)
+        rows = [
+            {"_season": 2026, "_date": f"2026-06-{day:02d}"}
+            for day in range(1, 11)
+        ]
+
+        split = trainer._build_temporal_split(1, rows, [2026])
+
+        self.assertEqual(split["competition_type"], "cup")
+        self.assertEqual(split["split_mode"], "chronological_single_season")
+        self.assertEqual(int(split["train_mask"].sum()), 7)
+        self.assertEqual(int(split["test_mask"].sum()), 3)
 
 
 class GeminiLookupTests(unittest.TestCase):
