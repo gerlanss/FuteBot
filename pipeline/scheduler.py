@@ -715,6 +715,7 @@ class Scheduler:
 
             print(f"   🔍 Verificando {len(itens)} item(ns) monitorados...")
             fixture_cache = {}
+            stats_cache = {}
             live = LiveIntelligence()
             resolvidos = 0
             acertos = 0
@@ -722,6 +723,8 @@ class Scheduler:
             notificacoes_publicas = []
             alertas_admin = []
             sinais_live = []
+            greens_antecipados = []
+            reds_antecipados = []
             itens_tocados = []
             itens_resolvidos = []
 
@@ -762,6 +765,7 @@ class Scheduler:
 
                 if status in ("1H", "2H", "HT", "ET", "LIVE"):
                     stats = stats_partida(fixture_id)
+                    stats_cache[fixture_id] = stats or []
                     leitura = live.analisar(item, game, stats)
                     veredito = leitura.get("veredito", "monitorar")
                     elapsed = leitura.get("elapsed") or "?"
@@ -809,6 +813,42 @@ class Scheduler:
                         sinal["payload"] = payload
                         sinal["elapsed"] = elapsed
                         sinais_live.append(sinal)
+
+                    if item.get("watch_type") == "approved_prelive":
+                        green_agora = self._mercado_green_antecipado(item, game, stats)
+                        red_agora = self._mercado_red_antecipado(item, game, stats)
+                        if green_agora and not payload.get("live_hit_notified"):
+                            mercado_label_curto = nomes_mercado.get(mercado, item.get("descricao") or mercado)
+                            greens_antecipados.append({
+                                "fixture_id": fixture_id,
+                                "mercado": mercado,
+                                "home_name": home_name,
+                                "away_name": away_name,
+                                "mercado_label": mercado_label_curto,
+                                "elapsed": elapsed,
+                            })
+                            payload["live_hit_notified"] = True
+                            self.db.atualizar_live_watch_item(
+                                item_id,
+                                note=item.get("note"),
+                                payload=payload,
+                            )
+                        elif red_agora and not payload.get("live_loss_notified"):
+                            mercado_label_curto = nomes_mercado.get(mercado, item.get("descricao") or mercado)
+                            reds_antecipados.append({
+                                "fixture_id": fixture_id,
+                                "mercado": mercado,
+                                "home_name": home_name,
+                                "away_name": away_name,
+                                "mercado_label": mercado_label_curto,
+                                "elapsed": elapsed,
+                            })
+                            payload["live_loss_notified"] = True
+                            self.db.atualizar_live_watch_item(
+                                item_id,
+                                note=item.get("note"),
+                                payload=payload,
+                            )
                     itens_tocados.append(item_id)
                     print(
                         f"   👀 {home_name} vs {away_name} | {mercado_label} | "
@@ -900,6 +940,36 @@ class Scheduler:
                 bloco_combo = self._formatar_combos_live(combos_live)
                 self._enviar_telegram_publico(bloco_combo)
 
+            if greens_antecipados:
+                blocos_hit = []
+                for item in greens_antecipados:
+                    blocos_hit.append(
+                        "✅ <b>Tip ja bateu no live</b>\n"
+                        f"<b>{item['home_name']} x {item['away_name']}</b>\n"
+                        f"• {item['mercado_label']}\n"
+                        f"• Minuto {item['elapsed']}"
+                    )
+                self._enviar_telegram_publico("\n\n".join(blocos_hit))
+
+            if reds_antecipados:
+                blocos_loss = []
+                for item in reds_antecipados:
+                    blocos_loss.append(
+                        "❌ <b>Tip ja perdeu no live</b>\n"
+                        f"<b>{item['home_name']} x {item['away_name']}</b>\n"
+                        f"• {item['mercado_label']}\n"
+                        f"• Minuto {item['elapsed']}"
+                    )
+                self._enviar_telegram_publico("\n\n".join(blocos_loss))
+
+            bloco_combo_status = self._notificar_progresso_combos_live(
+                hoje,
+                fixture_cache=fixture_cache,
+                stats_cache=stats_cache,
+            )
+            if bloco_combo_status:
+                self._enviar_telegram_publico(bloco_combo_status)
+
             if notificacoes_publicas:
                 header = "⚽ <b>Resultados ao vivo</b>\n\n"
                 corpo = "\n\n".join(notificacoes_publicas)
@@ -933,6 +1003,225 @@ class Scheduler:
         except Exception as e:
             print(f"❌ Erro no check ao vivo: {e}")
             self._enviar_telegram(f"❌ Erro no check ao vivo:\n{e}")
+
+    def _mercado_green_antecipado(self, item: dict, fixture: dict, stats: list[dict] | None = None) -> bool:
+        """Detecta se um mercado já ficou matematicamente green antes do FT."""
+        mercado = item.get("mercado", "")
+        status = ((fixture.get("fixture") or {}).get("status") or {}).get("short", "NS")
+        goals = fixture.get("goals") or {}
+        score = fixture.get("score") or {}
+        halftime = score.get("halftime") or {}
+        gh = int(goals.get("home") or 0)
+        ga = int(goals.get("away") or 0)
+        total_gols = gh + ga
+        ht_h = int(halftime.get("home") or 0)
+        ht_a = int(halftime.get("away") or 0)
+        total_ht = ht_h + ht_a
+        total_2t = max(0, total_gols - total_ht)
+        metricas = LiveIntelligence._stats_totais(stats or [])
+        corners = metricas.get("corners", 0.0)
+
+        if mercado == "over15":
+            return total_gols > 1
+        if mercado == "over25":
+            return total_gols > 2
+        if mercado == "over35":
+            return total_gols > 3
+        if mercado == "over05_ht":
+            return total_ht > 0 or (status == "1H" and total_gols > 0)
+        if mercado == "over15_ht":
+            return total_ht > 1 or (status == "1H" and total_gols > 1)
+        if mercado == "under05_ht" and status in {"HT", "2H", "FT", "AET", "PEN"}:
+            return total_ht < 1
+        if mercado == "under15_ht" and status in {"HT", "2H", "FT", "AET", "PEN"}:
+            return total_ht < 2
+        if mercado == "ht_home" and status in {"HT", "2H", "FT", "AET", "PEN"}:
+            return ht_h > ht_a
+        if mercado == "ht_draw" and status in {"HT", "2H", "FT", "AET", "PEN"}:
+            return ht_h == ht_a
+        if mercado == "ht_away" and status in {"HT", "2H", "FT", "AET", "PEN"}:
+            return ht_h < ht_a
+        if mercado == "over05_2t":
+            return total_2t > 0
+        if mercado == "over15_2t":
+            return total_2t > 1
+        if mercado == "corners_over_85":
+            return corners > 8.5
+        if mercado == "corners_over_95":
+            return corners > 9.5
+        if mercado == "corners_over_105":
+            return corners > 10.5
+        if mercado == "corners_under_85" and status in {"FT", "AET", "PEN"}:
+            return corners < 8.5
+        if mercado == "corners_under_95" and status in {"FT", "AET", "PEN"}:
+            return corners < 9.5
+        if mercado == "corners_under_105" and status in {"FT", "AET", "PEN"}:
+            return corners < 10.5
+        if mercado == "under15" and status in {"FT", "AET", "PEN"}:
+            return total_gols < 2
+        if mercado == "under25" and status in {"FT", "AET", "PEN"}:
+            return total_gols < 3
+        if mercado == "under35" and status in {"FT", "AET", "PEN"}:
+            return total_gols < 4
+        if mercado == "under05_2t" and status in {"FT", "AET", "PEN"}:
+            return total_2t < 1
+        if mercado == "under15_2t" and status in {"FT", "AET", "PEN"}:
+            return total_2t < 2
+        if mercado == "h2h_home" and status in {"FT", "AET", "PEN"}:
+            return gh > ga
+        if mercado == "h2h_draw" and status in {"FT", "AET", "PEN"}:
+            return gh == ga
+        if mercado == "h2h_away" and status in {"FT", "AET", "PEN"}:
+            return gh < ga
+        return False
+
+    def _mercado_red_antecipado(self, item: dict, fixture: dict, stats: list[dict] | None = None) -> bool:
+        """Detecta se um mercado já ficou matematicamente red antes do FT."""
+        mercado = item.get("mercado", "")
+        status = ((fixture.get("fixture") or {}).get("status") or {}).get("short", "NS")
+        goals = fixture.get("goals") or {}
+        score = fixture.get("score") or {}
+        halftime = score.get("halftime") or {}
+        gh = int(goals.get("home") or 0)
+        ga = int(goals.get("away") or 0)
+        total_gols = gh + ga
+        ht_h = int(halftime.get("home") or 0)
+        ht_a = int(halftime.get("away") or 0)
+        total_ht = ht_h + ht_a
+        total_2t = max(0, total_gols - total_ht)
+        metricas = LiveIntelligence._stats_totais(stats or [])
+        corners = metricas.get("corners", 0.0)
+
+        if mercado == "under15":
+            return total_gols > 1
+        if mercado == "under25":
+            return total_gols > 2
+        if mercado == "under35":
+            return total_gols > 3
+        if mercado == "under05_ht":
+            return total_ht > 0 or (status == "1H" and total_gols > 0)
+        if mercado == "under15_ht":
+            return total_ht > 1 or (status == "1H" and total_gols > 1)
+        if mercado == "over05_ht" and status in {"HT", "2H", "FT", "AET", "PEN"}:
+            return total_ht < 1
+        if mercado == "over15_ht" and status in {"HT", "2H", "FT", "AET", "PEN"}:
+            return total_ht < 2
+        if mercado == "under05_2t":
+            return total_2t > 0
+        if mercado == "under15_2t":
+            return total_2t > 1
+        if mercado == "over05_2t" and status in {"FT", "AET", "PEN"}:
+            return total_2t < 1
+        if mercado == "over15_2t" and status in {"FT", "AET", "PEN"}:
+            return total_2t < 2
+        if mercado == "corners_under_85":
+            return corners > 8.5
+        if mercado == "corners_under_95":
+            return corners > 9.5
+        if mercado == "corners_under_105":
+            return corners > 10.5
+        if mercado == "corners_over_85" and status in {"FT", "AET", "PEN"}:
+            return corners < 8.5
+        if mercado == "corners_over_95" and status in {"FT", "AET", "PEN"}:
+            return corners < 9.5
+        if mercado == "corners_over_105" and status in {"FT", "AET", "PEN"}:
+            return corners < 10.5
+        if mercado == "ht_home" and status in {"HT", "2H", "FT", "AET", "PEN"}:
+            return ht_h <= ht_a
+        if mercado == "ht_draw" and status in {"HT", "2H", "FT", "AET", "PEN"}:
+            return ht_h != ht_a
+        if mercado == "ht_away" and status in {"HT", "2H", "FT", "AET", "PEN"}:
+            return ht_h >= ht_a
+        if mercado == "over15" and status in {"FT", "AET", "PEN"}:
+            return total_gols < 2
+        if mercado == "over25" and status in {"FT", "AET", "PEN"}:
+            return total_gols < 3
+        if mercado == "over35" and status in {"FT", "AET", "PEN"}:
+            return total_gols < 4
+        if mercado == "h2h_home" and status in {"FT", "AET", "PEN"}:
+            return gh <= ga
+        if mercado == "h2h_draw" and status in {"FT", "AET", "PEN"}:
+            return gh != ga
+        if mercado == "h2h_away" and status in {"FT", "AET", "PEN"}:
+            return gh >= ga
+        return False
+
+    def _notificar_progresso_combos_live(
+        self,
+        data: str,
+        *,
+        fixture_cache: dict[int, dict],
+        stats_cache: dict[int, list[dict]],
+    ) -> str:
+        """Gera bloco de progresso dos combos quando uma ou mais pernas já bateram."""
+        combos = self.db.combos_por_data(data)
+        if not combos:
+            return ""
+
+        linhas = []
+        for idx, combo in enumerate(combos, start=1):
+            itens = combo.get("items") or []
+            if not itens:
+                continue
+
+            locked = []
+            lost = []
+            pendentes = []
+            for item in itens:
+                fixture_id = item.get("fixture_id")
+                if item.get("acertou") == 1:
+                    locked.append(item)
+                    continue
+                if item.get("acertou") == 0:
+                    lost.append(item)
+                    continue
+                game = fixture_cache.get(fixture_id)
+                stats = stats_cache.get(fixture_id)
+                if game and self._mercado_green_antecipado(item, game, stats):
+                    locked.append(item)
+                elif game and self._mercado_red_antecipado(item, game, stats):
+                    lost.append(item)
+                else:
+                    pendentes.append(item)
+
+            if not locked and not lost:
+                continue
+
+            if lost:
+                progress_key = f"lost_{len(lost)}_{len(locked)}"
+            else:
+                progress_key = f"locked_{len(locked)}"
+            combo_id = combo.get("id")
+            if combo_id and self.db.combo_live_notification_exists(combo_id, progress_key):
+                continue
+            if combo_id:
+                self.db.salvar_combo_live_notification(combo_id, progress_key)
+
+            tipo = "Dupla" if combo.get("combo_type") == "dupla" else "Tripla"
+            if lost:
+                linhas.append(f"❌ <b>{tipo} perdida #{idx}</b>")
+                linhas.append(f"• {len(lost)} perna(s) ja deram red")
+            else:
+                linhas.append(f"🟣 <b>{tipo} em andamento #{idx}</b>")
+                linhas.append(f"• {len(locked)}/{len(itens)} perna(s) ja bateram")
+            for item in locked:
+                linhas.append(
+                    f"✅ {item.get('home_name', '?')} x {item.get('away_name', '?')} | {item.get('mercado', '?')}"
+                )
+            for item in lost:
+                linhas.append(
+                    f"❌ {item.get('home_name', '?')} x {item.get('away_name', '?')} | {item.get('mercado', '?')}"
+                )
+            for item in pendentes:
+                linhas.append(
+                    f"⏳ Falta: {item.get('home_name', '?')} x {item.get('away_name', '?')} | {item.get('mercado', '?')}"
+                )
+            linhas.append("")
+
+        if not linhas:
+            return ""
+        linhas.append("<i>Atualizacao live dos combos do dia.</i>")
+        return "\n".join(linhas).strip()
 
     def _gerar_combos_live(self, sinais_live: list[dict]) -> list[dict]:
         """Gera duplas/triplas live sem repetir o mesmo combo a cada ciclo."""

@@ -282,6 +282,15 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_combo_items_combo
                 ON combo_items(combo_id);
 
+            CREATE TABLE IF NOT EXISTS combo_live_notifications (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                combo_id       INTEGER NOT NULL,
+                progress_key   TEXT NOT NULL,
+                created_at     TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(combo_id, progress_key),
+                FOREIGN KEY (combo_id) REFERENCES combos(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS telegram_chats (
                 chat_id        INTEGER PRIMARY KEY,
                 is_admin       INTEGER NOT NULL DEFAULT 0,
@@ -493,6 +502,16 @@ class Database:
                 last_checked_at  TEXT,
                 resolved_at      TEXT,
                 UNIQUE(scan_date, fixture_id, mercado, watch_type)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS combo_live_notifications (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                combo_id       INTEGER NOT NULL,
+                progress_key   TEXT NOT NULL,
+                created_at     TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(combo_id, progress_key),
+                FOREIGN KEY (combo_id) REFERENCES combos(id) ON DELETE CASCADE
             )
         """)
 
@@ -1283,6 +1302,27 @@ class Database:
 
         conn.close()
         return resultado
+
+    def combo_live_notification_exists(self, combo_id: int, progress_key: str) -> bool:
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT 1 FROM combo_live_notifications WHERE combo_id = ? AND progress_key = ? LIMIT 1",
+            (combo_id, progress_key),
+        ).fetchone()
+        conn.close()
+        return row is not None
+
+    def salvar_combo_live_notification(self, combo_id: int, progress_key: str):
+        conn = self._conn()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO combo_live_notifications (combo_id, progress_key)
+            VALUES (?, ?)
+            """,
+            (combo_id, progress_key),
+        )
+        conn.commit()
+        conn.close()
 
     def atualizar_odd_manual(self, fixture_id: int, mercado: str,
                              odd: float, ev_percent: float,
