@@ -1067,6 +1067,39 @@ class Database:
         conn.commit()
         conn.close()
 
+    def atualizar_live_watch_item(
+        self,
+        item_id: int,
+        *,
+        status: str | None = None,
+        note: str | None = None,
+        payload: dict | None = None,
+    ):
+        """Atualiza campos mutáveis de um item da watchlist live."""
+        sets = ["last_checked_at = CURRENT_TIMESTAMP"]
+        params = []
+
+        if status is not None:
+            sets.append("status = ?")
+            params.append(status)
+            if status == "resolved":
+                sets.append("resolved_at = CURRENT_TIMESTAMP")
+        if note is not None:
+            sets.append("note = ?")
+            params.append(note)
+        if payload is not None:
+            sets.append("payload_json = ?")
+            params.append(json.dumps(payload, ensure_ascii=False))
+
+        params.append(item_id)
+        conn = self._conn()
+        conn.execute(
+            f"UPDATE live_watchlist SET {', '.join(sets)} WHERE id = ?",
+            params,
+        )
+        conn.commit()
+        conn.close()
+
     def scan_audit_por_data(self, data: str, decisao: str = None) -> list[dict]:
         """Retorna a trilha do LLM para um scan especifico."""
         conn = self._conn()

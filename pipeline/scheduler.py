@@ -38,9 +38,11 @@ from config import (
     DISCOVERY_SEMANAL_DIA, DISCOVERY_SEMANAL_HORA, DISCOVERY_TARGET_PRECISION,
     DISCOVERY_MIN_TRAIN_SAMPLES, DISCOVERY_MIN_TEST_SAMPLES, DISCOVERY_MIN_TEST_SAMPLES_COPA,
     DISCOVERY_OPTUNA_TRIALS, DISCOVERY_CUP_LEAGUE_IDS, LEAGUES, LIBERACAO_T30_INTERVALO_MIN,
+    LIVE_CHECK_INTERVALO_MIN,
 )
 
-from services.apifootball import raw_request
+from services.apifootball import raw_request, stats_partida
+from services.live_intelligence import LiveIntelligence
 
 
 class Scheduler:
@@ -132,7 +134,7 @@ class Scheduler:
         # 5. Acompanhamento ao vivo — verifica jogos previstos a cada 2h (10h-00h)
         self.scheduler.add_job(
             self._job_check_ao_vivo,
-            CronTrigger(hour="10-23/2", minute=30),
+            CronTrigger(hour="10-23", minute=f"*/{max(1, LIVE_CHECK_INTERVALO_MIN)}"),
             id="check_ao_vivo",
             name="Check resultados ao vivo",
             replace_existing=True,
@@ -175,7 +177,7 @@ class Scheduler:
         print(f"   🔍 Scanner: {SCAN_HORA} (diário)")
         print(f"   ⏳ Liberação T-30: a cada {LIBERACAO_T30_INTERVALO_MIN} min")
         print(f"   📋 Relatório: 06:45 (resultados de ontem)")
-        print(f"   ⚽ Ao vivo: a cada 2h 10:30-23:30")
+        print(f"   ⚽ Ao vivo: a cada {LIVE_CHECK_INTERVALO_MIN} min 10:00-23:59")
         print(f"   🤖 Retreino: 1º {RETREINO_DIA} do mês {RETREINO_HORA} per-league (mensal)")
         print()
 
@@ -670,74 +672,129 @@ class Scheduler:
 
     def _job_check_ao_vivo(self):
         """
-        Job: verifica jogos previstos que já finalizaram e notifica resultado.
+        Job: acompanha jogos monitorados pelo pre-live e sinaliza leitura live.
 
-        Roda a cada 2h (10:30-23:30). Para cada previsão pendente de hoje/ontem:
-          1. Consulta status do jogo na API-Football (por fixture_id)
-          2. Se FT → resolve previsão e envia notificação individual
-          3. Se não FT → ignora (será verificado no próximo ciclo)
+        Itens acompanhados:
+          - entradas aprovadas no pre-live
+          - bloqueios que merecem reavaliação live
 
-        Custo: ~1 request por previsão pendente (máximo ~10/ciclo).
+        Em jogos ao vivo:
+          - lê placar/status
+          - puxa stats da partida
+          - passa pela LiveIntelligence
+
+        Em jogos finalizados:
+          - resolve previsões aprovadas
+          - fecha itens observados
         """
         print(f"\n{'='*60}")
         print(f"⚽ JOB: Check ao vivo — {datetime.now()}")
         print(f"{'='*60}")
 
         try:
-            pendentes = self.db.predictions_pendentes()
-            if not pendentes:
-                print("   ✅ Nenhuma previsão pendente")
-                return
-
-            # Filtrar apenas previsões de hoje e ontem (não verificar antigas demais)
             hoje = datetime.now().strftime("%Y-%m-%d")
             ontem = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-            recentes = [
-                p for p in pendentes
-                if p.get("date", "")[:10] in (hoje, ontem)
-            ]
-
-            if not recentes:
-                print("   ✅ Nenhuma previsão recente pendente")
+            itens = self.db.live_watch_items(dates=[ontem, hoje], status="active")
+            if not itens:
+                print("   ✅ Nenhum jogo em observação live")
                 return
 
-            print(f"   🔍 Verificando {len(recentes)} previsões pendentes...")
-
+            print(f"   🔍 Verificando {len(itens)} item(ns) monitorados...")
+            fixture_cache = {}
+            live = LiveIntelligence()
             resolvidos = 0
             acertos = 0
             erros = 0
-            notificacoes = []
+            notificacoes_publicas = []
+            alertas_admin = []
+            itens_tocados = []
+            itens_resolvidos = []
 
-            for pred in recentes:
-                fixture_id = pred["fixture_id"]
+            nomes_mercado = {
+                "h2h_home": "Casa", "h2h_draw": "Empate", "h2h_away": "Fora",
+                "over15": "Over 1.5", "under15": "Under 1.5",
+                "over25": "Over 2.5", "under25": "Under 2.5",
+                "over35": "Over 3.5", "under35": "Under 3.5",
+                "ht_home": "1T Casa", "ht_draw": "1T Empate", "ht_away": "1T Fora",
+                "over05_ht": "1T Over 0.5", "under05_ht": "1T Under 0.5",
+                "over15_ht": "1T Over 1.5", "under15_ht": "1T Under 1.5",
+                "over05_2t": "2T Over 0.5", "under05_2t": "2T Under 0.5",
+                "over15_2t": "2T Over 1.5", "under15_2t": "2T Under 1.5",
+                "corners_over_85": "Escanteios Over 8.5",
+                "corners_under_85": "Escanteios Under 8.5",
+                "corners_over_95": "Escanteios Over 9.5",
+                "corners_under_95": "Escanteios Under 9.5",
+                "corners_over_105": "Escanteios Over 10.5",
+                "corners_under_105": "Escanteios Under 10.5",
+            }
 
-                # Consultar status atual do jogo na API
-                r = raw_request("fixtures", {"id": fixture_id})
-                resp = r.get("response", [])
-                if not resp:
+            for item in itens:
+                fixture_id = item["fixture_id"]
+                if fixture_id not in fixture_cache:
+                    r = raw_request("fixtures", {"id": fixture_id})
+                    fixture_cache[fixture_id] = (r.get("response", []) or [None])[0]
+                game = fixture_cache.get(fixture_id)
+                if not game:
                     continue
 
-                game = resp[0]
                 status = game.get("fixture", {}).get("status", {}).get("short", "NS")
+                item_id = item["id"]
+                mercado = item.get("mercado", "")
+                mercado_label = nomes_mercado.get(mercado, item.get("descricao") or mercado)
+                home_name = item.get("home_name", "?")
+                away_name = item.get("away_name", "?")
+                payload = dict(item.get("payload") or {})
+
+                if status in ("1H", "2H", "HT", "ET", "LIVE"):
+                    stats = stats_partida(fixture_id)
+                    leitura = live.analisar(item, game, stats)
+                    veredito = leitura.get("veredito", "monitorar")
+                    elapsed = leitura.get("elapsed") or "?"
+                    last_verdict = payload.get("last_live_verdict")
+                    last_minute = payload.get("last_live_minute")
+
+                    if veredito in {"sinal_live", "cancelar", "monitorar_forte"}:
+                        repetir = last_verdict == veredito and last_minute == elapsed
+                        if not repetir:
+                            emoji = "🟢" if veredito == "sinal_live" else "🔴" if veredito == "cancelar" else "🟡"
+                            titulo = "Leitura live" if item.get("watch_type") == "approved_prelive" else "Reavaliacao live"
+                            alertas_admin.append(
+                                f"{emoji} <b>{titulo}</b>\n"
+                                f"<b>{home_name} x {away_name}</b>\n"
+                                f"• {mercado_label}\n"
+                                f"• Minuto {elapsed}\n"
+                                f"• {leitura.get('mensagem', 'Sem leitura adicional.')}"
+                            )
+                            payload["last_live_verdict"] = veredito
+                            payload["last_live_minute"] = elapsed
+                            note = leitura.get("mensagem", item.get("note"))
+                            novo_status = None
+                            if item.get("watch_type") == "blocked_recheck" and veredito in {"sinal_live", "cancelar"}:
+                                novo_status = "resolved"
+                                itens_resolvidos.append(item_id)
+                            self.db.atualizar_live_watch_item(
+                                item_id,
+                                status=novo_status,
+                                note=note,
+                                payload=payload,
+                            )
+                    itens_tocados.append(item_id)
+                    print(
+                        f"   👀 {home_name} vs {away_name} | {mercado_label} | "
+                        f"{status} {elapsed}' | {veredito}"
+                    )
+                    continue
 
                 if status != "FT":
-                    # Jogo ainda não terminou — mostrar status atual
-                    elapsed = game.get("fixture", {}).get("status", {}).get("elapsed", "")
-                    if status in ("1H", "2H", "HT", "ET"):
-                        elapsed = elapsed or "?"
-                        print(f"   ⏳ {pred['home_name']} vs {pred['away_name']} — "
-                              f"em andamento ({status} {elapsed}')")
+                    itens_tocados.append(item_id)
                     continue
 
-                # Jogo finalizado — resolver previsão
                 self.db.salvar_fixture(game)
-
                 gh = game.get("goals", {}).get("home")
                 ga = game.get("goals", {}).get("away")
                 if gh is None or ga is None:
                     continue
 
-                # Determinar resultado
                 if gh > ga:
                     resultado = "home"
                 elif gh == ga:
@@ -745,15 +802,18 @@ class Scheduler:
                 else:
                     resultado = "away"
 
-                # Resolver no banco
+                itens_tocados.append(item_id)
+                itens_resolvidos.append(item_id)
+
+                if item.get("watch_type") != "approved_prelive":
+                    print(f"   📌 {home_name} vs {away_name} finalizado | observação encerrada")
+                    continue
+
                 n = self.db.resolver_prediction(fixture_id, resultado, gh, ga)
                 if n == 0:
                     continue
-
                 resolvidos += 1
 
-                # Verificar se acertou
-                mercado = pred.get("mercado", "")
                 total_gols = gh + ga
                 acertou = False
 
@@ -775,21 +835,6 @@ class Scheduler:
                     acertou = True
                 elif mercado == "under35" and total_gols < 4:
                     acertou = True
-                elif mercado == "btts_yes" and gh > 0 and ga > 0:
-                    acertou = True
-                elif mercado == "btts_no" and (gh == 0 or ga == 0):
-                    acertou = True
-
-                # Nomes legíveis para os mercados
-                nomes_mercado = {
-                    "h2h_home": "Casa", "h2h_draw": "Empate", "h2h_away": "Fora",
-                    "over15": "Over 1.5", "under15": "Under 1.5",
-                    "over25": "Over 2.5", "under25": "Under 2.5",
-                    "over35": "Over 3.5", "under35": "Under 3.5",
-                    "btts_yes": "BTTS Sim", "btts_no": "BTTS Não",
-                    "ht_home": "1T Casa", "ht_draw": "1T Empate", "ht_away": "1T Fora",
-                }
-                mercado_label = nomes_mercado.get(mercado, mercado)
 
                 if acertou:
                     acertos += 1
@@ -802,20 +847,26 @@ class Scheduler:
 
                 # Montar notificação individual
                 notif = (
-                    f"{emoji} *{pred['home_name']} {gh}-{ga} {pred['away_name']}*\n"
+                    f"{emoji} <b>{home_name} {gh}-{ga} {away_name}</b>\n"
                     f"   Aposta: {mercado_label}\n"
                     f"   {resultado_txt}"
                 )
-                notificacoes.append(notif)
-                print(f"   {emoji} {pred['home_name']} {gh}-{ga} {pred['away_name']} "
+                notificacoes_publicas.append(notif)
+                print(f"   {emoji} {home_name} {gh}-{ga} {away_name} "
                       f"| {mercado_label} | {resultado_txt}")
 
-            # Enviar notificações agrupadas (se houver)
-            if notificacoes:
-                header = "⚽ <b>Resultados ao vivo</b>\n\n"
-                corpo = "\n\n".join(notificacoes)
+            if itens_tocados:
+                self.db.tocar_live_watchlist(itens_tocados)
+            if itens_resolvidos:
+                self.db.atualizar_status_live_watchlist(itens_resolvidos, "resolved")
 
-                # Resumo rápido
+            if alertas_admin:
+                bloco = "⚽ <b>Leitura live do FuteBot</b>\n\n" + "\n\n".join(alertas_admin)
+                self._enviar_telegram(bloco)
+
+            if notificacoes_publicas:
+                header = "⚽ <b>Resultados ao vivo</b>\n\n"
+                corpo = "\n\n".join(notificacoes_publicas)
                 total_check = acertos + erros
                 if total_check > 0:
                     pct = acertos / total_check * 100
@@ -827,9 +878,8 @@ class Scheduler:
                 else:
                     resumo = ""
 
-                self._enviar_telegram(header + corpo + resumo)
+                self._enviar_telegram_publico(header + corpo + resumo)
 
-                # Se todas as previsões do dia foram resolvidas, enviar RESUMO DO DIA
                 pendentes_hoje = [
                     p for p in self.db.predictions_pendentes()
                     if p.get("date", "")[:10] == hoje
@@ -839,9 +889,10 @@ class Scheduler:
                     learner = Learner(self.db)
                     resumo_dia = learner.relatorio_resultado_dia(hoje)
                     if "Nenhum resultado" not in resumo_dia:
-                        self._enviar_telegram(resumo_dia)
-            else:
-                print("   📭 Nenhum jogo finalizado neste ciclo")
+                        self._enviar_telegram_publico(resumo_dia)
+
+            if not alertas_admin and not notificacoes_publicas:
+                print("   📭 Nenhuma atualização relevante neste ciclo")
 
         except Exception as e:
             print(f"❌ Erro no check ao vivo: {e}")

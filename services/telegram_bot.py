@@ -25,6 +25,7 @@ import sys
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote_plus
 
 from telegram import (
     Bot,
@@ -132,6 +133,20 @@ def _botao_voltar() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("← Menu Principal", callback_data="cmd_menu")]
     ])
 
+
+
+def _link_bet365_markdown(home_name: str = "", away_name: str = "", mercado: str = "") -> str:
+    query_parts = [
+        "site:bet365.bet.br",
+        str(home_name or "").strip(),
+        str(away_name or "").strip(),
+        str(mercado or "").strip(),
+    ]
+    query = " ".join(part for part in query_parts if part).strip()
+    if not query:
+        return f"[Bet365]({BET365_URL})"
+    search_url = f"https://www.google.com/search?q={quote_plus(query)}"
+    return f"[Buscar na Bet365]({search_url})"
 
 
 async def _configurar_menu(bot, chat_id: int | None = None):
@@ -902,7 +917,7 @@ async def _logica_ao_vivo() -> str:
             lines.append(
                 f"❓ *{pred['home_name']} vs {pred['away_name']}*\n"
                 f"   {mercado_label} @ {odd_usada:.2f} | Sem dados\n"
-                f"   🔗 [Bet365]({BET365_URL})"
+                f"   🔗 {_link_bet365_markdown(pred['home_name'], pred['away_name'], mercado_label)}"
             )
             aguardando += 1
             continue
@@ -928,7 +943,7 @@ async def _logica_ao_vivo() -> str:
             lines.append(
                 f"⏰ *{pred['home_name']} vs {pred['away_name']}* — {horario}\n"
                 f"   {mercado_label} @ {odd_usada:.2f} | Aguardando início\n"
-                f"   🔗 [Bet365]({BET365_URL})"
+                f"   🔗 {_link_bet365_markdown(pred['home_name'], pred['away_name'], mercado_label)}"
             )
             aguardando += 1
 
@@ -944,7 +959,7 @@ async def _logica_ao_vivo() -> str:
             lines.append(
                 f"🟢 *{pred['home_name']} {gh}-{ga} {pred['away_name']}*\n"
                 f"   {status_label}{elapsed_txt} | {mercado_label} @ {odd_usada:.2f}\n"
-                f"   🔗 [Bet365]({BET365_URL})"
+                f"   🔗 {_link_bet365_markdown(pred['home_name'], pred['away_name'], mercado_label)}"
             )
             em_andamento += 1
 
@@ -993,14 +1008,14 @@ async def _logica_ao_vivo() -> str:
                 lines.append(
                     f"✅ *{pred['home_name']} {gh}-{ga} {pred['away_name']}*\n"
                     f"   {mercado_label} @ {odd_usada:.2f} | *+{lucro:.2f}u*\n"
-                    f"   🔗 [Bet365]({BET365_URL})"
+                    f"   🔗 {_link_bet365_markdown(pred['home_name'], pred['away_name'], mercado_label)}"
                 )
             else:
                 erros += 1
                 lines.append(
                     f"❌ *{pred['home_name']} {gh}-{ga} {pred['away_name']}*\n"
                     f"   {mercado_label} @ {odd_usada:.2f} | *-1.00u*\n"
-                    f"   🔗 [Bet365]({BET365_URL})"
+                    f"   🔗 {_link_bet365_markdown(pred['home_name'], pred['away_name'], mercado_label)}"
                 )
             finalizados += 1
 
@@ -1009,7 +1024,7 @@ async def _logica_ao_vivo() -> str:
             lines.append(
                 f"⚠️ *{pred['home_name']} vs {pred['away_name']}*\n"
                 f"   {mercado_label} | Status: {status}\n"
-                f"   🔗 [Bet365]({BET365_URL})"
+                f"   🔗 {_link_bet365_markdown(pred['home_name'], pred['away_name'], mercado_label)}"
             )
             aguardando += 1
 

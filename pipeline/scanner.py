@@ -25,6 +25,7 @@ Uso:
 import json
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
+from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 from config import LEAGUES, TIMEZONE, TELEGRAM_CHAT_ID
 from config import ROI_PAUSE_THRESHOLD, ROI_PAUSE_MIN_BETS, DEGRADATION_ACC_MIN
@@ -685,8 +686,20 @@ class Scanner:
         return kickoff.strftime("%Y-%m-%d %H:%M")
 
     @staticmethod
-    def _link_bet365_html() -> str:
-        return f'<a href="{BET365_URL}">Bet365</a>'
+    def _link_bet365_html(self, tip: dict | None = None) -> str:
+        if not tip:
+            return f'<a href="{BET365_URL}">Bet365</a>'
+        query_parts = [
+            "site:bet365.bet.br",
+            str(tip.get("home_name") or "").strip(),
+            str(tip.get("away_name") or "").strip(),
+            self._descricao_mercado(tip),
+        ]
+        query = " ".join(part for part in query_parts if part).strip()
+        if not query:
+            return f'<a href="{BET365_URL}">Bet365</a>'
+        search_url = f"https://www.google.com/search?q={quote_plus(query)}"
+        return f'<a href="{search_url}">Buscar na Bet365</a>'
 
     # ══════════════════════════════════════════════
     #  ETAPA 2 (fallback): Previsões via API-Football
@@ -1506,7 +1519,7 @@ class Scanner:
                         f"• <code>{tip.get('home_name', '?')}</code> <b>x</b> <code>{tip.get('away_name', '?')}</code>"
                         f" <i>({horario})</i>"
                     )
-                    linhas.append(f"  🔗 {self._link_bet365_html()}")
+                    linhas.append(f"  🔗 {self._link_bet365_html(tip)}")
                 msgs.append(("\n".join(linhas), []))
             return msgs
 
@@ -1595,7 +1608,7 @@ class Scanner:
 
                     linhas.append(f"• <b>{desc}</b>")
                     linhas.append(f"  <i>{' | '.join(detalhes)}</i>")
-                    linhas.append(f"  🔗 {self._link_bet365_html()}")
+                    linhas.append(f"  🔗 {self._link_bet365_html(tip)}")
 
                     llm = tip.get("llm_validacao")
                     if llm and llm.get("motivo") and "desativado" not in llm.get("motivo", ""):
@@ -1648,7 +1661,7 @@ class Scanner:
                     linhas.append(
                         f"• <b>{self._descricao_mercado(tip)}</b> | Conf {tip.get('prob_modelo', 0):.0%}"
                     )
-                    linhas.append(f"  🔗 {self._link_bet365_html()}")
+                    linhas.append(f"  🔗 {self._link_bet365_html(tip)}")
                     if llm.get("motivo"):
                         linhas.extend(self._formatar_resumo_revisao(llm["motivo"], bloqueado=True, tip=tip))
                 msgs.append(("\n".join(linhas).rstrip(), []))
