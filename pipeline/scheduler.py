@@ -20,6 +20,7 @@ Uso:
 """
 
 from datetime import datetime, timedelta
+import json
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -715,6 +716,7 @@ class Scheduler:
             erros = 0
             notificacoes_publicas = []
             alertas_admin = []
+            sinais_live = []
             itens_tocados = []
             itens_resolvidos = []
 
@@ -797,6 +799,11 @@ class Scheduler:
                                 note=note,
                                 payload=payload,
                             )
+                    if veredito == "sinal_live":
+                        sinal = dict(item)
+                        sinal["payload"] = payload
+                        sinal["elapsed"] = elapsed
+                        sinais_live.append(sinal)
                     itens_tocados.append(item_id)
                     print(
                         f"   👀 {home_name} vs {away_name} | {mercado_label} | "
@@ -883,6 +890,11 @@ class Scheduler:
                 bloco = "⚽ <b>Leitura live do FuteBot</b>\n\n" + "\n\n".join(alertas_admin)
                 self._enviar_telegram(bloco)
 
+            combos_live = self._gerar_combos_live(sinais_live)
+            if combos_live:
+                bloco_combo = self._formatar_combos_live(combos_live)
+                self._enviar_telegram_publico(bloco_combo)
+
             if notificacoes_publicas:
                 header = "⚽ <b>Resultados ao vivo</b>\n\n"
                 corpo = "\n\n".join(notificacoes_publicas)
@@ -916,6 +928,62 @@ class Scheduler:
         except Exception as e:
             print(f"❌ Erro no check ao vivo: {e}")
             self._enviar_telegram(f"❌ Erro no check ao vivo:\n{e}")
+
+    def _gerar_combos_live(self, sinais_live: list[dict]) -> list[dict]:
+        """Gera duplas/triplas live sem repetir o mesmo combo a cada ciclo."""
+        if len(sinais_live) < 2:
+            return []
+
+        scanner = Scanner(self.db)
+        combos = scanner._gerar_combos(sinais_live)
+        if not combos:
+            return []
+
+        novos = []
+        for combo in combos:
+            ids = sorted(int(item["id"]) for item in combo["tips"] if item.get("id") is not None)
+            if len(ids) < 2:
+                continue
+            combo_key = "live:" + "-".join(str(i) for i in ids)
+            ja_enviado = True
+            for item in combo["tips"]:
+                payload = dict(item.get("payload") or {})
+                enviados = set(payload.get("sent_live_combo_keys") or [])
+                if combo_key not in enviados:
+                    ja_enviado = False
+            if ja_enviado:
+                continue
+
+            for item in combo["tips"]:
+                payload = dict(item.get("payload") or {})
+                enviados = list(dict.fromkeys((payload.get("sent_live_combo_keys") or []) + [combo_key]))
+                payload["sent_live_combo_keys"] = enviados
+                self.db.atualizar_live_watch_item(item["id"], payload=payload)
+                item["payload"] = payload
+            combo["combo_key"] = combo_key
+            novos.append(combo)
+        return novos
+
+    @staticmethod
+    def _formatar_combos_live(combos_live: list[dict]) -> str:
+        """Formata sugestoes de combo live para o publico."""
+        linhas = ["🟣 <b>Combos live em observacao</b>"]
+        for idx, combo in enumerate(combos_live, 1):
+            tipo = "Dupla" if combo.get("tipo") == "dupla" else "Tripla"
+            linhas.append(
+                f"\n<b>{tipo} live #{idx}</b> | Conf composta {combo.get('prob_composta', 0):.0%}"
+            )
+            for item in combo.get("tips", []):
+                home = item.get("home_name", "?")
+                away = item.get("away_name", "?")
+                mercado = item.get("descricao") or item.get("mercado", "")
+                minuto = item.get("elapsed") or "?"
+                linhas.append(f"• <b>{home} x {away}</b>")
+                linhas.append(
+                    f"  <i>{mercado} | Conf {item.get('prob_modelo', 0):.0%} | Min {minuto}</i>"
+                )
+        linhas.append("\n<i>Combo live sugestivo. Nao entra nas metricas oficiais do dia.</i>")
+        return "\n".join(linhas)
 
     def _post_telegram(self, chat_id: int, texto: str, reply_markup: dict | None = None) -> bool:
         """Envia uma mensagem para um chat específico via API HTTP do Telegram."""
