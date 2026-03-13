@@ -1385,16 +1385,31 @@ class Scanner:
     def _resumo_externo(ctx: dict) -> list[str]:
         lookup = ctx.get("market_lookup") or {}
         fatores = []
-        if lookup.get("weather_summary"):
-            fatores.append(str(lookup["weather_summary"]).strip(" ."))
-        if lookup.get("field_conditions"):
-            fatores.append(f"Gramado: {str(lookup['field_conditions']).strip(' .')}")
-        if lookup.get("rotation_risk"):
-            fatores.append(f"Rotacao: {str(lookup['rotation_risk']).strip(' .')}")
-        if lookup.get("motivation_context"):
-            fatores.append(str(lookup["motivation_context"]).strip(" ."))
-        if lookup.get("news_summary"):
-            fatores.append(str(lookup["news_summary"]).strip(" ."))
+        for bruto in (
+            lookup.get("weather_summary"),
+            f"Gramado: {str(lookup['field_conditions']).strip(' .')}" if lookup.get("field_conditions") else None,
+            f"Rotacao: {str(lookup['rotation_risk']).strip(' .')}" if lookup.get("rotation_risk") else None,
+            lookup.get("motivation_context"),
+            lookup.get("news_summary"),
+        ):
+            if not bruto:
+                continue
+            fator = str(bruto).strip(" .")
+            fator_low = fator.lower()
+            if any(
+                token in fator_low
+                for token in (
+                    "sem inform",
+                    "desconhecid",
+                    "podem nao ser",
+                    "pode nao ser",
+                    "nao confirmado",
+                    "sem previs",
+                    "incerto",
+                )
+            ):
+                continue
+            fatores.append(fator)
         return [f for f in fatores if f]
 
     @staticmethod

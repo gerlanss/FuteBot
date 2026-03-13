@@ -60,7 +60,7 @@ Regras:
 4. Seja criterioso e conservador quando houver sinais de armadilha - o Strategy Gate nao substitui contexto humano.
 5. Foque em fatores que o modelo NAO ve: lesoes de titulares, jogos sem importancia,
    times poupando, contexto de classificacao, derbi/classico.
-6. Se nao houver informacao suficiente para aprovar com conviccao, prefira REJECT com confianca moderada.
+6. Ausencia de informacao NAO e motivo suficiente para REJECT. So barre a tip quando houver fator negativo concreto.
 7. Nunca invente dados - use apenas o que foi fornecido.
 8. ATENCAO ao CONTEXTO TEMPORAL: a data do jogo sera informada. Use o numero de jogos
    disputados na classificacao para entender a fase da temporada.
@@ -69,17 +69,18 @@ Regras:
 11. ADVOGADO DO DIABO: Se a confianca do modelo for ACIMA DE 80% em mercados de gols
     (BTTS, Over 1.5, Over 2.5, Over 3.5), desconfie e procure motivos para under/sem gols.
 12. CONFIANCA BAIXA: Se a confianca do modelo for ABAIXO DE 55%, REJECT automaticamente.
-13. QUALIDADE > QUANTIDADE: Prefira REJECT a APPROVE em caso de duvida.
+13. QUALIDADE > QUANTIDADE: Em caso de duvida, so rejeite se voce conseguir apontar um fator esportivo concreto contra a tip.
 14. EV E PRECO SAO PARAMETROS, NAO VETO ISOLADO: use EV e odd como sinais auxiliares de valor, sem transformar sua ausencia em motivo automatico de rejeicao.
 15. Se o EV estimado for menor ou igual a 0%, trate isso como sinal negativo importante, mas ainda julgue o contexto geral antes de decidir.
 16. Se odd/EV nao estiverem disponiveis, NAO use isso como razao principal para REJECT. Julgue a tip principalmente por confianca do modelo e contexto esportivo.
 17. DESFALQUES PESAM: Se houver ausencias importantes no time favorecido pela tip, procure ativamente motivos para REJECT.
 18. ARMADILHA DE FAVORITO: Em mercado de vencedor/casa/fora, desfalques relevantes no favorito, forma inconsistente ou odd baixa exigem REJECT por padrao.
-19. MERCADO DE GOLS: Se houver atacantes importantes fora, criacao comprometida ou contexto de jogo truncado, prefira REJECT para overs.
+19. MERCADO DE GOLS: So prefira REJECT para overs quando houver sinal concreto de criacao comprometida, desfalque ofensivo relevante ou contexto realmente truncado.
 20. Sua funcao e cortar armadilhas, nao justificar favoritismo.
 21. O motivo precisa citar fatores concretos do jogo. Evite frases vagas como "sem contexto externo forte", "mercado sensivel" ou "cheiro de armadilha" sem explicar o porque.
 22. Se rejeitar, explique de forma objetiva qual fator esportivo pesou mais: desfalques, forma, tabela, estilo esperado do jogo, importancia do confronto ou perfil ofensivo/defensivo.
-23. Se o contexto esportivo estiver bom, nao reprove so porque falta odd/EV."""
+23. Se o contexto esportivo estiver bom, nao reprove so porque falta odd/EV.
+24. Clima neutro, ausencia de noticia, rotacao desconhecida, campo sem confirmacao ou texto vago NAO sao motivos suficientes para REJECT."""
 
 
 class LLMValidator:
