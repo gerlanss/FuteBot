@@ -696,10 +696,31 @@ class Learner:
             WHERE date LIKE ? AND acertou IS NOT NULL
             ORDER BY ev_percent DESC
         """, (f"{data}%",)).fetchall()
+        blocked_rows = conn.execute("""
+            SELECT
+                cf.context_label,
+                cf.market_won,
+                cf.llm_motivo,
+                sa.home_name,
+                sa.away_name,
+                sa.mercado,
+                sa.prob_modelo,
+                f.goals_home,
+                f.goals_away
+            FROM context_feedback cf
+            JOIN scan_audit sa
+              ON sa.id = cf.scan_audit_id
+            LEFT JOIN fixtures f
+              ON f.fixture_id = cf.fixture_id
+            WHERE sa.scan_date = ?
+              AND cf.approved_final = 0
+            ORDER BY sa.prob_modelo DESC, sa.id ASC
+        """, (data,)).fetchall()
         conn.close()
 
         # Converter sqlite3.Row para dict (evita erro com .get())
         rows = [dict(r) for r in raw_rows]
+        blocked = [dict(r) for r in blocked_rows]
         combos = self.db.combos_por_data(data)
 
         # Formatar data em DD/MM para exibição
@@ -709,7 +730,7 @@ class Learner:
         except ValueError:
             data_br = data
 
-        if not rows:
+        if not rows and not blocked:
             return f"📋 Nenhum resultado para {data_br}"
 
         lines = [
@@ -771,6 +792,53 @@ class Learner:
             por_mercado[mercado]["total"] += 1
             por_mercado[mercado]["acertos"] += int(acertou)
             por_mercado[mercado]["lucro"] += lucro_item
+
+        if blocked:
+            lines.extend([
+                "",
+                "━━━━━━━━━━━━━━━━━━━━━━━━━",
+                "<b>BARRADAS NA REVISAO</b>",
+            ])
+            for r in blocked:
+                market_won = bool(r.get("market_won"))
+                label = r.get("context_label")
+                emoji = "✅" if label == "good_block" else "⚠️"
+                status = "Bloqueio certo" if label == "good_block" else "Bloqueio discutivel"
+                mercado = r.get("mercado") or "?"
+                nomes_mercado = {
+                    "h2h_home": "Casa", "h2h_draw": "Empate", "h2h_away": "Fora",
+                    "over15": "Over 1.5", "under15": "Under 1.5",
+                    "over25": "Over 2.5", "under25": "Under 2.5",
+                    "over35": "Over 3.5", "under35": "Under 3.5",
+                    "ht_home": "1T Casa", "ht_draw": "1T Empate", "ht_away": "1T Fora",
+                    "over05_ht": "1T Over 0.5", "under05_ht": "1T Under 0.5",
+                    "over15_ht": "1T Over 1.5", "under15_ht": "1T Under 1.5",
+                    "over05_2t": "2T Over 0.5", "under05_2t": "2T Under 0.5",
+                    "over15_2t": "2T Over 1.5", "under15_2t": "2T Under 1.5",
+                    "corners_over_85": "Escanteios Over 8.5",
+                    "corners_under_85": "Escanteios Under 8.5",
+                    "corners_over_95": "Escanteios Over 9.5",
+                    "corners_under_95": "Escanteios Under 9.5",
+                    "corners_over_105": "Escanteios Over 10.5",
+                    "corners_under_105": "Escanteios Under 10.5",
+                }
+                mercado_label = nomes_mercado.get(mercado, mercado)
+                prob = r.get("prob_modelo")
+                conf_txt = f"{(prob * 100):.0f}%" if prob is not None else "n/d"
+                gh = r.get("goals_home")
+                ga = r.get("goals_away")
+                placar = f"{gh}-{ga}" if gh is not None and ga is not None else "?"
+                desfecho = "Teria batido" if market_won else "Nao bateria"
+                lines.append(
+                    f"{emoji} <b>{r.get('home_name', '?')} vs {r.get('away_name', '?')}</b> ({placar})\n"
+                    f"   Observado: {mercado_label} | Confiança: {conf_txt}\n"
+                    f"   {status} | {desfecho}"
+                )
+                motivo = (r.get("llm_motivo") or "").strip()
+                if motivo:
+                    linhas_motivo = [p.strip(" .") for p in motivo.replace(":", ".").split(".") if p.strip(" .")]
+                    if linhas_motivo:
+                        lines.append(f"   Motivo do bloqueio: {linhas_motivo[0]}")
 
         # ─── Resumo do dia ───
         if combos:

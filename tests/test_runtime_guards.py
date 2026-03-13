@@ -256,6 +256,61 @@ class LearnerConfidenceTests(unittest.TestCase):
             self.assertEqual(labels["good_release"], "chuva forte")
             self.assertEqual(labels["good_block"], "chuva forte")
 
+    def test_relatorio_resultado_includes_blocked_markets_without_counting_them_as_tips(self):
+        from data.database import Database
+        from models.learner import Learner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, "test.db"))
+            data = datetime.now().strftime("%Y-%m-%d")
+            self._insert_fixture(db, 31, data)
+            self._insert_fixture(db, 32, data)
+
+            conn = db._conn()
+            conn.execute("""
+                UPDATE fixtures SET goals_home = 0, goals_away = 0, score_ht_h = 0, score_ht_a = 0
+                WHERE fixture_id = 31
+            """)
+            conn.execute("""
+                UPDATE fixtures SET goals_home = 1, goals_away = 1, score_ht_h = 0, score_ht_a = 1
+                WHERE fixture_id = 32
+            """)
+            conn.commit()
+            conn.close()
+
+            db.salvar_prediction({
+                "fixture_id": 31,
+                "date": f"{data} 19:00:00",
+                "league_id": 71,
+                "home_name": "Time 31A",
+                "away_name": "Time 31B",
+                "mercado": "under35",
+                "prob_modelo": 0.82,
+                "odd_usada": 1.8,
+            })
+            db.resolver_prediction(31, "draw", 0, 0)
+
+            conn = db._conn()
+            conn.execute("""
+                INSERT INTO scan_audit (
+                    scan_date, fixture_id, league_id, home_name, away_name,
+                    mercado, prob_modelo, llm_decisao, llm_motivo, approved_final, contexto_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                data, 32, 71, "Time 32A", "Time 32B",
+                "under35", 0.74, "REJECT", "Chuva forte e ritmo baixo esperado.", 0, "{}"
+            ))
+            conn.commit()
+            conn.close()
+
+            Learner(db).backfill_feedback_contextual()
+            relatorio = Learner(db).relatorio_resultado_dia(data)
+
+            self.assertIn("<b>BARRADAS NA REVISAO</b>", relatorio)
+            self.assertIn("Bloqueio discutivel", relatorio)
+            self.assertIn("Time 32A vs Time 32B", relatorio)
+            self.assertIn("Tips: 1 | Acertos: 1/1", relatorio)
+
 
 class StrategySliceTests(unittest.TestCase):
     @staticmethod
@@ -414,6 +469,7 @@ class ScannerSelectionTests(unittest.TestCase):
         self.assertIn("Bloqueadas por EV: <b>2</b>", header)
         self.assertIn("Mercados revisados: <b>117</b>", header)
         self.assertIn("<code>RB Leipzig</code> <b>x</b> <code>FC Augsburg</code>", body)
+        self.assertIn("Bet365", body)
 
 
 class TelegramChatPersistenceTests(unittest.TestCase):
@@ -635,6 +691,7 @@ class ScannerAuditFormattingTests(unittest.TestCase):
         self.assertIn("Entradas barradas", joined)
         self.assertIn("Entrada cancelada nesta janela.", joined)
         self.assertIn("• Desfalques ofensivos importantes.", joined)
+        self.assertIn("Bet365", joined)
 
     def test_formatar_resumo_revisao_shortens_llm_text(self):
         from pipeline.scanner import Scanner
@@ -652,7 +709,7 @@ class ScannerAuditFormattingTests(unittest.TestCase):
         self.assertIn("O contexto esportivo apresenta cautela.", texto)
         self.assertIn("Desfalques ofensivos importantes.", texto)
         self.assertIn("Chuva forte e gramado pesado.", texto)
-        self.assertIn("<i>Favorito deve controlar o ritmo.</i>", texto)
+        self.assertIn("olhar de novo", texto)
 
     def test_formatar_resumo_revisao_prioritizes_concrete_context(self):
         from pipeline.scanner import Scanner
@@ -679,6 +736,7 @@ class ScannerAuditFormattingTests(unittest.TestCase):
         self.assertIn("Desfalques relevantes: Paulinho, Vitor Roque.", texto)
         self.assertIn("Chuva moderada durante o jogo.", texto)
         self.assertIn("Gramado: Gramado pesado.", texto)
+        self.assertIn("olhar de novo", texto)
 
 
 if __name__ == "__main__":

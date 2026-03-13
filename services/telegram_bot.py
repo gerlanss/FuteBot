@@ -44,7 +44,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, TIMEZONE, ADMIN_CHAT_IDS
+from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, TIMEZONE, ADMIN_CHAT_IDS, BET365_URL
 from data.database import Database
 from pipeline.scanner import Scanner
 from pipeline.collector import Collector
@@ -877,7 +877,16 @@ async def _logica_ao_vivo() -> str:
         "over25": "Over 2.5", "under25": "Under 2.5",
         "over15": "Over 1.5", "under15": "Under 1.5",
         "over35": "Over 3.5", "under35": "Under 3.5",
-        "btts_yes": "BTTS Sim", "btts_no": "BTTS Não",
+        "over05_ht": "1T Over 0.5", "under05_ht": "1T Under 0.5",
+        "over15_ht": "1T Over 1.5", "under15_ht": "1T Under 1.5",
+        "over05_2t": "2T Over 0.5", "under05_2t": "2T Under 0.5",
+        "over15_2t": "2T Over 1.5", "under15_2t": "2T Under 1.5",
+        "corners_over_85": "Escanteios Over 8.5",
+        "corners_under_85": "Escanteios Under 8.5",
+        "corners_over_95": "Escanteios Over 9.5",
+        "corners_under_95": "Escanteios Under 9.5",
+        "corners_over_105": "Escanteios Over 10.5",
+        "corners_under_105": "Escanteios Under 10.5",
     }
 
     for pred in recentes:
@@ -892,7 +901,8 @@ async def _logica_ao_vivo() -> str:
         if not resp:
             lines.append(
                 f"❓ *{pred['home_name']} vs {pred['away_name']}*\n"
-                f"   {mercado_label} @ {odd_usada:.2f} | Sem dados"
+                f"   {mercado_label} @ {odd_usada:.2f} | Sem dados\n"
+                f"   🔗 [Bet365]({BET365_URL})"
             )
             aguardando += 1
             continue
@@ -917,7 +927,8 @@ async def _logica_ao_vivo() -> str:
                     horario = "?"
             lines.append(
                 f"⏰ *{pred['home_name']} vs {pred['away_name']}* — {horario}\n"
-                f"   {mercado_label} @ {odd_usada:.2f} | Aguardando início"
+                f"   {mercado_label} @ {odd_usada:.2f} | Aguardando início\n"
+                f"   🔗 [Bet365]({BET365_URL})"
             )
             aguardando += 1
 
@@ -932,7 +943,8 @@ async def _logica_ao_vivo() -> str:
             elapsed_txt = f" {elapsed}'" if elapsed else ""
             lines.append(
                 f"🟢 *{pred['home_name']} {gh}-{ga} {pred['away_name']}*\n"
-                f"   {status_label}{elapsed_txt} | {mercado_label} @ {odd_usada:.2f}"
+                f"   {status_label}{elapsed_txt} | {mercado_label} @ {odd_usada:.2f}\n"
+                f"   🔗 [Bet365]({BET365_URL})"
             )
             em_andamento += 1
 
@@ -980,13 +992,15 @@ async def _logica_ao_vivo() -> str:
                 lucro = round(odd_usada - 1, 2)
                 lines.append(
                     f"✅ *{pred['home_name']} {gh}-{ga} {pred['away_name']}*\n"
-                    f"   {mercado_label} @ {odd_usada:.2f} | *+{lucro:.2f}u*"
+                    f"   {mercado_label} @ {odd_usada:.2f} | *+{lucro:.2f}u*\n"
+                    f"   🔗 [Bet365]({BET365_URL})"
                 )
             else:
                 erros += 1
                 lines.append(
                     f"❌ *{pred['home_name']} {gh}-{ga} {pred['away_name']}*\n"
-                    f"   {mercado_label} @ {odd_usada:.2f} | *-1.00u*"
+                    f"   {mercado_label} @ {odd_usada:.2f} | *-1.00u*\n"
+                    f"   🔗 [Bet365]({BET365_URL})"
                 )
             finalizados += 1
 
@@ -994,7 +1008,8 @@ async def _logica_ao_vivo() -> str:
             # Outros status: PST (adiado), CANC (cancelado), etc.
             lines.append(
                 f"⚠️ *{pred['home_name']} vs {pred['away_name']}*\n"
-                f"   {mercado_label} | Status: {status}"
+                f"   {mercado_label} | Status: {status}\n"
+                f"   🔗 [Bet365]({BET365_URL})"
             )
             aguardando += 1
 

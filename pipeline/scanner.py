@@ -28,7 +28,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from zoneinfo import ZoneInfo
 from config import LEAGUES, TIMEZONE, TELEGRAM_CHAT_ID
 from config import ROI_PAUSE_THRESHOLD, ROI_PAUSE_MIN_BETS, DEGRADATION_ACC_MIN
-from config import ODDS_SPORTS_MAP, PREFERRED_BOOKMAKER, PREFERRED_BOOKMAKER_LABEL
+from config import ODDS_SPORTS_MAP, PREFERRED_BOOKMAKER, PREFERRED_BOOKMAKER_LABEL, BET365_URL
 from data.database import Database
 from services.apifootball import raw_request
 from models.predictor import Predictor
@@ -439,6 +439,7 @@ class Scanner:
         for tip in tips_revisao:
             tip["approved_final"] = (tip.get("fixture_id"), tip.get("mercado")) in finais
         self.db.salvar_scan_audit(data, tips_revisao)
+        self.db.salvar_live_watchlist(data, self._montar_itens_live_watch(tips_revisao))
 
         for tip in tips_aprovadas:
             self.db.salvar_prediction({
@@ -639,6 +640,33 @@ class Scanner:
                 combos_validos.append(combo)
         return combos_validos
 
+    def _montar_itens_live_watch(self, tips: list[dict]) -> list[dict]:
+        """Separa itens que merecem acompanhamento live após a revisão final."""
+        itens = []
+        for tip in tips:
+            llm = tip.get("llm_validacao") or {}
+            decisao = llm.get("decisao")
+            payload = dict(tip)
+            if tip.get("approved_final"):
+                itens.append({
+                    **payload,
+                    "watch_type": "approved_prelive",
+                    "status": "active",
+                    "note": "Entrada liberada no pre-live e acompanhada ao vivo.",
+                })
+                continue
+
+            if decisao == "REJECT":
+                observacao = self._observacao_bloqueio_live(tip)
+                if observacao:
+                    itens.append({
+                        **payload,
+                        "watch_type": "blocked_recheck",
+                        "status": "active",
+                        "note": observacao,
+                    })
+        return itens
+
     @staticmethod
     def _parse_fixture_datetime(date_str: str) -> Optional[datetime]:
         if not date_str:
@@ -655,6 +683,10 @@ class Scanner:
         if kickoff is None:
             return ""
         return kickoff.strftime("%Y-%m-%d %H:%M")
+
+    @staticmethod
+    def _link_bet365_html() -> str:
+        return f'<a href="{BET365_URL}">Bet365</a>'
 
     # ══════════════════════════════════════════════
     #  ETAPA 2 (fallback): Previsões via API-Football
@@ -1359,6 +1391,21 @@ class Scanner:
             fatores.append(str(lookup["news_summary"]).strip(" ."))
         return [f for f in fatores if f]
 
+    @staticmethod
+    def _observacao_bloqueio_live(tip: dict | None) -> str | None:
+        mercado = (tip or {}).get("mercado", "")
+        if mercado.startswith("over") and "corners" not in mercado:
+            return "Se o ritmo subir e o volume ofensivo aparecer, isso pode virar leitura de live"
+        if mercado.startswith("under") and "corners" not in mercado:
+            return "Se o jogo continuar travado, isso reforca a leitura de nao entrar contra esse cenario"
+        if mercado.startswith("corners_over"):
+            return "So vale reavaliar se a pressao pelos lados e o volume de cruzamentos crescerem"
+        if mercado.startswith("corners_under"):
+            return "So muda se o jogo abrir e comecar a empilhar ataques pelos lados"
+        if mercado.startswith("h2h") or mercado.startswith("ht_"):
+            return "So reavalio se o favoritismo ficar claro dentro de campo"
+        return "Prefiro esperar o jogo mostrar algo diferente antes de olhar de novo"
+
     def _formatar_resumo_revisao(self, motivo: str, bloqueado: bool, tip: dict | None = None) -> list[str]:
         partes = self._quebrar_motivo_curto(motivo)
         ctx = (tip or {}).get("llm_contexto") or {}
@@ -1387,9 +1434,14 @@ class Scanner:
         for fator in fatores:
             linhas.append(f"  • {fator}.")
 
-        resto = candidatos[3:]
-        if resto:
-            linhas.append(f"  <i>{resto[0]}.</i>")
+        if bloqueado:
+            observacao = self._observacao_bloqueio_live(tip)
+            if observacao:
+                linhas.append(f"  <i>{observacao}.</i>")
+        else:
+            resto = candidatos[3:]
+            if resto:
+                linhas.append(f"  <i>{resto[0]}.</i>")
 
         return linhas
 
@@ -1454,6 +1506,7 @@ class Scanner:
                         f"• <code>{tip.get('home_name', '?')}</code> <b>x</b> <code>{tip.get('away_name', '?')}</code>"
                         f" <i>({horario})</i>"
                     )
+                    linhas.append(f"  🔗 {self._link_bet365_html()}")
                 msgs.append(("\n".join(linhas), []))
             return msgs
 
@@ -1542,6 +1595,7 @@ class Scanner:
 
                     linhas.append(f"• <b>{desc}</b>")
                     linhas.append(f"  <i>{' | '.join(detalhes)}</i>")
+                    linhas.append(f"  🔗 {self._link_bet365_html()}")
 
                     llm = tip.get("llm_validacao")
                     if llm and llm.get("motivo") and "desativado" not in llm.get("motivo", ""):
@@ -1594,6 +1648,7 @@ class Scanner:
                     linhas.append(
                         f"• <b>{self._descricao_mercado(tip)}</b> | Conf {tip.get('prob_modelo', 0):.0%}"
                     )
+                    linhas.append(f"  🔗 {self._link_bet365_html()}")
                     if llm.get("motivo"):
                         linhas.extend(self._formatar_resumo_revisao(llm["motivo"], bloqueado=True, tip=tip))
                 msgs.append(("\n".join(linhas).rstrip(), []))

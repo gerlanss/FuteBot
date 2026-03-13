@@ -361,6 +361,30 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_context_feedback_fixture
                 ON context_feedback(fixture_id, context_label);
+
+            CREATE TABLE IF NOT EXISTS live_watchlist (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_date        TEXT NOT NULL,
+                fixture_id       INTEGER NOT NULL,
+                fixture_date     TEXT,
+                league_id        INTEGER,
+                home_name        TEXT,
+                away_name        TEXT,
+                mercado          TEXT NOT NULL,
+                descricao        TEXT,
+                prob_modelo      REAL,
+                watch_type       TEXT NOT NULL,
+                status           TEXT NOT NULL DEFAULT 'active',
+                note             TEXT,
+                payload_json     TEXT,
+                created_at       TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_checked_at  TEXT,
+                resolved_at      TEXT,
+                UNIQUE(scan_date, fixture_id, mercado, watch_type)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_live_watchlist_status
+                ON live_watchlist(status, fixture_date);
         """)
         self._aplicar_migracoes(conn)
         conn.commit()
@@ -447,6 +471,28 @@ class Database:
                 llm_motivo          TEXT,
                 contexto_json       TEXT,
                 created_at          TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS live_watchlist (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_date        TEXT NOT NULL,
+                fixture_id       INTEGER NOT NULL,
+                fixture_date     TEXT,
+                league_id        INTEGER,
+                home_name        TEXT,
+                away_name        TEXT,
+                mercado          TEXT NOT NULL,
+                descricao        TEXT,
+                prob_modelo      REAL,
+                watch_type       TEXT NOT NULL,
+                status           TEXT NOT NULL DEFAULT 'active',
+                note             TEXT,
+                payload_json     TEXT,
+                created_at       TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_checked_at  TEXT,
+                resolved_at      TEXT,
+                UNIQUE(scan_date, fixture_id, mercado, watch_type)
             )
         """)
 
@@ -822,6 +868,10 @@ class Database:
             "DELETE FROM scan_candidates WHERE scan_date = ?",
             (data,),
         )
+        conn.execute(
+            "DELETE FROM live_watchlist WHERE scan_date = ?",
+            (data,),
+        )
         conn.commit()
         conn.close()
 
@@ -923,6 +973,97 @@ class Database:
                 1 if tip.get("approved_final") else 0,
                 json.dumps(contexto, ensure_ascii=False),
             ))
+        conn.commit()
+        conn.close()
+
+    def salvar_live_watchlist(self, data: str, itens: list[dict]):
+        """Persistir jogos/mercados que merecem acompanhamento live."""
+        if not itens:
+            return
+
+        conn = self._conn()
+        for item in itens:
+            conn.execute("""
+                INSERT OR REPLACE INTO live_watchlist (
+                    scan_date, fixture_id, fixture_date, league_id,
+                    home_name, away_name, mercado, descricao, prob_modelo,
+                    watch_type, status, note, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                data,
+                item.get("fixture_id"),
+                item.get("date") or item.get("fixture_date"),
+                item.get("league_id"),
+                item.get("home_name"),
+                item.get("away_name"),
+                item.get("mercado"),
+                item.get("descricao"),
+                item.get("prob_modelo"),
+                item.get("watch_type", "approved_prelive"),
+                item.get("status", "active"),
+                item.get("note"),
+                json.dumps(item.get("payload") or item, ensure_ascii=False),
+            ))
+        conn.commit()
+        conn.close()
+
+    def live_watch_items(self, dates: list[str] | None = None, status: str | None = "active") -> list[dict]:
+        """Retorna itens monitorados para acompanhamento live."""
+        conn = self._conn()
+        sql = """
+            SELECT *
+            FROM live_watchlist
+            WHERE 1 = 1
+        """
+        params = []
+        if dates:
+            marks = ",".join("?" for _ in dates)
+            sql += f" AND scan_date IN ({marks})"
+            params.extend(dates)
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY fixture_date ASC, prob_modelo DESC, id ASC"
+        rows = conn.execute(sql, params).fetchall()
+        conn.close()
+        out = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["payload"] = json.loads(item.get("payload_json") or "{}")
+            except json.JSONDecodeError:
+                item["payload"] = {}
+            out.append(item)
+        return out
+
+    def atualizar_status_live_watchlist(self, item_ids: list[int], status: str):
+        """Atualiza status de itens da watchlist live."""
+        if not item_ids:
+            return
+        conn = self._conn()
+        marks = ",".join("?" for _ in item_ids)
+        conn.execute(
+            f"""
+            UPDATE live_watchlist
+            SET status = ?, last_checked_at = CURRENT_TIMESTAMP,
+                resolved_at = CASE WHEN ? = 'resolved' THEN CURRENT_TIMESTAMP ELSE resolved_at END
+            WHERE id IN ({marks})
+            """,
+            [status, status, *item_ids],
+        )
+        conn.commit()
+        conn.close()
+
+    def tocar_live_watchlist(self, item_ids: list[int]):
+        """Marca itens da watchlist como checados neste ciclo."""
+        if not item_ids:
+            return
+        conn = self._conn()
+        marks = ",".join("?" for _ in item_ids)
+        conn.execute(
+            f"UPDATE live_watchlist SET last_checked_at = CURRENT_TIMESTAMP WHERE id IN ({marks})",
+            item_ids,
+        )
         conn.commit()
         conn.close()
 
