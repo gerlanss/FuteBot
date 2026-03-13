@@ -644,6 +644,29 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 texto, parse_mode=ParseMode.HTML, reply_markup=kb
             )
+
+        # Se o /scan manual cair já dentro da janela T-30, dispara a revisão
+        # imediatamente para não depender do próximo ciclo automático.
+        release = scanner.liberar_mercados()
+        if any([
+            release.get("tips_enviadas_llm"),
+            release.get("tips_aprovadas"),
+            release.get("tips_rejeitadas_llm"),
+            release.get("combos"),
+        ]):
+            await update.message.reply_text("🚨 Encontrei jogo(s) já na janela T-30. Rodando revisão final agora.")
+            release_msgs = scanner.formatar_relatorio(release)
+            for i, (texto, botoes) in enumerate(release_msgs):
+                kb = None
+                if botoes:
+                    kb = InlineKeyboardMarkup(
+                        [[InlineKeyboardButton(label, callback_data=cb)] for label, cb in botoes]
+                    )
+                elif i == len(release_msgs) - 1:
+                    kb = _botao_voltar()
+                await update.message.reply_text(
+                    texto, parse_mode=ParseMode.HTML, reply_markup=kb
+                )
     except Exception as e:
         await update.message.reply_text(
             f"❌ Erro no scanner:\n{e}", reply_markup=_botao_voltar()
@@ -1135,6 +1158,24 @@ async def _executar_via_callback(query, handler_fn, context):
                 elif i == len(msgs) - 1:
                     kb = _botao_voltar()
                 await query.message.reply_text(texto, parse_mode=ParseMode.HTML, reply_markup=kb)
+            release = scanner.liberar_mercados()
+            if any([
+                release.get("tips_enviadas_llm"),
+                release.get("tips_aprovadas"),
+                release.get("tips_rejeitadas_llm"),
+                release.get("combos"),
+            ]):
+                await query.message.reply_text("🚨 Encontrei jogo(s) já na janela T-30. Rodando revisão final agora.")
+                release_msgs = scanner.formatar_relatorio(release)
+                for i, (texto, botoes) in enumerate(release_msgs):
+                    kb = None
+                    if botoes:
+                        kb = InlineKeyboardMarkup(
+                            [[InlineKeyboardButton(label, callback_data=cb)] for label, cb in botoes]
+                        )
+                    elif i == len(release_msgs) - 1:
+                        kb = _botao_voltar()
+                    await query.message.reply_text(texto, parse_mode=ParseMode.HTML, reply_markup=kb)
         elif handler_fn == cmd_scan_final:
             await query.message.reply_text("🚨 Rodando liberação final T-30... aguarde.")
             scanner = Scanner(_db)

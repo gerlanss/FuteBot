@@ -184,6 +184,11 @@ class Scheduler:
         print()
 
         self.scheduler.start()
+        try:
+            # Recupera imediatamente qualquer janela T-30 perdida durante restart.
+            self._job_liberacao_t30()
+        except Exception as e:
+            print(f"⚠️ Falha na recuperação inicial do T-30: {e}")
 
         if bloquear:
             try:
