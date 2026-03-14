@@ -894,6 +894,16 @@ class Database:
         conn.commit()
         conn.close()
 
+    def limpar_scan_candidates(self, data: str):
+        """Remove apenas o radar pendente do dia, sem apagar tip/live já em andamento."""
+        conn = self._conn()
+        conn.execute(
+            "DELETE FROM scan_candidates WHERE scan_date = ?",
+            (data,),
+        )
+        conn.commit()
+        conn.close()
+
     def salvar_scan_candidates(self, data: str, tips: list[dict]):
         """Persiste candidatos pré-selecionados do scan da manhã."""
         if not tips:

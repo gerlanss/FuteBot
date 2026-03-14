@@ -428,7 +428,6 @@ class Scanner:
         print("\n💾 Etapa 8: Salvando tips liberadas...")
         _treino = self.db.ultimo_treino()
         versao_atual = _treino["modelo_versao"] if _treino else "v1"
-        self.db.limpar_lote_scan(data)
         finais = {(tip.get("fixture_id"), tip.get("mercado")) for tip in tips_aprovadas}
         for tip in tips_revisao:
             tip["approved_final"] = (tip.get("fixture_id"), tip.get("mercado")) in finais
@@ -530,7 +529,7 @@ class Scanner:
     ) -> dict:
         """Salva candidatos da manhã e devolve só os jogos pré-selecionados."""
         candidatos = self._reduzir_para_jogos(tips_gate)
-        self.db.limpar_lote_scan(data)
+        self.db.limpar_scan_candidates(data)
         self.db.salvar_scan_candidates(data, candidatos)
         print(f"\n🗂️ Etapa 5: {len(candidatos)} jogo(s) pré-selecionado(s) para revisão T-30")
         return {
