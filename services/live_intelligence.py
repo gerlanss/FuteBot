@@ -128,7 +128,7 @@ class LiveIntelligence:
         shots_on = metricas["shots_on"]
         xg = metricas["xg"]
 
-        if ht_market and elapsed >= 30 and total_gols < linha and shots_on >= 3 and xg >= 0.7:
+        if ht_market and elapsed >= 26 and total_gols < linha and shots_on >= 3 and xg >= 0.7:
             return {
                 "veredito": "sinal_live",
                 "mensagem": "O 1T ja mostrou volume suficiente e da para liberar a entrada.",
@@ -154,7 +154,7 @@ class LiveIntelligence:
                 "veredito": "cancelar",
                 "mensagem": texto,
             }
-        if ht_market and elapsed >= 38:
+        if ht_market and elapsed >= 36:
             texto = "O 1T nao acelerou o suficiente para essa entrada." if watch_type == "approved_prelive" else "Nao apareceu gatilho claro para reavaliar esse mercado ainda no 1T."
             return {
                 "veredito": "cancelar",
@@ -166,7 +166,7 @@ class LiveIntelligence:
                 "veredito": "cancelar",
                 "mensagem": texto,
             }
-        if ht_market and 20 <= elapsed < 38 and shots_on >= 2 and xg >= 0.45:
+        if ht_market and 18 <= elapsed < 36 and shots_on >= 2 and xg >= 0.45:
             return {
                 "veredito": "monitorar_forte",
                 "mensagem": "O 1T esta ativo e vale observar mais alguns minutos antes da decisao.",
@@ -195,7 +195,7 @@ class LiveIntelligence:
         shots_on = metricas["shots_on"]
         xg = metricas["xg"]
 
-        if ht_market and elapsed >= 35 and total_gols < linha and shots_on <= 3 and xg <= 0.6:
+        if ht_market and elapsed >= 28 and total_gols < linha and shots_on <= 3 and xg <= 0.6:
             return {
                 "veredito": "sinal_live",
                 "mensagem": "O 1T segue travado e o under continua encaixando bem ao vivo.",
@@ -211,7 +211,7 @@ class LiveIntelligence:
                 "veredito": "cancelar",
                 "mensagem": texto,
             }
-        if ht_market and elapsed >= 38:
+        if ht_market and elapsed >= 36:
             texto = "O 1T nao confirmou um cenario bom o bastante para esse under." if watch_type == "approved_prelive" else "Nao apareceu base suficiente para reavaliar esse under ainda no 1T."
             return {
                 "veredito": "cancelar",
@@ -291,17 +291,17 @@ class LiveIntelligence:
         away_xg = teams[1].get("xg", 0.0) if len(teams) > 1 else 0.0
 
         if self._is_first_half_market(mercado):
-            if mercado.endswith("home") and elapsed >= 30 and gols_home >= gols_away and home_on >= away_on + 2 and home_xg >= away_xg + 0.3:
+            if mercado.endswith("home") and elapsed >= 27 and gols_home >= gols_away and home_on >= away_on + 2 and home_xg >= away_xg + 0.3:
                 return {
                     "veredito": "sinal_live",
                     "mensagem": "O mandante ja mostra superioridade suficiente para esse lado no 1T.",
                 }
-            if mercado.endswith("away") and elapsed >= 30 and gols_away >= gols_home and away_on >= home_on + 2 and away_xg >= home_xg + 0.3:
+            if mercado.endswith("away") and elapsed >= 27 and gols_away >= gols_home and away_on >= home_on + 2 and away_xg >= home_xg + 0.3:
                 return {
                     "veredito": "sinal_live",
                     "mensagem": "O visitante ja mostra superioridade suficiente para esse lado no 1T.",
                 }
-            if mercado.endswith("draw") and elapsed >= 32 and abs(home_on - away_on) <= 1 and abs(home_xg - away_xg) <= 0.25:
+            if mercado.endswith("draw") and elapsed >= 30 and abs(home_on - away_on) <= 1 and abs(home_xg - away_xg) <= 0.25:
                 return {
                     "veredito": "sinal_live",
                     "mensagem": "O 1T segue equilibrado e o empate continua bem sustentado.",
@@ -330,7 +330,7 @@ class LiveIntelligence:
                 "veredito": "cancelar",
                 "mensagem": texto,
             }
-        if self._is_first_half_market(mercado) and elapsed >= 38:
+        if self._is_first_half_market(mercado) and elapsed >= 36:
             texto = "O 1T nao mostrou superioridade suficiente para liberar esse lado." if watch_type == "approved_prelive" else "Ainda nao apareceu superioridade clara para reavaliar esse lado no 1T."
             return {
                 "veredito": "cancelar",

@@ -185,6 +185,7 @@ class Scheduler:
 
         self.scheduler.start()
         try:
+            self._garantir_radar_do_dia()
             # Recupera imediatamente qualquer janela T-30 perdida durante restart.
             self._job_liberacao_t30()
         except Exception as e:
@@ -235,6 +236,27 @@ class Scheduler:
     @staticmethod
     def _liga_eh_copa(league_id: int) -> bool:
         return int(league_id) in DISCOVERY_CUP_LEAGUE_IDS
+
+    def _garantir_radar_do_dia(self, data: str = None) -> bool:
+        """Reconstrói silenciosamente o radar do dia se o scheduler subiu depois do scan."""
+        agora = datetime.now()
+        data = data or agora.strftime("%Y-%m-%d")
+        h_scan, m_scan = SCAN_HORA.split(":")
+        horario_scan = agora.replace(hour=int(h_scan), minute=int(m_scan), second=0, microsecond=0)
+
+        if agora < horario_scan:
+            return False
+
+        candidatos_existentes = self.db.candidatos_por_data(data)
+        if candidatos_existentes:
+            return False
+
+        print(f"🔄 Recuperando radar do dia {data} (sem candidatos salvos após {SCAN_HORA})...")
+        scanner = Scanner(self.db)
+        resultado = scanner.executar(data=data, mode="preselect")
+        total = len(resultado.get("preselecionados") or [])
+        print(f"   ✅ Radar reconstruído: {total} jogo(s) pré-selecionado(s)")
+        return total > 0
 
     @staticmethod
     def _infer_conf_band(best_rule: dict | None) -> tuple[float, float]:
@@ -560,6 +582,7 @@ class Scheduler:
         print(f"{'='*60}")
 
         try:
+            self._garantir_radar_do_dia()
             scanner = Scanner(self.db)
             resultado = scanner.liberar_mercados()
 
