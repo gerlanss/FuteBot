@@ -52,6 +52,21 @@ class TrainerModelDiscoveryTests(unittest.TestCase):
                 self.assertTrue(trainer_module.Trainer.ha_modelos_treinados())
                 self.assertGreaterEqual(trainer_module.Trainer.contar_modelos_base(), 1)
 
+    def test_feature_name_lists_include_h2h_market_features(self):
+        from models.features import FeatureExtractor
+        from models.feature_factory import FeatureFactory
+
+        for feature_name in (
+            "h2h_over15_5",
+            "h2h_over25_5",
+            "h2h_under35_5",
+            "h2h_btts_5",
+            "h2h_corners_over_85_5",
+            "h2h_goals_ht_over05_5",
+        ):
+            self.assertIn(feature_name, FeatureExtractor.feature_names())
+            self.assertIn(feature_name, FeatureFactory.feature_names_full())
+
 
 class SchedulerTests(unittest.TestCase):
     def test_job_relatorio_runs_without_timedelta_name_error(self):

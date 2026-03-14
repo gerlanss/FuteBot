@@ -131,6 +131,13 @@ class FeatureExtractor:
         feats["h2h_draw_pct"] = h2h_pct[1]
         feats["h2h_away_pct"] = h2h_pct[2]
         feats["h2h_total_jogos"] = h2h_pct[3]
+        h2h_market = self._calc_h2h_market_rates(home_id, away_id, fixture_date, limit=5)
+        feats["h2h_over15_5"] = h2h_market["over15"]
+        feats["h2h_over25_5"] = h2h_market["over25"]
+        feats["h2h_under35_5"] = h2h_market["under35"]
+        feats["h2h_btts_5"] = h2h_market["btts"]
+        feats["h2h_corners_over_85_5"] = h2h_market["corners_over_85"]
+        feats["h2h_goals_ht_over05_5"] = h2h_market["over05_ht"]
 
         # ─── NOVAS FEATURES (stats de partida) ───
 
@@ -585,6 +592,72 @@ class FeatureExtractor:
         n = len(rows)
         return round(hw/n, 2), round(dw/n, 2), round(aw/n, 2), n
 
+    def _calc_h2h_market_rates(
+        self, home_id: int, away_id: int, before_date: str, limit: int = 5
+    ) -> dict[str, float]:
+        """Calcula como os mercados fecharam nos últimos H2Hs."""
+        conn = self.db._conn()
+        rows = conn.execute(
+            """
+            SELECT fixture_id, goals_home, goals_away, score_ht_h, score_ht_a
+            FROM fixtures
+            WHERE ((home_id=? AND away_id=?) OR (home_id=? AND away_id=?))
+            AND status='FT' AND date < ?
+            ORDER BY date DESC LIMIT ?
+            """,
+            (home_id, away_id, away_id, home_id, before_date, limit),
+        ).fetchall()
+        conn.close()
+
+        if not rows:
+            return {
+                "over15": 0.5,
+                "over25": 0.5,
+                "under35": 0.5,
+                "btts": 0.5,
+                "corners_over_85": 0.5,
+                "over05_ht": 0.5,
+            }
+
+        over15 = 0
+        over25 = 0
+        under35 = 0
+        btts = 0
+        corners_over_85 = 0
+        over05_ht = 0
+
+        for row in rows:
+            gh = row["goals_home"] or 0
+            ga = row["goals_away"] or 0
+            total_goals = gh + ga
+            ht_goals = (row["score_ht_h"] or 0) + (row["score_ht_a"] or 0)
+
+            if total_goals > 1:
+                over15 += 1
+            if total_goals > 2:
+                over25 += 1
+            if total_goals <= 3:
+                under35 += 1
+            if gh > 0 and ga > 0:
+                btts += 1
+            if ht_goals > 0:
+                over05_ht += 1
+
+            stats_fix = self.db.stats_partida(row["fixture_id"])
+            total_corners = sum((s.get("corners") or 0) for s in stats_fix)
+            if total_corners > 8:
+                corners_over_85 += 1
+
+        total = len(rows)
+        return {
+            "over15": round(over15 / total, 2),
+            "over25": round(over25 / total, 2),
+            "under35": round(under35 / total, 2),
+            "btts": round(btts / total, 2),
+            "corners_over_85": round(corners_over_85 / total, 2),
+            "over05_ht": round(over05_ht / total, 2),
+        }
+
     def _resultado_time(self, jogo: dict, team_id: int) -> str:
         """Retorna 'win', 'draw' ou 'loss' para o time neste jogo."""
         gh = jogo["goals_home"] or 0
@@ -614,6 +687,8 @@ class FeatureExtractor:
             "home_loss_streak", "away_loss_streak",
             "home_xg_avg", "away_xg_avg",
             "h2h_home_pct", "h2h_draw_pct", "h2h_away_pct", "h2h_total_jogos",
+            "h2h_over15_5", "h2h_over25_5", "h2h_under35_5",
+            "h2h_btts_5", "h2h_corners_over_85_5", "h2h_goals_ht_over05_5",
             # Chutes
             "home_shots_avg", "away_shots_avg",
             "home_shots_on_avg", "away_shots_on_avg",

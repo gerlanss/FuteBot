@@ -1441,7 +1441,7 @@ class Scanner:
         except Exception:
             return None
 
-    def _fatores_mercado_especificos(self, tip: dict | None) -> list[str]:
+    def _fatores_mercado_especificos(self, tip: dict | None, bloqueado: bool = False) -> list[str]:
         if not tip:
             return []
 
@@ -1465,6 +1465,9 @@ class Scanner:
         away_corners = self._fmt_num(features.get("away_corners_5"))
         home_goals_ht = self._fmt_num(features.get("home_goals_ht_5"))
         away_goals_ht = self._fmt_num(features.get("away_goals_ht_5"))
+
+        if bloqueado:
+            return []
 
         if mercado.startswith("over") and "corners" not in mercado:
             if prob_modelo:
@@ -1524,31 +1527,31 @@ class Scanner:
             return (
                 "Minha leitura principal aqui ainda e de jogo mais controlado do que aberto."
                 if not bloqueado else
-                "Minha leitura principal aqui perdeu forca para esse under."
+                "O modelo gostou do under, mas o contexto final nao sustentou a entrada."
             )
         if mercado.startswith("over") and "corners" not in mercado:
             return (
                 "Minha leitura principal aqui ainda e de jogo com espaco para gol."
                 if not bloqueado else
-                "Minha leitura principal aqui perdeu forca para esse over."
+                "O modelo gostou do over, mas o contexto final nao sustentou a entrada."
             )
         if mercado.startswith("corners_over"):
             return (
                 "Minha leitura principal aqui ainda e de jogo com pressao suficiente pelos lados."
                 if not bloqueado else
-                "Minha leitura principal aqui perdeu forca para um mercado alto de cantos."
+                "O modelo gostou desse mercado de cantos, mas o contexto final nao sustentou a entrada."
             )
         if mercado.startswith("corners_under"):
             return (
                 "Minha leitura principal aqui ainda e de jogo com menos acao pelos lados."
                 if not bloqueado else
-                "Minha leitura principal aqui perdeu forca para um mercado baixo de cantos."
+                "O modelo gostou desse mercado de cantos, mas o contexto final nao sustentou a entrada."
             )
         if mercado.startswith("h2h") or mercado.startswith("ht_"):
             return (
                 "Minha leitura principal aqui ainda sustenta esse lado."
                 if not bloqueado else
-                "Minha leitura principal aqui nao ficou forte o bastante para esse lado."
+                "O modelo ate enxergou valor nesse lado, mas o contexto final nao sustentou a entrada."
             )
         return None
 
@@ -1613,7 +1616,7 @@ class Scanner:
         ctx = (tip or {}).get("llm_contexto") or {}
         candidatos = []
 
-        for fator in self._fatores_mercado_especificos(tip):
+        for fator in self._fatores_mercado_especificos(tip, bloqueado=bloqueado):
             if fator not in candidatos:
                 candidatos.append(fator)
 
@@ -1651,7 +1654,7 @@ class Scanner:
         conclusao = self._conclusao_mercado(tip, bloqueado)
         if conclusao:
             linhas.append(f"  <i>{conclusao}</i>")
-        elif bloqueado:
+        if bloqueado:
             observacao = self._observacao_bloqueio_live(tip)
             if observacao:
                 linhas.append(f"  <i>{observacao}.</i>")

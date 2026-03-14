@@ -197,6 +197,13 @@ class FeatureFactory(FeatureExtractor):
         feats["h2h_draw_pct"] = h2h[1]
         feats["h2h_away_pct"] = h2h[2]
         feats["h2h_total"] = h2h[3]
+        h2h_market = self._calc_h2h_market_rates(home_id, away_id, fixture_date, limit=5)
+        feats["h2h_over15_5"] = h2h_market["over15"]
+        feats["h2h_over25_5"] = h2h_market["over25"]
+        feats["h2h_under35_5"] = h2h_market["under35"]
+        feats["h2h_btts_5"] = h2h_market["btts"]
+        feats["h2h_corners_over_85_5"] = h2h_market["corners_over_85"]
+        feats["h2h_goals_ht_over05_5"] = h2h_market["over05_ht"]
 
         # Perfil do árbitro
         referee = fixture.get("referee", "")
@@ -325,6 +332,8 @@ class FeatureFactory(FeatureExtractor):
             "home_win_streak", "away_win_streak",
             "home_loss_streak", "away_loss_streak",
             "h2h_home_pct", "h2h_draw_pct", "h2h_away_pct", "h2h_total",
+            "h2h_over15_5", "h2h_over25_5", "h2h_under35_5",
+            "h2h_btts_5", "h2h_corners_over_85_5", "h2h_goals_ht_over05_5",
             "ref_yellows", "ref_fouls", "ref_jogos",
         ])
 
