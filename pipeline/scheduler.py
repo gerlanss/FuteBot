@@ -766,6 +766,19 @@ class Scheduler:
                 if status in ("1H", "2H", "HT", "ET", "LIVE"):
                     stats = stats_partida(fixture_id)
                     stats_cache[fixture_id] = stats or []
+                    if item.get("watch_type") == "approved_prelive" and (
+                        payload.get("live_hit_notified") or payload.get("live_loss_notified")
+                    ):
+                        self.db.atualizar_live_watch_item(
+                            item_id,
+                            status="resolved",
+                            note=item.get("note"),
+                            payload=payload,
+                        )
+                        itens_tocados.append(item_id)
+                        itens_resolvidos.append(item_id)
+                        continue
+
                     if item.get("watch_type") == "approved_prelive":
                         green_agora = self._mercado_green_antecipado(item, game, stats)
                         red_agora = self._mercado_red_antecipado(item, game, stats)
