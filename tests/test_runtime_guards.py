@@ -745,7 +745,7 @@ class ScannerAuditFormattingTests(unittest.TestCase):
         self.assertIn("O contexto esportivo apresenta cautela.", texto)
         self.assertIn("Desfalques ofensivos importantes.", texto)
         self.assertIn("Chuva forte e gramado pesado.", texto)
-        self.assertIn("olhar de novo", texto)
+        self.assertIn("Por isso preferi ficar de fora", texto)
 
     def test_formatar_resumo_revisao_prioritizes_concrete_context(self):
         from pipeline.scanner import Scanner
@@ -772,7 +772,38 @@ class ScannerAuditFormattingTests(unittest.TestCase):
         self.assertIn("Desfalques relevantes: Paulinho, Vitor Roque.", texto)
         self.assertIn("Chuva moderada durante o jogo.", texto)
         self.assertIn("Gramado: Gramado pesado.", texto)
-        self.assertIn("olhar de novo", texto)
+        self.assertIn("Por isso preferi ficar de fora", texto)
+
+    def test_formatar_resumo_revisao_prioritizes_market_specific_reasoning(self):
+        from pipeline.scanner import Scanner
+
+        scanner = Scanner.__new__(Scanner)
+        linhas = scanner._formatar_resumo_revisao(
+            "Ambos buscam liderança na liga. Jogo crucial pela parte alta da tabela.",
+            bloqueado=False,
+            tip={
+                "mercado": "under35",
+                "prob_modelo": 0.79,
+                "prob_over25": 0.43,
+                "features": {
+                    "home_cs_5": 0.4,
+                    "away_cs_5": 0.6,
+                    "home_fts_5": 0.2,
+                    "away_fts_5": 0.2,
+                },
+                "llm_contexto": {
+                    "market_lookup": {
+                        "motivation_context": "Ambos buscam liderança na liga.",
+                    }
+                },
+            },
+        )
+
+        texto = "\n".join(linhas)
+        self.assertIn("O modelo ainda sustenta esse under em 79%.", texto)
+        self.assertIn("O modelo nao ve forca suficiente para um jogo acima de 2.5 gols (43%).", texto)
+        self.assertIn("Os dois lados chegam cedendo pouco espaco: clean sheets casa 40% | fora 60%.", texto)
+        self.assertNotIn("liderança", texto.lower())
 
 
 class LiveIntelligenceTests(unittest.TestCase):

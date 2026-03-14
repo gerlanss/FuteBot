@@ -1409,8 +1409,189 @@ class Scanner:
                 )
             ):
                 continue
+            if any(
+                token in fator_low
+                for token in (
+                    "buscam lider",
+                    "parte alta da tabela",
+                    "parte baixa da tabela",
+                    "jogo crucial",
+                    "confronto direto",
+                )
+            ):
+                continue
             fatores.append(fator)
         return [f for f in fatores if f]
+
+    @staticmethod
+    def _fmt_pct(valor: float | None) -> str | None:
+        if valor is None:
+            return None
+        try:
+            return f"{round(float(valor) * 100)}%"
+        except Exception:
+            return None
+
+    @staticmethod
+    def _fmt_num(valor: float | None) -> str | None:
+        if valor is None:
+            return None
+        try:
+            return f"{float(valor):.1f}"
+        except Exception:
+            return None
+
+    def _fatores_mercado_especificos(self, tip: dict | None) -> list[str]:
+        if not tip:
+            return []
+
+        mercado = (tip.get("mercado") or "").lower()
+        features = tip.get("features") or {}
+        fatores = []
+        prob_modelo = self._fmt_pct(tip.get("prob_modelo"))
+        prob_over25 = self._fmt_pct(tip.get("prob_over25"))
+        prob_home = self._fmt_pct(tip.get("prob_home"))
+        prob_draw = self._fmt_pct(tip.get("prob_draw"))
+        prob_away = self._fmt_pct(tip.get("prob_away"))
+
+        total_xg = self._fmt_num(features.get("total_xg_5"))
+        total_shots_on = self._fmt_num(features.get("total_shots_on_5"))
+        shots_diff = self._fmt_num(features.get("shots_on_diff_5"))
+        home_cs = self._fmt_pct(features.get("home_cs_5"))
+        away_cs = self._fmt_pct(features.get("away_cs_5"))
+        home_fts = self._fmt_pct(features.get("home_fts_5"))
+        away_fts = self._fmt_pct(features.get("away_fts_5"))
+        home_corners = self._fmt_num(features.get("home_corners_5"))
+        away_corners = self._fmt_num(features.get("away_corners_5"))
+        home_goals_ht = self._fmt_num(features.get("home_goals_ht_5"))
+        away_goals_ht = self._fmt_num(features.get("away_goals_ht_5"))
+
+        if mercado.startswith("over") and "corners" not in mercado:
+            if prob_modelo:
+                fatores.append(f"Leitura do modelo ainda fica forte para esse over em {prob_modelo}")
+            if total_xg and float(total_xg) >= 2.4:
+                fatores.append(f"Os dois lados chegam criando volume para jogo mais aberto ({total_xg} xG combinados)")
+            if total_shots_on and float(total_shots_on) >= 9.0:
+                fatores.append(f"As duas equipes vem finalizando bem no alvo ({total_shots_on} no recorte recente)")
+            if "ht" in mercado and (home_goals_ht or away_goals_ht):
+                fatores.append(
+                    f"O 1T recente dos dois lados nao costuma passar em branco: casa {home_goals_ht or '?'} | fora {away_goals_ht or '?'} gol(s)"
+                )
+            if "2t" in mercado and shots_diff and abs(float(shots_diff)) >= 2.0:
+                fatores.append("O perfil recente aponta para jogo que cresce de volume depois do intervalo")
+
+        elif mercado.startswith("under") and "corners" not in mercado:
+            if prob_modelo:
+                fatores.append(f"O modelo ainda sustenta esse under em {prob_modelo}")
+            if prob_over25 and float(prob_over25.strip('%')) <= 45:
+                fatores.append(f"O modelo nao ve forca suficiente para um jogo acima de 2.5 gols ({prob_over25})")
+            if home_cs or away_cs:
+                fatores.append(f"Os dois lados chegam cedendo pouco espaco: clean sheets casa {home_cs or '?'} | fora {away_cs or '?'}")
+            if home_fts or away_fts:
+                fatores.append(f"Ha sinal recente de ataque travando em alguns jogos: casa {home_fts or '?'} | fora {away_fts or '?'} sem marcar")
+            if "ht" in mercado and (home_goals_ht or away_goals_ht):
+                fatores.append(
+                    f"O 1T recente dos dois times tem cara mais controlada: casa {home_goals_ht or '?'} | fora {away_goals_ht or '?'} gol(s)"
+                )
+
+        elif mercado.startswith("h2h") or mercado.startswith("ht_"):
+            if mercado.endswith("home") and prob_home:
+                fatores.append(f"O mandante segue na frente na leitura do modelo ({prob_home})")
+            elif mercado.endswith("draw") and prob_draw:
+                fatores.append(f"O jogo aparece equilibrado o suficiente para empate em {prob_draw}")
+            elif mercado.endswith("away") and prob_away:
+                fatores.append(f"O visitante ainda aparece competitivo na leitura do modelo ({prob_away})")
+            if shots_diff and abs(float(shots_diff)) >= 2.0:
+                lado = "mandante" if float(shots_diff) > 0 else "visitante"
+                fatores.append(f"O volume recente de finalizacao pende para o {lado}")
+
+        elif mercado.startswith("corners_"):
+            if prob_modelo:
+                fatores.append(f"O modelo ainda sustenta esse mercado de escanteios em {prob_modelo}")
+            if home_corners or away_corners:
+                fatores.append(f"Media recente de cantos: casa {home_corners or '?'} | fora {away_corners or '?'}")
+            if total_shots_on and float(total_shots_on) >= 9.0 and "over" in mercado:
+                fatores.append("O volume recente de finalizacao combina com jogo que empilha ataques e cantos")
+            if total_shots_on and float(total_shots_on) <= 7.5 and "under" in mercado:
+                fatores.append("O volume recente de finalizacao ajuda um jogo com menos cantos")
+
+        return [f for f in fatores if f]
+
+    @staticmethod
+    def _tese_mercado(tip: dict | None, bloqueado: bool) -> str | None:
+        mercado = ((tip or {}).get("mercado") or "").lower()
+        if mercado.startswith("under") and "corners" not in mercado:
+            return (
+                "Minha leitura principal aqui ainda e de jogo mais controlado do que aberto."
+                if not bloqueado else
+                "Minha leitura principal aqui perdeu forca para esse under."
+            )
+        if mercado.startswith("over") and "corners" not in mercado:
+            return (
+                "Minha leitura principal aqui ainda e de jogo com espaco para gol."
+                if not bloqueado else
+                "Minha leitura principal aqui perdeu forca para esse over."
+            )
+        if mercado.startswith("corners_over"):
+            return (
+                "Minha leitura principal aqui ainda e de jogo com pressao suficiente pelos lados."
+                if not bloqueado else
+                "Minha leitura principal aqui perdeu forca para um mercado alto de cantos."
+            )
+        if mercado.startswith("corners_under"):
+            return (
+                "Minha leitura principal aqui ainda e de jogo com menos acao pelos lados."
+                if not bloqueado else
+                "Minha leitura principal aqui perdeu forca para um mercado baixo de cantos."
+            )
+        if mercado.startswith("h2h") or mercado.startswith("ht_"):
+            return (
+                "Minha leitura principal aqui ainda sustenta esse lado."
+                if not bloqueado else
+                "Minha leitura principal aqui nao ficou forte o bastante para esse lado."
+            )
+        return None
+
+    @staticmethod
+    def _risco_mercado(tip: dict | None, bloqueado: bool) -> str | None:
+        if bloqueado:
+            return None
+        mercado = ((tip or {}).get("mercado") or "").lower()
+        if mercado.startswith("under") and "corners" not in mercado:
+            return "Se sair gol cedo, essa leitura perde bastante forca."
+        if mercado.startswith("over") and "corners" not in mercado:
+            return "Se o ritmo cair depois do inicio, essa leitura perde valor rapido."
+        if mercado.startswith("corners_over"):
+            return "Se os ataques pelos lados sumirem, esse mercado esfria rapido."
+        if mercado.startswith("corners_under"):
+            return "Se o jogo abrir e empilhar cruzamentos, essa leitura perde valor."
+        if mercado.startswith("h2h") or mercado.startswith("ht_"):
+            return "Se o jogo equilibrar demais, esse lado perde sustentacao."
+        return None
+
+    @staticmethod
+    def _conclusao_mercado(tip: dict | None, bloqueado: bool) -> str | None:
+        mercado = ((tip or {}).get("mercado") or "").lower()
+        if bloqueado:
+            if mercado.startswith("under") and "corners" not in mercado:
+                return "Por isso preferi ficar fora desse under por enquanto."
+            if mercado.startswith("over") and "corners" not in mercado:
+                return "Por isso preferi nao insistir nesse over agora."
+            if mercado.startswith("corners_"):
+                return "Por isso preferi nao liberar esse mercado de cantos agora."
+            if mercado.startswith("h2h") or mercado.startswith("ht_"):
+                return "Por isso preferi nao liberar esse lado agora."
+            return "Por isso preferi ficar de fora nesta janela."
+        else:
+            if mercado.startswith("under") and "corners" not in mercado:
+                return "Por isso esse under segue de pe."
+            if mercado.startswith("over") and "corners" not in mercado:
+                return "Por isso esse over segue vivo."
+            if mercado.startswith("corners_"):
+                return "Por isso esse mercado de cantos segue de pe."
+            if mercado.startswith("h2h") or mercado.startswith("ht_"):
+                return "Por isso esse lado segue sustentado."
+            return "Por isso a entrada segue mantida."
 
     @staticmethod
     def _observacao_bloqueio_live(tip: dict | None) -> str | None:
@@ -1432,6 +1613,10 @@ class Scanner:
         ctx = (tip or {}).get("llm_contexto") or {}
         candidatos = []
 
+        for fator in self._fatores_mercado_especificos(tip):
+            if fator not in candidatos:
+                candidatos.append(fator)
+
         lesoes = self._resumo_lesoes(ctx)
         if lesoes:
             candidatos.append(lesoes)
@@ -1451,11 +1636,22 @@ class Scanner:
         decisao = "Entrada cancelada nesta janela." if bloqueado else "Entrada mantida nesta janela."
         linhas.append(f"  <b>{decisao}</b>")
 
+        tese = self._tese_mercado(tip, bloqueado)
+        if tese:
+            linhas.append(f"  {tese}")
+
         fatores = candidatos[:3]
         for fator in fatores:
             linhas.append(f"  • {fator}.")
 
-        if bloqueado:
+        risco = self._risco_mercado(tip, bloqueado)
+        if risco:
+            linhas.append(f"  <i>{risco}</i>")
+
+        conclusao = self._conclusao_mercado(tip, bloqueado)
+        if conclusao:
+            linhas.append(f"  <i>{conclusao}</i>")
+        elif bloqueado:
             observacao = self._observacao_bloqueio_live(tip)
             if observacao:
                 linhas.append(f"  <i>{observacao}.</i>")

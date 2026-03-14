@@ -766,6 +766,50 @@ class Scheduler:
                 if status in ("1H", "2H", "HT", "ET", "LIVE"):
                     stats = stats_partida(fixture_id)
                     stats_cache[fixture_id] = stats or []
+                    if item.get("watch_type") == "approved_prelive":
+                        green_agora = self._mercado_green_antecipado(item, game, stats)
+                        red_agora = self._mercado_red_antecipado(item, game, stats)
+                        if green_agora and not payload.get("live_hit_notified"):
+                            mercado_label_curto = nomes_mercado.get(mercado, item.get("descricao") or mercado)
+                            greens_antecipados.append({
+                                "fixture_id": fixture_id,
+                                "mercado": mercado,
+                                "home_name": home_name,
+                                "away_name": away_name,
+                                "mercado_label": mercado_label_curto,
+                                "elapsed": ((game.get("fixture") or {}).get("status") or {}).get("elapsed") or "?",
+                            })
+                            payload["live_hit_notified"] = True
+                            self.db.atualizar_live_watch_item(
+                                item_id,
+                                status="resolved",
+                                note=item.get("note"),
+                                payload=payload,
+                            )
+                            itens_tocados.append(item_id)
+                            itens_resolvidos.append(item_id)
+                            continue
+                        if red_agora and not payload.get("live_loss_notified"):
+                            mercado_label_curto = nomes_mercado.get(mercado, item.get("descricao") or mercado)
+                            reds_antecipados.append({
+                                "fixture_id": fixture_id,
+                                "mercado": mercado,
+                                "home_name": home_name,
+                                "away_name": away_name,
+                                "mercado_label": mercado_label_curto,
+                                "elapsed": ((game.get("fixture") or {}).get("status") or {}).get("elapsed") or "?",
+                            })
+                            payload["live_loss_notified"] = True
+                            self.db.atualizar_live_watch_item(
+                                item_id,
+                                status="resolved",
+                                note=item.get("note"),
+                                payload=payload,
+                            )
+                            itens_tocados.append(item_id)
+                            itens_resolvidos.append(item_id)
+                            continue
+
                     leitura = live.analisar(item, game, stats)
                     veredito = leitura.get("veredito", "monitorar")
                     elapsed = leitura.get("elapsed") or "?"
@@ -813,42 +857,6 @@ class Scheduler:
                         sinal["payload"] = payload
                         sinal["elapsed"] = elapsed
                         sinais_live.append(sinal)
-
-                    if item.get("watch_type") == "approved_prelive":
-                        green_agora = self._mercado_green_antecipado(item, game, stats)
-                        red_agora = self._mercado_red_antecipado(item, game, stats)
-                        if green_agora and not payload.get("live_hit_notified"):
-                            mercado_label_curto = nomes_mercado.get(mercado, item.get("descricao") or mercado)
-                            greens_antecipados.append({
-                                "fixture_id": fixture_id,
-                                "mercado": mercado,
-                                "home_name": home_name,
-                                "away_name": away_name,
-                                "mercado_label": mercado_label_curto,
-                                "elapsed": elapsed,
-                            })
-                            payload["live_hit_notified"] = True
-                            self.db.atualizar_live_watch_item(
-                                item_id,
-                                note=item.get("note"),
-                                payload=payload,
-                            )
-                        elif red_agora and not payload.get("live_loss_notified"):
-                            mercado_label_curto = nomes_mercado.get(mercado, item.get("descricao") or mercado)
-                            reds_antecipados.append({
-                                "fixture_id": fixture_id,
-                                "mercado": mercado,
-                                "home_name": home_name,
-                                "away_name": away_name,
-                                "mercado_label": mercado_label_curto,
-                                "elapsed": elapsed,
-                            })
-                            payload["live_loss_notified"] = True
-                            self.db.atualizar_live_watch_item(
-                                item_id,
-                                note=item.get("note"),
-                                payload=payload,
-                            )
                     itens_tocados.append(item_id)
                     print(
                         f"   👀 {home_name} vs {away_name} | {mercado_label} | "
