@@ -26,6 +26,7 @@ import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote_plus
+from zoneinfo import ZoneInfo
 
 from telegram import (
     Bot,
@@ -45,7 +46,14 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, TIMEZONE, ADMIN_CHAT_IDS, BET365_URL
+from config import (
+    TELEGRAM_TOKEN,
+    TELEGRAM_CHAT_ID,
+    TIMEZONE,
+    ADMIN_CHAT_IDS,
+    BET365_URL,
+    SCAN_LOOKAHEAD_HORAS,
+)
 from data.database import Database
 from pipeline.scanner import Scanner
 from pipeline.collector import Collector
@@ -629,7 +637,11 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         scanner = Scanner(_db)
-        resultado = scanner.executar(mode="preselect")
+        resultado = scanner.executar(
+            mode="preselect",
+            reference_time=datetime.now(ZoneInfo(TIMEZONE)),
+            lookahead_minutes=SCAN_LOOKAHEAD_HORAS * 60,
+        )
         msgs = scanner.formatar_relatorio(resultado)
         # Envia cada bloco como mensagem separada (com botões ✏️ Odd)
         for i, (texto, botoes) in enumerate(msgs):
@@ -1147,7 +1159,11 @@ async def _executar_via_callback(query, handler_fn, context):
         if handler_fn == cmd_scan:
             await query.message.reply_text("🗓️ Executando radar do dia... aguarde.")
             scanner = Scanner(_db)
-            resultado = scanner.executar(mode="preselect")
+            resultado = scanner.executar(
+                mode="preselect",
+                reference_time=datetime.now(ZoneInfo(TIMEZONE)),
+                lookahead_minutes=SCAN_LOOKAHEAD_HORAS * 60,
+            )
             msgs = scanner.formatar_relatorio(resultado)
             for i, (texto, botoes) in enumerate(msgs):
                 kb = None

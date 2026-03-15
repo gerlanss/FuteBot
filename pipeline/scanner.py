@@ -83,8 +83,6 @@ NO_STRATEGY_PROB_MIN = 0.70
 # Limite de tips por fixture (evita spam no mesmo jogo)
 MAX_TIPS_POR_JOGO = None
 
-MAX_TIPS_DIA = 12
-
 # Categorias de conflito — no máximo 1 tip por categoria por jogo.
 # Se múltiplos mercados da mesma categoria passam (ex: Over 1.5 + Under 3.5),
 # apenas o de maior confiança sobrevive. Isso elimina qualquer combinação
@@ -114,12 +112,9 @@ _LEAGUE_NOME = {v["id"]: v["nome"] for v in LEAGUES.values()}
 # Combina tips de jogos DIFERENTES para multiplicar odds.
 # Usa odds Pinnacle reais quando disponíveis.
 # ──────────────────────────────────────────────
-COMBO_MAX_TOTAL = 3
-COMBO_DUPLAS_MAX = 3
-COMBO_TRIPLAS_MAX = 3
 COMBO_PROB_MIN = 0.50         # Confiança composta mínima (produto das probs)
 COMBO_TIP_PROB_MIN = 0.65     # Prob mínima individual para entrar em combo
-PRESELECT_MAX_JOGOS = 18
+PRESELECT_MAX_JOGOS = 0
 RELEASE_LOOKAHEAD_MINUTES = 30
 RELEASE_WINDOW_MINUTES = 5
 STRATEGY_EPSILON = 0.001
@@ -211,7 +206,14 @@ class Scanner:
         else:
             print("[Scanner] ⚠️ Sem estratégias — emitindo tips por confiança do modelo")
 
-    def executar(self, data: str = None, dias_adiante: int = 0, mode: str = "preselect") -> dict:
+    def executar(
+        self,
+        data: str = None,
+        dias_adiante: int = 0,
+        mode: str = "preselect",
+        reference_time: datetime | None = None,
+        lookahead_minutes: int | None = None,
+    ) -> dict:
         """
         Executa o pipeline completo para uma data (ou apenas hoje).
 
@@ -238,7 +240,12 @@ class Scanner:
 
         # ─── ETAPA 1: Scan de fixtures ───
         print("\n📋 Etapa 1: Buscando fixtures...")
-        fixtures = self._scan_fixtures(data, dias_adiante)
+        fixtures = self._scan_fixtures(
+            data,
+            dias_adiante,
+            reference_time=reference_time,
+            lookahead_minutes=lookahead_minutes,
+        )
         print(f"   Encontrados: {len(fixtures)} jogos nas nossas ligas")
 
         if not fixtures:
@@ -323,6 +330,8 @@ class Scanner:
                 tips_gate=tips_gate,
                 tips_brutas=tips_brutas,
                 tips_pos_filtros=tips_pos_filtros,
+                reference_time=reference_time,
+                lookahead_minutes=lookahead_minutes,
             )
 
         return self.liberar_mercados(
@@ -346,8 +355,10 @@ class Scanner:
         test_mode: bool = False,
     ) -> dict:
         """Libera mercados perto do jogo, após odds + Gemini + DeepSeek."""
+        now_local = datetime.now(ZoneInfo(TIMEZONE))
         if data is None:
-            data = datetime.now().strftime("%Y-%m-%d")
+            data = now_local.strftime("%Y-%m-%d")
+        reference_time = reference_time or now_local
         reference_time = reference_time or datetime.now(ZoneInfo(TIMEZONE))
 
         if tips_override is None:
@@ -421,10 +432,6 @@ class Scanner:
             ),
             reverse=True,
         )
-        if len(tips_aprovadas) > MAX_TIPS_DIA:
-            print(f"   ✂️ Cortando de {len(tips_aprovadas)} para {MAX_TIPS_DIA} tips (limite diário)")
-            tips_aprovadas = tips_aprovadas[:MAX_TIPS_DIA]
-
         print("\n💾 Etapa 8: Salvando tips liberadas...")
         _treino = self.db.ultimo_treino()
         versao_atual = _treino["modelo_versao"] if _treino else "v1"
@@ -495,7 +502,14 @@ class Scanner:
     #  ETAPA 1: Scan de fixtures
     # ══════════════════════════════════════════════
 
-    def _scan_fixtures(self, data: str, dias_adiante: int) -> list[dict]:
+    def _scan_fixtures(
+        self,
+        data: str,
+        dias_adiante: int,
+        *,
+        reference_time: datetime | None = None,
+        lookahead_minutes: int | None = None,
+    ) -> list[dict]:
         """Busca fixtures do dia e dos próximos dias nas ligas configuradas."""
         league_ids = {l["id"] for l in LEAGUES.values()}
         all_fixtures = []
@@ -515,6 +529,17 @@ class Scanner:
                 print(f"   {dia}: {len(nossas)} jogos")
             all_fixtures.extend(nossas)
 
+        if reference_time is not None and lookahead_minutes:
+            limite = reference_time + timedelta(minutes=lookahead_minutes)
+            filtradas = []
+            for fixture in all_fixtures:
+                kickoff = self._parse_fixture_datetime((fixture.get("fixture") or {}).get("date"))
+                if kickoff is None:
+                    continue
+                if reference_time <= kickoff <= limite:
+                    filtradas.append(fixture)
+            return filtradas
+
         return all_fixtures
 
     def _finalizar_preselecao(
@@ -526,6 +551,8 @@ class Scanner:
         tips_gate: list[dict],
         tips_brutas: int,
         tips_pos_filtros: int,
+        reference_time: datetime | None = None,
+        lookahead_minutes: int | None = None,
     ) -> dict:
         """Salva candidatos da manhã e devolve só os jogos pré-selecionados."""
         candidatos = self._reduzir_para_jogos(tips_gate)
@@ -547,6 +574,8 @@ class Scanner:
             "data": data,
             "mode": "preselect",
             "preselecionados": candidatos,
+            "reference_time": reference_time.isoformat() if reference_time else None,
+            "lookahead_minutes": int(lookahead_minutes or 0),
         }
 
     def _reduzir_para_jogos(self, tips: list[dict]) -> list[dict]:
@@ -583,7 +612,7 @@ class Scanner:
                 continue
             vistos.add(fid)
             jogos.append(item)
-            if len(vistos) >= PRESELECT_MAX_JOGOS:
+            if PRESELECT_MAX_JOGOS > 0 and len(vistos) >= PRESELECT_MAX_JOGOS:
                 break
         allowed = {item.get("fixture_id") for item in jogos}
         return [item for item in candidatos if item.get("fixture_id") in allowed]
@@ -1152,7 +1181,6 @@ class Scanner:
           - Confiança composta (produto das probs) >= COMBO_PROB_MIN.
           - Só entra tip com prob >= COMBO_TIP_PROB_MIN.
           - Prioriza combos com maior confiança composta.
-          - Máx COMBO_MAX_TOTAL combos totais (duplas + triplas).
           - Duplas e triplas compartilham o mesmo set de fixtures usadas.
 
         Retorna lista de dicts com 'tipo', 'tips', 'prob_composta'.
@@ -1205,28 +1233,13 @@ class Scanner:
 
         fixtures_usadas = set()
         combos_total = []
-        duplas = 0
-        triplas = 0
-
         for combo in candidatas:
-            if len(combos_total) >= COMBO_MAX_TOTAL:
-                break
-
-            if combo["tipo"] == "dupla" and duplas >= COMBO_DUPLAS_MAX:
-                continue
-            if combo["tipo"] == "tripla" and triplas >= COMBO_TRIPLAS_MAX:
-                continue
-
             fids = {t["fixture_id"] for t in combo["tips"]}
             if fids & fixtures_usadas:
                 continue
 
             combos_total.append(combo)
             fixtures_usadas.update(fids)
-            if combo["tipo"] == "dupla":
-                duplas += 1
-            else:
-                triplas += 1
 
         return combos_total
 
@@ -1704,9 +1717,11 @@ class Scanner:
             candidatos = resultado.get("preselecionados", [])
             total_jogos = len({tip.get("fixture_id") for tip in candidatos})
             total_mercados = len(candidatos)
+            lookahead_minutes = int(resultado.get("lookahead_minutes") or 0)
+            lookahead_horas = max(1, lookahead_minutes // 60) if lookahead_minutes else 0
             header = "\n".join([
-                f"<b>🗓️ Observação do dia {data_br}</b>",
-                f"Hoje separei <b>{total_jogos}</b> jogo(s) para observar.",
+                f"<b>🗓️ Radar das proximas {lookahead_horas}h | {data_br}</b>" if lookahead_horas else f"<b>🗓️ Observação do dia {data_br}</b>",
+                f"Agora separei <b>{total_jogos}</b> jogo(s) para observar." if lookahead_horas else f"Hoje separei <b>{total_jogos}</b> jogo(s) para observar.",
                 f"• Jogos analisados: <b>{resultado['fixtures']}</b>",
                 f"• Jogos com previsão: <b>{resultado['previsoes']}</b>",
                 f"• Mercados candidatos: <b>{resultado.get('tips_brutas', 0)}</b>",

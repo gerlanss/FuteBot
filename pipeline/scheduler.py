@@ -21,6 +21,7 @@ Uso:
 
 from datetime import datetime, timedelta
 import json
+from zoneinfo import ZoneInfo
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -40,7 +41,7 @@ from config import (
     DISCOVERY_TARGET_PRECISION_COPA, DISCOVERY_MIN_TRAIN_SAMPLES, DISCOVERY_MIN_TRAIN_SAMPLES_COPA,
     DISCOVERY_MIN_TEST_SAMPLES, DISCOVERY_MIN_TEST_SAMPLES_COPA,
     DISCOVERY_OPTUNA_TRIALS, DISCOVERY_CUP_LEAGUE_IDS, LEAGUES, LIBERACAO_T30_INTERVALO_MIN,
-    LIVE_CHECK_INTERVALO_MIN,
+    LIVE_CHECK_INTERVALO_MIN, SCAN_INTERVALO_HORAS, SCAN_LOOKAHEAD_HORAS,
 )
 
 from services.apifootball import raw_request, stats_partida
@@ -110,7 +111,7 @@ class Scheduler:
         # 2. Scanner de oportunidades (diário)
         self.scheduler.add_job(
             self._job_scanner,
-            CronTrigger(hour=int(h_scan), minute=int(m_scan)),
+            CronTrigger(hour=f"{int(h_scan)}-23/{max(1, SCAN_INTERVALO_HORAS)}", minute=int(m_scan)),
             id="scanner_diario",
             name="Scanner de oportunidades",
             replace_existing=True,
@@ -176,7 +177,10 @@ class Scheduler:
         )
         print(f"   🧬 Discovery semanal: {DISCOVERY_SEMANAL_DIA} {DISCOVERY_SEMANAL_HORA}")
         print(f"   📥 Coleta: {RESULTADOS_HORA} (diário)")
-        print(f"   🔍 Scanner: {SCAN_HORA} (diário)")
+        print(
+            f"   🔍 Scanner: a cada {SCAN_INTERVALO_HORAS}h desde {SCAN_HORA} "
+            f"(janela pública de {SCAN_LOOKAHEAD_HORAS}h)"
+        )
         print(f"   ⏳ Liberação T-30: a cada {LIBERACAO_T30_INTERVALO_MIN} min")
         print(f"   📋 Relatório: 06:45 (resultados de ontem)")
         print(f"   ⚽ Ao vivo: a cada {LIVE_CHECK_INTERVALO_MIN} min 10:00-23:59")
@@ -239,7 +243,7 @@ class Scheduler:
 
     def _garantir_radar_do_dia(self, data: str = None) -> bool:
         """Reconstrói silenciosamente o radar do dia se o scheduler subiu depois do scan."""
-        agora = datetime.now()
+        agora = datetime.now(ZoneInfo(TIMEZONE))
         data = data or agora.strftime("%Y-%m-%d")
         h_scan, m_scan = SCAN_HORA.split(":")
         horario_scan = agora.replace(hour=int(h_scan), minute=int(m_scan), second=0, microsecond=0)
@@ -253,7 +257,12 @@ class Scheduler:
 
         print(f"🔄 Recuperando radar do dia {data} (sem candidatos salvos após {SCAN_HORA})...")
         scanner = Scanner(self.db)
-        resultado = scanner.executar(data=data, mode="preselect")
+        resultado = scanner.executar(
+            data=data,
+            mode="preselect",
+            reference_time=agora,
+            lookahead_minutes=SCAN_LOOKAHEAD_HORAS * 60,
+        )
         total = len(resultado.get("preselecionados") or [])
         print(f"   ✅ Radar reconstruído: {total} jogo(s) pré-selecionado(s)")
         return total > 0
@@ -554,8 +563,14 @@ class Scheduler:
         print(f"{'='*60}")
 
         try:
+            agora = datetime.now(ZoneInfo(TIMEZONE))
             scanner = Scanner(self.db)
-            resultado = scanner.executar(dias_adiante=0)  # Apenas jogos do dia
+            resultado = scanner.executar(
+                dias_adiante=0,
+                mode="preselect",
+                reference_time=agora,
+                lookahead_minutes=SCAN_LOOKAHEAD_HORAS * 60,
+            )
 
             # Enviar relatório via Telegram (tuplas: texto + botões ✏️ Odd)
             msgs = scanner.formatar_relatorio(resultado)
@@ -852,7 +867,7 @@ class Scheduler:
                     last_verdict = payload.get("last_live_verdict")
                     last_minute = payload.get("last_live_minute")
 
-                    if veredito in {"sinal_live", "cancelar", "monitorar_forte"}:
+                    if veredito in {"sinal_live", "cancelar"}:
                         repetir = last_verdict == veredito and last_minute == elapsed
                         if not repetir:
                             if veredito == "sinal_live":
@@ -862,12 +877,9 @@ class Scheduler:
                                 else:
                                     emoji = "🟡"
                                     titulo = "Reavaliacao live"
-                            elif veredito == "cancelar":
+                            else:
                                 emoji = "🔴"
                                 titulo = "Leitura cancelada"
-                            else:
-                                emoji = "🟡"
-                                titulo = "Observacao live"
                             alertas_admin.append(
                                 f"{emoji} <b>{titulo}</b>\n"
                                 f"<b>{home_name} x {away_name}</b>\n"
@@ -879,7 +891,10 @@ class Scheduler:
                             payload["last_live_minute"] = elapsed
                             note = leitura.get("mensagem", item.get("note"))
                             novo_status = None
-                            if item.get("watch_type") == "blocked_recheck" and veredito in {"sinal_live", "cancelar"}:
+                            if veredito == "cancelar":
+                                novo_status = "resolved"
+                                itens_resolvidos.append(item_id)
+                            elif item.get("watch_type") == "blocked_recheck" and veredito == "sinal_live":
                                 novo_status = "resolved"
                                 itens_resolvidos.append(item_id)
                             self.db.atualizar_live_watch_item(

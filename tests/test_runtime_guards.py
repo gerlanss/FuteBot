@@ -892,6 +892,220 @@ class LiveIntelligenceTests(unittest.TestCase):
 
         self.assertEqual(leitura["veredito"], "cancelar")
 
+    def test_live_intelligence_does_not_cancel_ht_under_late_when_market_still_alive(self):
+        from services.live_intelligence import LiveIntelligence
+
+        fixture = {
+            "fixture": {"status": {"short": "1H", "elapsed": 39}},
+            "goals": {"home": 1, "away": 0},
+            "score": {"halftime": {"home": 1, "away": 0}},
+        }
+        stats = [
+            {
+                "team": {"name": "Casa"},
+                "statistics": [
+                    {"type": "Shots on Goal", "value": 2},
+                    {"type": "Total Shots", "value": 4},
+                    {"type": "expected_goals", "value": 0.95},
+                    {"type": "Red Cards", "value": 1},
+                ],
+            },
+            {
+                "team": {"name": "Fora"},
+                "statistics": [
+                    {"type": "Shots on Goal", "value": 1},
+                    {"type": "Total Shots", "value": 5},
+                    {"type": "expected_goals", "value": 0.60},
+                    {"type": "Red Cards", "value": 0},
+                ],
+            },
+        ]
+
+        leitura = LiveIntelligence().analisar(
+            {"mercado": "under15_ht", "watch_type": "approved_prelive"},
+            fixture,
+            stats,
+        )
+
+        self.assertNotEqual(leitura["veredito"], "cancelar")
+
+    def test_live_intelligence_flags_ht_over_signal_early_with_real_volume(self):
+        from services.live_intelligence import LiveIntelligence
+
+        fixture = {
+            "fixture": {"status": {"short": "1H", "elapsed": 28}},
+            "goals": {"home": 0, "away": 0},
+            "score": {"halftime": {"home": 0, "away": 0}},
+        }
+        stats = [
+            {
+                "team": {"name": "Casa"},
+                "statistics": [
+                    {"type": "Shots on Goal", "value": 2},
+                    {"type": "Total Shots", "value": 5},
+                    {"type": "expected_goals", "value": 0.35},
+                ],
+            },
+            {
+                "team": {"name": "Fora"},
+                "statistics": [
+                    {"type": "Shots on Goal", "value": 2},
+                    {"type": "Total Shots", "value": 4},
+                    {"type": "expected_goals", "value": 0.34},
+                ],
+            },
+        ]
+
+        leitura = LiveIntelligence().analisar(
+            {"mercado": "over05_ht", "watch_type": "approved_prelive"},
+            fixture,
+            stats,
+        )
+
+        self.assertEqual(leitura["veredito"], "sinal_live")
+
+    def test_live_intelligence_uses_second_half_goals_for_over_2t(self):
+        from services.live_intelligence import LiveIntelligence
+
+        fixture = {
+            "fixture": {"status": {"short": "2H", "elapsed": 64}},
+            "goals": {"home": 1, "away": 0},
+            "score": {"halftime": {"home": 1, "away": 0}},
+        }
+        stats = [
+            {
+                "team": {"name": "Casa"},
+                "statistics": [
+                    {"type": "Shots on Goal", "value": 3},
+                    {"type": "Total Shots", "value": 7},
+                    {"type": "expected_goals", "value": 0.55},
+                ],
+            },
+            {
+                "team": {"name": "Fora"},
+                "statistics": [
+                    {"type": "Shots on Goal", "value": 2},
+                    {"type": "Total Shots", "value": 6},
+                    {"type": "expected_goals", "value": 0.55},
+                ],
+            },
+        ]
+
+        leitura = LiveIntelligence().analisar(
+            {"mercado": "over05_2t", "watch_type": "approved_prelive"},
+            fixture,
+            stats,
+        )
+
+        self.assertEqual(leitura["gols_2t"], 0)
+        self.assertEqual(leitura["veredito"], "sinal_live")
+
+    def test_live_intelligence_only_signals_draw_with_real_balance(self):
+        from services.live_intelligence import LiveIntelligence
+
+        fixture = {
+            "fixture": {"status": {"short": "2H", "elapsed": 67}},
+            "goals": {"home": 1, "away": 1},
+        }
+        stats = [
+            {
+                "team": {"name": "Casa"},
+                "statistics": [
+                    {"type": "Shots on Goal", "value": 3},
+                    {"type": "Total Shots", "value": 8},
+                    {"type": "expected_goals", "value": 0.92},
+                ],
+            },
+            {
+                "team": {"name": "Fora"},
+                "statistics": [
+                    {"type": "Shots on Goal", "value": 3},
+                    {"type": "Total Shots", "value": 7},
+                    {"type": "expected_goals", "value": 0.88},
+                ],
+            },
+        ]
+
+        leitura = LiveIntelligence().analisar(
+            {"mercado": "h2h_draw", "watch_type": "approved_prelive"},
+            fixture,
+            stats,
+        )
+
+        self.assertEqual(leitura["veredito"], "sinal_live")
+
+    def test_live_intelligence_corners_under_stays_silent_when_low_corners_hide_pressure(self):
+        from services.live_intelligence import LiveIntelligence
+
+        fixture = {
+            "fixture": {"status": {"short": "2H", "elapsed": 61}},
+            "goals": {"home": 1, "away": 0},
+        }
+        stats = [
+            {
+                "team": {"name": "Casa"},
+                "statistics": [
+                    {"type": "Corner Kicks", "value": 2},
+                    {"type": "Shots on Goal", "value": 4},
+                    {"type": "Total Shots", "value": 9},
+                    {"type": "expected_goals", "value": 0.9},
+                ],
+            },
+            {
+                "team": {"name": "Fora"},
+                "statistics": [
+                    {"type": "Corner Kicks", "value": 2},
+                    {"type": "Shots on Goal", "value": 3},
+                    {"type": "Total Shots", "value": 8},
+                    {"type": "expected_goals", "value": 0.55},
+                ],
+            },
+        ]
+
+        leitura = LiveIntelligence().analisar(
+            {"mercado": "corners_under_95", "watch_type": "approved_prelive"},
+            fixture,
+            stats,
+        )
+
+        self.assertEqual(leitura["veredito"], "monitorar")
+
+    def test_live_intelligence_corners_over_requires_pressure_not_only_corner_count(self):
+        from services.live_intelligence import LiveIntelligence
+
+        fixture = {
+            "fixture": {"status": {"short": "2H", "elapsed": 58}},
+            "goals": {"home": 0, "away": 0},
+        }
+        stats = [
+            {
+                "team": {"name": "Casa"},
+                "statistics": [
+                    {"type": "Corner Kicks", "value": 4},
+                    {"type": "Shots on Goal", "value": 1},
+                    {"type": "Total Shots", "value": 5},
+                    {"type": "expected_goals", "value": 0.3},
+                ],
+            },
+            {
+                "team": {"name": "Fora"},
+                "statistics": [
+                    {"type": "Corner Kicks", "value": 1},
+                    {"type": "Shots on Goal", "value": 1},
+                    {"type": "Total Shots", "value": 4},
+                    {"type": "expected_goals", "value": 0.2},
+                ],
+            },
+        ]
+
+        leitura = LiveIntelligence().analisar(
+            {"mercado": "corners_over_85", "watch_type": "approved_prelive"},
+            fixture,
+            stats,
+        )
+
+        self.assertEqual(leitura["veredito"], "monitorar")
+
 
 if __name__ == "__main__":
     unittest.main()
