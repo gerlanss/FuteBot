@@ -292,6 +292,16 @@ class Database:
                 FOREIGN KEY (combo_id) REFERENCES combos(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS live_market_notifications (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_date      TEXT NOT NULL,
+                fixture_id     INTEGER NOT NULL,
+                mercado        TEXT NOT NULL,
+                verdict        TEXT NOT NULL,
+                created_at     TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(scan_date, fixture_id, mercado, verdict)
+            );
+
             CREATE TABLE IF NOT EXISTS telegram_chats (
                 chat_id        INTEGER PRIMARY KEY,
                 is_admin       INTEGER NOT NULL DEFAULT 0,
@@ -513,6 +523,17 @@ class Database:
                 created_at     TEXT DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(combo_id, progress_key),
                 FOREIGN KEY (combo_id) REFERENCES combos(id) ON DELETE CASCADE
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS live_market_notifications (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_date      TEXT NOT NULL,
+                fixture_id     INTEGER NOT NULL,
+                mercado        TEXT NOT NULL,
+                verdict        TEXT NOT NULL,
+                created_at     TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(scan_date, fixture_id, mercado, verdict)
             )
         """)
 
@@ -1037,6 +1058,76 @@ class Database:
         conn.commit()
         conn.close()
 
+    def salvar_live_watch_item(self, data: str, item: dict) -> int:
+        """Persistir um único item live e retornar o id salvo."""
+        conn = self._conn()
+        row = conn.execute(
+            """
+            SELECT id
+            FROM live_watchlist
+            WHERE scan_date = ? AND fixture_id = ? AND mercado = ? AND watch_type = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (
+                data,
+                item.get("fixture_id"),
+                item.get("mercado"),
+                item.get("watch_type", "approved_prelive"),
+            ),
+        ).fetchone()
+        if row:
+            conn.execute(
+                """
+                UPDATE live_watchlist
+                SET fixture_date = ?, league_id = ?, home_name = ?, away_name = ?,
+                    descricao = ?, prob_modelo = ?, status = ?, note = ?, payload_json = ?
+                WHERE id = ?
+                """,
+                (
+                    item.get("date") or item.get("fixture_date"),
+                    item.get("league_id"),
+                    item.get("home_name"),
+                    item.get("away_name"),
+                    item.get("descricao"),
+                    item.get("prob_modelo"),
+                    item.get("status", "active"),
+                    item.get("note"),
+                    json.dumps(item.get("payload") or item, ensure_ascii=False),
+                    row["id"],
+                ),
+            )
+            item_id = int(row["id"])
+        else:
+            cur = conn.execute(
+                """
+                INSERT INTO live_watchlist (
+                    scan_date, fixture_id, fixture_date, league_id,
+                    home_name, away_name, mercado, descricao, prob_modelo,
+                    watch_type, status, note, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    data,
+                    item.get("fixture_id"),
+                    item.get("date") or item.get("fixture_date"),
+                    item.get("league_id"),
+                    item.get("home_name"),
+                    item.get("away_name"),
+                    item.get("mercado"),
+                    item.get("descricao"),
+                    item.get("prob_modelo"),
+                    item.get("watch_type", "approved_prelive"),
+                    item.get("status", "active"),
+                    item.get("note"),
+                    json.dumps(item.get("payload") or item, ensure_ascii=False),
+                ),
+            )
+            item_id = int(cur.lastrowid)
+        conn.commit()
+        conn.close()
+        return item_id
+
     def live_watch_items(self, dates: list[str] | None = None, status: str | None = "active") -> list[dict]:
         """Retorna itens monitorados para acompanhamento live."""
         conn = self._conn()
@@ -1331,6 +1422,44 @@ class Database:
             VALUES (?, ?)
             """,
             (combo_id, progress_key),
+        )
+        conn.commit()
+        conn.close()
+
+    def live_market_notification_exists(
+        self,
+        scan_date: str,
+        fixture_id: int,
+        mercado: str,
+        verdict: str,
+    ) -> bool:
+        conn = self._conn()
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM live_market_notifications
+            WHERE scan_date = ? AND fixture_id = ? AND mercado = ? AND verdict = ?
+            LIMIT 1
+            """,
+            (scan_date, fixture_id, mercado, verdict),
+        ).fetchone()
+        conn.close()
+        return row is not None
+
+    def salvar_live_market_notification(
+        self,
+        scan_date: str,
+        fixture_id: int,
+        mercado: str,
+        verdict: str,
+    ):
+        conn = self._conn()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO live_market_notifications (scan_date, fixture_id, mercado, verdict)
+            VALUES (?, ?, ?, ?)
+            """,
+            (scan_date, fixture_id, mercado, verdict),
         )
         conn.commit()
         conn.close()

@@ -752,8 +752,12 @@ class Scheduler:
                 return
 
             print(f"   🔍 Verificando {len(itens)} item(ns) monitorados...")
+            itens_por_fixture = {}
+            for item in itens:
+                itens_por_fixture.setdefault(item["fixture_id"], []).append(item)
             fixture_cache = {}
             stats_cache = {}
+            fixture_extras_processados = set()
             live = LiveIntelligence()
             resolvidos = 0
             acertos = 0
@@ -804,7 +808,19 @@ class Scheduler:
                 if status in ("1H", "2H", "HT", "ET", "LIVE"):
                     stats = stats_partida(fixture_id)
                     stats_cache[fixture_id] = stats or []
-                    if item.get("watch_type") == "approved_prelive" and (
+                    if fixture_id not in fixture_extras_processados:
+                        extras_alertas, extras_sinais = self._detectar_oportunidades_live_fixture(
+                            scan_date=hoje,
+                            fixture=game,
+                            stats=stats or [],
+                            itens_fixture=itens_por_fixture.get(fixture_id, []),
+                            nomes_mercado=nomes_mercado,
+                            live=live,
+                        )
+                        alertas_admin.extend(extras_alertas)
+                        sinais_live.extend(extras_sinais)
+                        fixture_extras_processados.add(fixture_id)
+                    if item.get("watch_type") in {"approved_prelive", "live_opportunity"} and (
                         payload.get("live_hit_notified") or payload.get("live_loss_notified")
                     ):
                         self.db.atualizar_live_watch_item(
@@ -817,7 +833,7 @@ class Scheduler:
                         itens_resolvidos.append(item_id)
                         continue
 
-                    if item.get("watch_type") == "approved_prelive":
+                    if item.get("watch_type") in {"approved_prelive", "live_opportunity"}:
                         green_agora = self._mercado_green_antecipado(item, game, stats)
                         red_agora = self._mercado_red_antecipado(item, game, stats)
                         if green_agora and not payload.get("live_hit_notified"):
@@ -865,13 +881,12 @@ class Scheduler:
                     veredito = leitura.get("veredito", "monitorar")
                     elapsed = leitura.get("elapsed") or "?"
                     last_verdict = payload.get("last_live_verdict")
-                    last_minute = payload.get("last_live_minute")
 
                     if veredito in {"sinal_live", "cancelar"}:
-                        repetir = last_verdict == veredito and last_minute == elapsed
+                        repetir = last_verdict == veredito
                         if not repetir:
                             if veredito == "sinal_live":
-                                if item.get("watch_type") == "approved_prelive":
+                                if item.get("watch_type") in {"approved_prelive", "live_opportunity"}:
                                     emoji = "🟢"
                                     titulo = "Entrada live liberada"
                                 else:
@@ -935,36 +950,17 @@ class Scheduler:
                 itens_tocados.append(item_id)
                 itens_resolvidos.append(item_id)
 
-                if item.get("watch_type") != "approved_prelive":
+                if item.get("watch_type") not in {"approved_prelive", "live_opportunity"}:
                     print(f"   📌 {home_name} vs {away_name} finalizado | observação encerrada")
                     continue
 
-                n = self.db.resolver_prediction(fixture_id, resultado, gh, ga)
-                if n == 0:
-                    continue
+                if item.get("watch_type") == "approved_prelive":
+                    n = self.db.resolver_prediction(fixture_id, resultado, gh, ga)
+                    if n == 0:
+                        continue
                 resolvidos += 1
 
-                total_gols = gh + ga
-                acertou = False
-
-                if mercado == "h2h_home" and resultado == "home":
-                    acertou = True
-                elif mercado == "h2h_draw" and resultado == "draw":
-                    acertou = True
-                elif mercado == "h2h_away" and resultado == "away":
-                    acertou = True
-                elif mercado == "over25" and total_gols > 2:
-                    acertou = True
-                elif mercado == "under25" and total_gols < 3:
-                    acertou = True
-                elif mercado == "over15" and total_gols > 1:
-                    acertou = True
-                elif mercado == "under15" and total_gols < 2:
-                    acertou = True
-                elif mercado == "over35" and total_gols > 3:
-                    acertou = True
-                elif mercado == "under35" and total_gols < 4:
-                    acertou = True
+                acertou = self._mercado_green_antecipado(item, game, stats_cache.get(fixture_id))
 
                 if acertou:
                     acertos += 1
@@ -1204,6 +1200,91 @@ class Scheduler:
         if mercado == "h2h_away" and status in {"FT", "AET", "PEN"}:
             return gh >= ga
         return False
+
+    @staticmethod
+    def _mercados_live_expandiveis() -> list[str]:
+        return [
+            "over15", "under15", "over25", "under25", "over35", "under35",
+            "ht_home", "ht_draw", "ht_away",
+            "over05_ht", "under05_ht", "over15_ht", "under15_ht",
+            "over05_2t", "under05_2t", "over15_2t", "under15_2t",
+            "h2h_home", "h2h_draw", "h2h_away",
+            "corners_over_85", "corners_under_85",
+            "corners_over_95", "corners_under_95",
+            "corners_over_105", "corners_under_105",
+        ]
+
+    def _detectar_oportunidades_live_fixture(
+        self,
+        *,
+        scan_date: str,
+        fixture: dict,
+        stats: list[dict],
+        itens_fixture: list[dict],
+        nomes_mercado: dict[str, str],
+        live: LiveIntelligence,
+    ) -> tuple[list[str], list[dict]]:
+        if not itens_fixture:
+            return [], []
+
+        fixture_id = itens_fixture[0]["fixture_id"]
+        home_name = itens_fixture[0].get("home_name", "?")
+        away_name = itens_fixture[0].get("away_name", "?")
+        base_payload = dict((itens_fixture[0].get("payload") or {}))
+        mercados_existentes = {item.get("mercado") for item in itens_fixture if item.get("mercado")}
+        alertas = []
+        sinais = []
+
+        for mercado in self._mercados_live_expandiveis():
+            if mercado in mercados_existentes:
+                continue
+
+            item_virtual = {
+                "fixture_id": fixture_id,
+                "date": itens_fixture[0].get("fixture_date") or itens_fixture[0].get("date"),
+                "fixture_date": itens_fixture[0].get("fixture_date") or itens_fixture[0].get("date"),
+                "league_id": itens_fixture[0].get("league_id"),
+                "home_name": home_name,
+                "away_name": away_name,
+                "mercado": mercado,
+                "descricao": nomes_mercado.get(mercado, mercado),
+                "watch_type": "live_opportunity",
+            }
+            leitura = live.analisar(item_virtual, fixture, stats)
+            if leitura.get("veredito") != "sinal_live":
+                continue
+            if self.db.live_market_notification_exists(scan_date, fixture_id, mercado, "sinal_live"):
+                continue
+
+            payload = dict(base_payload)
+            payload["last_live_verdict"] = "sinal_live"
+            payload["last_live_minute"] = leitura.get("elapsed")
+            payload["origin"] = "fixture_live_scan"
+            item_salvo = {
+                **item_virtual,
+                "prob_modelo": None,
+                "status": "active",
+                "note": leitura.get("mensagem"),
+                "payload": payload,
+            }
+            item_id = self.db.salvar_live_watch_item(scan_date, item_salvo)
+            self.db.salvar_live_market_notification(scan_date, fixture_id, mercado, "sinal_live")
+
+            alertas.append(
+                f"🟢 <b>Entrada live liberada</b>\n"
+                f"<b>{home_name} x {away_name}</b>\n"
+                f"• {nomes_mercado.get(mercado, mercado)}\n"
+                f"• Minuto {leitura.get('elapsed') or '?'}\n"
+                f"• {leitura.get('mensagem', 'Sem leitura adicional.')}"
+            )
+            sinais.append({
+                **item_salvo,
+                "id": item_id,
+                "payload": payload,
+                "elapsed": leitura.get("elapsed") or "?",
+            })
+
+        return alertas, sinais
 
     def _notificar_progresso_combos_live(
         self,

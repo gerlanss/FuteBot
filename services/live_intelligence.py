@@ -159,7 +159,7 @@ class LiveIntelligence:
 
     @staticmethod
     def _cancel_text(watch_type: str, approved_text: str, recheck_text: str) -> str:
-        return approved_text if watch_type == "approved_prelive" else recheck_text
+        return approved_text if watch_type in {"approved_prelive", "live_opportunity"} else recheck_text
 
     def _analisar_mercado_gols(
         self,
@@ -198,12 +198,15 @@ class LiveIntelligence:
         xg = metricas["xg"]
         if gols_ht > 0:
             return {}
-        if 26 <= elapsed <= 36 and ((shots_on >= 3 and shots_total >= 8 and xg >= 0.65) or (shots_on >= 4 and xg >= 0.55)):
+        if 24 <= elapsed <= 36 and (
+            (shots_on >= 3 and shots_total >= 7 and xg >= 0.55)
+            or (shots_on >= 4 and xg >= 0.45)
+        ):
             return {
                 "veredito": "sinal_live",
                 "mensagem": "O 1T ja ganhou volume real e esse over ficou executavel ao vivo.",
             }
-        if elapsed <= 32 and shots_on <= 1 and shots_total <= 5 and xg <= 0.2:
+        if 10 <= elapsed <= 28 and shots_on <= 1 and shots_total <= 4 and xg <= 0.15:
             return {
                 "veredito": "cancelar",
                 "mensagem": self._cancel_text(
@@ -229,12 +232,12 @@ class LiveIntelligence:
         red_cards = metricas["red_cards"]
         if gols_ht >= linha:
             return {}
-        if 28 <= elapsed <= 36 and shots_on <= 2 and shots_total <= 8 and xg <= 0.5 and red_cards == 0:
+        if 26 <= elapsed <= 36 and shots_on <= 3 and shots_total <= 9 and xg <= 0.65 and red_cards == 0:
             return {
                 "veredito": "sinal_live",
                 "mensagem": "O 1T segue controlado e esse under continua defendivel ao vivo.",
             }
-        if elapsed <= 32 and (shots_on >= 5 or xg >= 1.15 or (red_cards > 0 and xg >= 0.8)):
+        if 10 <= elapsed <= 28 and (shots_on >= 5 or xg >= 1.1 or (red_cards > 0 and xg >= 0.8)):
             return {
                 "veredito": "cancelar",
                 "mensagem": self._cancel_text(
@@ -259,12 +262,12 @@ class LiveIntelligence:
         xg = metricas["xg"]
         if total_gols >= linha:
             return {}
-        if elapsed >= 55 and shots_on >= 5 and shots_total >= 12 and xg >= 1.1:
+        if elapsed >= 55 and shots_on >= 5 and shots_total >= 11 and xg >= 0.85:
             return {
                 "veredito": "sinal_live",
                 "mensagem": "O jogo ganhou ritmo de gol e esse over ficou bem sustentado ao vivo.",
             }
-        if elapsed >= 70 and total_gols == 0 and shots_on < 4 and xg < 0.9:
+        if elapsed >= 72 and total_gols == 0 and shots_on < 4 and xg < 0.75:
             return {
                 "veredito": "cancelar",
                 "mensagem": self._cancel_text(
@@ -290,12 +293,12 @@ class LiveIntelligence:
         red_cards = metricas["red_cards"]
         if total_gols >= linha:
             return {}
-        if elapsed >= 58 and shots_on <= 5 and shots_total <= 15 and xg <= 1.05 and red_cards == 0:
+        if elapsed >= 55 and shots_on <= 6 and shots_total <= 16 and xg <= 1.15 and red_cards == 0:
             return {
                 "veredito": "sinal_live",
                 "mensagem": "O jogo segue mais controlado do que aberto e o under continua de pe.",
             }
-        if elapsed <= 55 and (shots_on >= 6 and xg >= 1.5):
+        if 10 <= elapsed <= 50 and (shots_on >= 7 and xg >= 1.6):
             return {
                 "veredito": "cancelar",
                 "mensagem": self._cancel_text(
@@ -304,7 +307,7 @@ class LiveIntelligence:
                     "O cenario abriu demais para insistir nesse under.",
                 ),
             }
-        if elapsed >= 70 and (shots_on >= 7 or xg >= 1.35 or red_cards > 0):
+        if elapsed >= 70 and (shots_on >= 8 or xg >= 1.55 or red_cards > 0):
             return {
                 "veredito": "cancelar",
                 "mensagem": self._cancel_text(
@@ -327,12 +330,12 @@ class LiveIntelligence:
         xg = metricas["xg"]
         if gols_2t > 0:
             return {}
-        if elapsed >= 58 and shots_on >= 5 and shots_total >= 12 and xg >= 1.0:
+        if elapsed >= 55 and shots_on >= 5 and shots_total >= 11 and xg >= 0.75:
             return {
                 "veredito": "sinal_live",
                 "mensagem": "O 2T ganhou ritmo e esse over ficou executavel no live.",
             }
-        if elapsed >= 82 and gols_2t == 0 and shots_on <= 3 and xg <= 0.8:
+        if elapsed >= 82 and gols_2t == 0 and shots_on <= 3 and xg <= 0.65:
             return {
                 "veredito": "cancelar",
                 "mensagem": self._cancel_text(
@@ -358,12 +361,12 @@ class LiveIntelligence:
         red_cards = metricas["red_cards"]
         if gols_2t >= linha:
             return {}
-        if elapsed >= 68 and shots_on <= 4 and shots_total <= 12 and xg <= 1.0 and red_cards == 0:
+        if elapsed >= 65 and shots_on <= 5 and shots_total <= 13 and xg <= 1.05 and red_cards == 0:
             return {
                 "veredito": "sinal_live",
                 "mensagem": "O 2T segue controlado e esse under continua bem defendido ao vivo.",
             }
-        if elapsed >= 78 and (shots_on >= 6 or xg >= 1.45 or red_cards > 0):
+        if elapsed >= 78 and (shots_on >= 7 or xg >= 1.5 or red_cards > 0):
             return {
                 "veredito": "cancelar",
                 "mensagem": self._cancel_text(
@@ -394,12 +397,12 @@ class LiveIntelligence:
 
         if "over" in mercado:
             if ht_market:
-                if 24 <= elapsed <= 36 and corners >= 3 and shots_total >= 10 and (shots_on >= 3 or xg >= 0.75):
+                if 24 <= elapsed <= 36 and corners >= 3 and shots_total >= 9 and (shots_on >= 3 or xg >= 0.65):
                     return {
                         "veredito": "sinal_live",
                         "mensagem": "A pressao ofensiva ja virou cantos suficientes para esse over.",
                     }
-                if elapsed <= 30 and corners <= 1 and shots_total <= 6 and xg <= 0.35:
+                if 10 <= elapsed <= 28 and corners <= 1 and shots_total <= 5 and xg <= 0.25:
                     return {
                         "veredito": "cancelar",
                         "mensagem": self._cancel_text(
@@ -409,12 +412,12 @@ class LiveIntelligence:
                         ),
                     }
                 return {}
-            if elapsed >= 55 and corners >= max(4, linha - 5) and shots_total >= 12 and (shots_on >= 4 or xg >= 1.0):
+            if elapsed >= 55 and corners >= max(4, linha - 5) and shots_total >= 11 and (shots_on >= 4 or xg >= 0.9):
                 return {
                     "veredito": "sinal_live",
                     "mensagem": "O jogo segue empurrando pelos lados e esse over de cantos ganhou sustentacao.",
                 }
-            if elapsed >= 72 and corners < max(3, linha - 6) and shots_total < 10 and xg < 0.85:
+            if elapsed >= 72 and corners < max(3, linha - 6) and shots_total < 9 and xg < 0.75:
                 return {
                     "veredito": "cancelar",
                     "mensagem": self._cancel_text(
@@ -426,12 +429,12 @@ class LiveIntelligence:
             return {}
 
         if ht_market:
-            if 26 <= elapsed <= 36 and corners <= 3 and shots_total <= 8 and shots_on <= 3 and xg <= 0.65:
+            if 26 <= elapsed <= 36 and corners <= 3 and shots_total <= 9 and shots_on <= 3 and xg <= 0.75:
                 return {
                     "veredito": "sinal_live",
                     "mensagem": "O 1T ainda nao criou pressao lateral suficiente para estourar essa linha de cantos.",
                 }
-            if elapsed <= 30 and corners >= 5 and (shots_total >= 10 or xg >= 0.9):
+            if 10 <= elapsed <= 28 and corners >= 5 and (shots_total >= 10 or xg >= 0.9):
                 return {
                     "veredito": "cancelar",
                     "mensagem": self._cancel_text(
@@ -442,12 +445,12 @@ class LiveIntelligence:
                 }
             return {}
 
-        if elapsed >= 58 and corners <= max(5, linha - 3) and shots_total <= 14 and shots_on <= 5 and xg <= 1.2:
+        if elapsed >= 55 and corners <= max(5, linha - 3) and shots_total <= 15 and shots_on <= 5 and xg <= 1.25:
             return {
                 "veredito": "sinal_live",
                 "mensagem": "O ritmo dos lados segue baixo e esse under de cantos continua saudavel.",
             }
-        if elapsed >= 68 and corners >= max(7, linha - 1) and (shots_total >= 16 or shots_on >= 6 or xg >= 1.4):
+        if elapsed >= 68 and corners >= max(7, linha - 1) and (shots_total >= 16 or shots_on >= 6 or xg >= 1.45):
             return {
                 "veredito": "cancelar",
                 "mensagem": self._cancel_text(
@@ -506,12 +509,12 @@ class LiveIntelligence:
         away_shots = self._team_metric(metricas, 1, "shots_total")
 
         if mercado.endswith("home"):
-            if 27 <= elapsed <= 36 and gols_home >= gols_away and home_on >= away_on + 2 and home_xg >= away_xg + 0.35:
+            if 25 <= elapsed <= 36 and gols_home >= gols_away and home_on >= away_on + 2 and home_xg >= away_xg + 0.25:
                 return {
                     "veredito": "sinal_live",
                     "mensagem": "O mandante ja construiu superioridade suficiente para esse lado no 1T.",
                 }
-            if elapsed <= 32 and gols_home < gols_away and away_xg >= home_xg + 0.35:
+            if 10 <= elapsed <= 30 and gols_home < gols_away and away_xg >= home_xg + 0.35:
                 return {
                     "veredito": "cancelar",
                     "mensagem": self._cancel_text(
@@ -523,12 +526,12 @@ class LiveIntelligence:
             return {}
 
         if mercado.endswith("away"):
-            if 27 <= elapsed <= 36 and gols_away >= gols_home and away_on >= home_on + 2 and away_xg >= home_xg + 0.35:
+            if 25 <= elapsed <= 36 and gols_away >= gols_home and away_on >= home_on + 2 and away_xg >= home_xg + 0.25:
                 return {
                     "veredito": "sinal_live",
                     "mensagem": "O visitante ja construiu superioridade suficiente para esse lado no 1T.",
                 }
-            if elapsed <= 32 and gols_away < gols_home and home_xg >= away_xg + 0.35:
+            if 10 <= elapsed <= 30 and gols_away < gols_home and home_xg >= away_xg + 0.35:
                 return {
                     "veredito": "cancelar",
                     "mensagem": self._cancel_text(
@@ -539,12 +542,12 @@ class LiveIntelligence:
                 }
             return {}
 
-        if 30 <= elapsed <= 36 and gols_home == gols_away and abs(home_on - away_on) <= 1 and abs(home_xg - away_xg) <= 0.15 and abs(home_shots - away_shots) <= 2:
+        if 28 <= elapsed <= 36 and gols_home == gols_away and abs(home_on - away_on) <= 1 and abs(home_xg - away_xg) <= 0.18 and abs(home_shots - away_shots) <= 2:
             return {
                 "veredito": "sinal_live",
                 "mensagem": "O 1T segue equilibrado de verdade e o empate continua bem defendido.",
             }
-        if elapsed <= 32 and (gols_home != gols_away or abs(home_xg - away_xg) >= 0.4 or abs(home_on - away_on) >= 2):
+        if 10 <= elapsed <= 30 and (gols_home != gols_away or abs(home_xg - away_xg) >= 0.45 or abs(home_on - away_on) >= 2):
             return {
                 "veredito": "cancelar",
                 "mensagem": self._cancel_text(
@@ -573,7 +576,7 @@ class LiveIntelligence:
         away_shots = self._team_metric(metricas, 1, "shots_total")
 
         if mercado.endswith("home"):
-            if elapsed >= 55 and gols_home >= gols_away and home_on >= away_on + 2 and home_xg >= away_xg + 0.4:
+            if elapsed >= 55 and gols_home >= gols_away and home_on >= away_on + 2 and home_xg >= away_xg + 0.3:
                 return {
                     "veredito": "sinal_live",
                     "mensagem": "O mandante esta confirmando superioridade real dentro do jogo.",
@@ -590,7 +593,7 @@ class LiveIntelligence:
             return {}
 
         if mercado.endswith("away"):
-            if elapsed >= 55 and gols_away >= gols_home and away_on >= home_on + 2 and away_xg >= home_xg + 0.4:
+            if elapsed >= 55 and gols_away >= gols_home and away_on >= home_on + 2 and away_xg >= home_xg + 0.3:
                 return {
                     "veredito": "sinal_live",
                     "mensagem": "O visitante esta confirmando superioridade real dentro do jogo.",
@@ -606,7 +609,7 @@ class LiveIntelligence:
                 }
             return {}
 
-        if elapsed >= 60 and gols_home == gols_away and abs(home_on - away_on) <= 1 and abs(home_xg - away_xg) <= 0.2 and abs(home_shots - away_shots) <= 2:
+        if elapsed >= 58 and gols_home == gols_away and abs(home_on - away_on) <= 1 and abs(home_xg - away_xg) <= 0.22 and abs(home_shots - away_shots) <= 2:
             return {
                 "veredito": "sinal_live",
                 "mensagem": "O jogo segue equilibrado de verdade e o empate continua bem sustentado.",

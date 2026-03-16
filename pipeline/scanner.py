@@ -463,6 +463,13 @@ class Scanner:
             })
 
         if candidatos:
+            elegiveis_ids = {
+                item["id"]
+                for item in candidatos
+                if (item.get("fixture_id"), item.get("mercado")) in {
+                    (tip.get("fixture_id"), tip.get("mercado")) for tip in tips_janela
+                }
+            }
             status_map = {
                 item["id"]: (
                     "released"
@@ -470,6 +477,7 @@ class Scanner:
                     "rejected"
                 )
                 for item in candidatos
+                if item["id"] in elegiveis_ids
             }
             for status in ("released", "rejected"):
                 ids = [cid for cid, value in status_map.items() if value == status]
