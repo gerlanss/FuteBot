@@ -127,6 +127,16 @@ class SchedulerTests(unittest.TestCase):
                 )
             )
 
+    def test_live_conflict_map_blocks_ht_result_with_ht_under_05(self):
+        from pipeline.scheduler import Scheduler
+
+        conflitos = set(Scheduler._mercados_conflitantes_live("ht_away"))
+
+        self.assertIn("ht_home", conflitos)
+        self.assertIn("ht_draw", conflitos)
+        self.assertIn("ht_away", conflitos)
+        self.assertIn("under05_ht", conflitos)
+
 
 class LearnerConfidenceTests(unittest.TestCase):
     @staticmethod

@@ -47,6 +47,12 @@ from config import (
 from services.apifootball import raw_request, stats_partida
 from services.live_intelligence import LiveIntelligence
 
+_LIVE_CONFLITOS_EXPLICITOS = {
+    "under05_ht": {"ht_home", "ht_away"},
+    "ht_home": {"under05_ht"},
+    "ht_away": {"under05_ht"},
+}
+
 
 class Scheduler:
     """Gerencia execução automática de todos os pipelines."""
@@ -1298,6 +1304,13 @@ class Scheduler:
     def _mercados_da_categoria_live(categoria: str) -> tuple[str, ...]:
         return _CATEGORIA_MERCADOS.get(categoria, (categoria,))
 
+    @staticmethod
+    def _mercados_conflitantes_live(mercado: str) -> tuple[str, ...]:
+        categoria = _MERCADO_CATEGORIA.get(mercado, mercado)
+        mercados = set(_CATEGORIA_MERCADOS.get(categoria, {mercado}))
+        mercados.update(_LIVE_CONFLITOS_EXPLICITOS.get(mercado, set()))
+        return tuple(sorted(mercados))
+
     def _detectar_oportunidades_live_fixture(
         self,
         *,
@@ -1328,12 +1341,16 @@ class Scheduler:
             if mercado in mercados_existentes:
                 continue
             categoria = self._categoria_live_mercado(mercado)
+            mercados_conflitantes = self._mercados_conflitantes_live(mercado)
             if categoria in categorias_existentes:
+                continue
+            if any(m in mercados_existentes for m in mercados_conflitantes):
+                categorias_existentes.add(categoria)
                 continue
             if self.db.live_category_notification_exists(
                 scan_date,
                 fixture_id,
-                self._mercados_da_categoria_live(categoria),
+                mercados_conflitantes,
                 "sinal_live",
             ):
                 categorias_existentes.add(categoria)
@@ -1360,7 +1377,7 @@ class Scheduler:
             if self.db.live_category_notification_exists(
                 scan_date,
                 fixture_id,
-                self._mercados_da_categoria_live(categoria),
+                mercados_conflitantes,
                 "sinal_live",
             ):
                 categorias_existentes.add(categoria)
