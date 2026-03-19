@@ -302,6 +302,14 @@ class Database:
                 UNIQUE(scan_date, fixture_id, mercado, verdict)
             );
 
+            CREATE TABLE IF NOT EXISTS notification_log (
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                notification_date  TEXT NOT NULL,
+                kind               TEXT NOT NULL,
+                created_at         TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(notification_date, kind)
+            );
+
             CREATE TABLE IF NOT EXISTS telegram_chats (
                 chat_id        INTEGER PRIMARY KEY,
                 is_admin       INTEGER NOT NULL DEFAULT 0,
@@ -405,6 +413,31 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_live_watchlist_status
                 ON live_watchlist(status, fixture_date);
+
+            CREATE TABLE IF NOT EXISTS live_results (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                live_watch_id    INTEGER NOT NULL UNIQUE,
+                scan_date        TEXT NOT NULL,
+                fixture_id       INTEGER NOT NULL,
+                league_id        INTEGER,
+                home_name        TEXT,
+                away_name        TEXT,
+                mercado          TEXT NOT NULL,
+                watch_type       TEXT NOT NULL,
+                odd_usada        REAL,
+                signal_minute    INTEGER,
+                signal_note      TEXT,
+                resultado        TEXT,
+                gols_home        INTEGER,
+                gols_away        INTEGER,
+                acertou          INTEGER,
+                lucro            REAL,
+                created_at       TEXT DEFAULT CURRENT_TIMESTAMP,
+                resolved_at      TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_live_results_scan_date
+                ON live_results(scan_date, acertou);
         """)
         self._aplicar_migracoes(conn)
         conn.commit()
@@ -534,6 +567,29 @@ class Database:
                 verdict        TEXT NOT NULL,
                 created_at     TEXT DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(scan_date, fixture_id, mercado, verdict)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS live_results (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                live_watch_id    INTEGER NOT NULL UNIQUE,
+                scan_date        TEXT NOT NULL,
+                fixture_id       INTEGER NOT NULL,
+                league_id        INTEGER,
+                home_name        TEXT,
+                away_name        TEXT,
+                mercado          TEXT NOT NULL,
+                watch_type       TEXT NOT NULL,
+                odd_usada        REAL,
+                signal_minute    INTEGER,
+                signal_note      TEXT,
+                resultado        TEXT,
+                gols_home        INTEGER,
+                gols_away        INTEGER,
+                acertou          INTEGER,
+                lucro            REAL,
+                created_at       TEXT DEFAULT CURRENT_TIMESTAMP,
+                resolved_at      TEXT
             )
         """)
 
@@ -1221,6 +1277,158 @@ class Database:
         conn.commit()
         conn.close()
 
+    @staticmethod
+    def _odd_live_item(item: dict | None) -> float | None:
+        if not item:
+            return None
+        payload = item.get("payload") or {}
+        for key in ("odd_usada", "odd_pinnacle"):
+            value = item.get(key)
+            if value not in (None, ""):
+                return float(value)
+            value = payload.get(key)
+            if value not in (None, ""):
+                return float(value)
+        return None
+
+    def salvar_live_result_signal(
+        self,
+        item: dict,
+        *,
+        signal_minute: int | None = None,
+        signal_note: str | None = None,
+    ):
+        """Registra uma entrada live efetivamente liberada."""
+        live_watch_id = item.get("id")
+        if not live_watch_id:
+            return
+
+        odd = self._odd_live_item(item)
+        conn = self._conn()
+        conn.execute(
+            """
+            INSERT INTO live_results (
+                live_watch_id, scan_date, fixture_id, league_id,
+                home_name, away_name, mercado, watch_type,
+                odd_usada, signal_minute, signal_note
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(live_watch_id) DO UPDATE SET
+                odd_usada = COALESCE(live_results.odd_usada, excluded.odd_usada),
+                signal_minute = COALESCE(live_results.signal_minute, excluded.signal_minute),
+                signal_note = COALESCE(excluded.signal_note, live_results.signal_note)
+            """,
+            (
+                live_watch_id,
+                item.get("scan_date"),
+                item.get("fixture_id"),
+                item.get("league_id"),
+                item.get("home_name"),
+                item.get("away_name"),
+                item.get("mercado"),
+                item.get("watch_type") or "live_opportunity",
+                odd,
+                signal_minute,
+                signal_note,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+    def resolver_live_result(
+        self,
+        live_watch_id: int,
+        *,
+        resultado: str,
+        gols_home: int,
+        gols_away: int,
+        acertou: bool,
+    ) -> bool:
+        """Resolve uma entrada live já registrada. Retorna True se houve update."""
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT id, odd_usada FROM live_results WHERE live_watch_id = ?",
+            (live_watch_id,),
+        ).fetchone()
+        if not row:
+            conn.close()
+            return False
+
+        odd = row["odd_usada"]
+        lucro = None
+        if odd not in (None, ""):
+            odd_val = float(odd)
+            lucro = round((odd_val - 1.0) if acertou else -1.0, 4)
+
+        conn.execute(
+            """
+            UPDATE live_results
+            SET resultado = ?, gols_home = ?, gols_away = ?,
+                acertou = ?, lucro = ?, resolved_at = CURRENT_TIMESTAMP
+            WHERE live_watch_id = ?
+            """,
+            (
+                resultado,
+                gols_home,
+                gols_away,
+                1 if acertou else 0,
+                lucro,
+                live_watch_id,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        return True
+
+    def live_results_por_data(self, data: str) -> list[dict]:
+        conn = self._conn()
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM live_results
+            WHERE scan_date = ?
+            ORDER BY created_at ASC, fixture_id ASC, mercado ASC
+            """,
+            (data,),
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def metricas_live(self, data: str | None = None) -> dict:
+        sql = "SELECT * FROM live_results WHERE acertou IS NOT NULL"
+        params = []
+        if data:
+            sql += " AND scan_date = ?"
+            params.append(data)
+
+        conn = self._conn()
+        rows = conn.execute(sql, params).fetchall()
+        conn.close()
+
+        if not rows:
+            return {
+                "total": 0,
+                "acertos": 0,
+                "accuracy": 0,
+                "roi": None,
+                "lucro_total": 0.0,
+                "total_com_odd": 0,
+            }
+
+        total = len(rows)
+        acertos = sum(1 for r in rows if r["acertou"] == 1)
+        with_odd = [r for r in rows if r["lucro"] is not None]
+        lucro_total = sum((r["lucro"] or 0.0) for r in with_odd)
+        total_com_odd = len(with_odd)
+
+        return {
+            "total": total,
+            "acertos": acertos,
+            "accuracy": round(acertos / total * 100, 1) if total else 0,
+            "roi": round(lucro_total / total_com_odd * 100, 1) if total_com_odd else None,
+            "lucro_total": round(lucro_total, 2),
+            "total_com_odd": total_com_odd,
+        }
+
     def scan_audit_por_data(self, data: str, decisao: str = None) -> list[dict]:
         """Retorna a trilha do LLM para um scan especifico."""
         conn = self._conn()
@@ -1460,6 +1668,57 @@ class Database:
             VALUES (?, ?, ?, ?)
             """,
             (scan_date, fixture_id, mercado, verdict),
+        )
+        conn.commit()
+        conn.close()
+
+    def live_category_notification_exists(
+        self,
+        scan_date: str,
+        fixture_id: int,
+        mercados: list[str] | tuple[str, ...] | set[str],
+        verdict: str,
+    ) -> bool:
+        mercados = [m for m in mercados if m]
+        if not mercados:
+            return False
+        placeholders = ",".join("?" for _ in mercados)
+        conn = self._conn()
+        row = conn.execute(
+            f"""
+            SELECT 1
+            FROM live_market_notifications
+            WHERE scan_date = ? AND fixture_id = ? AND verdict = ?
+              AND mercado IN ({placeholders})
+            LIMIT 1
+            """,
+            (scan_date, fixture_id, verdict, *mercados),
+        ).fetchone()
+        conn.close()
+        return row is not None
+
+    def notification_sent(self, notification_date: str, kind: str) -> bool:
+        conn = self._conn()
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM notification_log
+            WHERE notification_date = ? AND kind = ?
+            LIMIT 1
+            """,
+            (notification_date, kind),
+        ).fetchone()
+        conn.close()
+        return row is not None
+
+    def save_notification_sent(self, notification_date: str, kind: str):
+        conn = self._conn()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO notification_log (notification_date, kind)
+            VALUES (?, ?)
+            """,
+            (notification_date, kind),
         )
         conn.commit()
         conn.close()

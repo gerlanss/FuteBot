@@ -104,6 +104,11 @@ for _cat, _mercs in CATEGORIAS_CONFLITO.items():
     for _m in _mercs:
         _MERCADO_CATEGORIA[_m] = _cat
 
+_CATEGORIA_MERCADOS = {
+    _cat: tuple(sorted(_mercs))
+    for _cat, _mercs in CATEGORIAS_CONFLITO.items()
+}
+
 # Mapa league_id → nome amigável (para headers no Telegram)
 _LEAGUE_NOME = {v["id"]: v["nome"] for v in LEAGUES.values()}
 

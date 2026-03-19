@@ -103,6 +103,30 @@ class SchedulerTests(unittest.TestCase):
 
         self.assertEqual(ordem[0], 71)
 
+    def test_live_category_notification_blocks_same_market_family(self):
+        from data.database import Database
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, "test.db"))
+            db.salvar_live_market_notification("2026-03-18", 123, "corners_over_85", "sinal_live")
+
+            self.assertTrue(
+                db.live_category_notification_exists(
+                    "2026-03-18",
+                    123,
+                    ["corners_over_85", "corners_over_95", "corners_over_105"],
+                    "sinal_live",
+                )
+            )
+            self.assertFalse(
+                db.live_category_notification_exists(
+                    "2026-03-18",
+                    123,
+                    ["over25", "over35"],
+                    "sinal_live",
+                )
+            )
+
 
 class LearnerConfidenceTests(unittest.TestCase):
     @staticmethod
@@ -214,6 +238,50 @@ class LearnerConfidenceTests(unittest.TestCase):
 
             self.assertIn("<b>COMBOS</b>", relatorio)
             self.assertIn("Dupla #1", relatorio)
+
+    def test_relatorio_resultado_separa_pre_live_e_live(self):
+        from data.database import Database
+        from models.learner import Learner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, "test.db"))
+            data = datetime.now().strftime("%Y-%m-%d")
+            self._insert_fixture(db, 31, data)
+            self._insert_fixture(db, 32, data)
+
+            db.salvar_prediction({
+                "fixture_id": 31,
+                "date": f"{data} 19:00:00",
+                "league_id": 71,
+                "home_name": "Time 31A",
+                "away_name": "Time 31B",
+                "mercado": "under35",
+                "prob_modelo": 0.83,
+                "odd_usada": 1.8,
+            })
+            db.resolver_prediction(31, "draw", 1, 1)
+
+            item = {
+                "id": 99,
+                "scan_date": data,
+                "fixture_id": 32,
+                "league_id": 71,
+                "home_name": "Time 32A",
+                "away_name": "Time 32B",
+                "mercado": "over05_2t",
+                "watch_type": "live_opportunity",
+                "payload": {},
+            }
+            db.salvar_live_result_signal(item, signal_minute=63, signal_note="Entrou no live")
+            db.resolver_live_result(99, resultado="home", gols_home=2, gols_away=1, acertou=True)
+
+            relatorio = Learner(db).relatorio_resultado_dia(data)
+
+            self.assertIn("<b>PRE-LIVE</b>", relatorio)
+            self.assertIn("<b>LIVE</b>", relatorio)
+            self.assertIn("Pre-live:", relatorio)
+            self.assertIn("Live:", relatorio)
+            self.assertIn("ROI: n/d", relatorio)
 
     def test_context_feedback_labels_successful_release_and_block(self):
         from data.database import Database

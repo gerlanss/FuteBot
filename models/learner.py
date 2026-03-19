@@ -1,4 +1,4 @@
-"""
+﻿"""
 Learner — módulo de feedback e aprendizado contínuo.
 
 Responsável por:
@@ -911,3 +911,281 @@ class Learner:
             ])
 
         return "\n".join(lines)
+
+
+def _override_nomes_mercado() -> dict[str, str]:
+    return {
+        "h2h_home": "Casa",
+        "h2h_draw": "Empate",
+        "h2h_away": "Fora",
+        "over15": "Over 1.5",
+        "under15": "Under 1.5",
+        "over25": "Over 2.5",
+        "under25": "Under 2.5",
+        "over35": "Over 3.5",
+        "under35": "Under 3.5",
+        "btts_yes": "BTTS Sim",
+        "btts_no": "BTTS Nao",
+        "ht_home": "1T Casa",
+        "ht_draw": "1T Empate",
+        "ht_away": "1T Fora",
+        "over05_ht": "1T Over 0.5",
+        "under05_ht": "1T Under 0.5",
+        "over15_ht": "1T Over 1.5",
+        "under15_ht": "1T Under 1.5",
+        "over05_2t": "2T Over 0.5",
+        "under05_2t": "2T Under 0.5",
+        "over15_2t": "2T Over 1.5",
+        "under15_2t": "2T Under 1.5",
+        "corners_over_85": "Escanteios Over 8.5",
+        "corners_under_85": "Escanteios Under 8.5",
+        "corners_over_95": "Escanteios Over 9.5",
+        "corners_under_95": "Escanteios Under 9.5",
+        "corners_over_105": "Escanteios Over 10.5",
+        "corners_under_105": "Escanteios Under 10.5",
+    }
+
+
+def _override_roi_texto(metricas: dict) -> str:
+    roi = metricas.get("roi")
+    if roi is None:
+        total_com_odd = metricas.get("total_com_odd", 0)
+        return f"n/d ({total_com_odd} odds validas)" if total_com_odd else "n/d"
+    return f"{roi:+.1f}%"
+
+
+def _override_relatorio_diario(self) -> str:
+    treino = self.db.ultimo_treino()
+    versao = treino["modelo_versao"] if treino else None
+    pre = self.db.metricas_modelo(modelo_versao=versao)
+    live = self.db.metricas_live()
+    resumo = self.db.resumo()
+
+    lines = [
+        "━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "📊 <b>RELATÓRIO DE PERFORMANCE</b>",
+        f"🗓 {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        "<b>📈 PRE-LIVE</b>",
+        f"  Apostas: {pre['total']} | Acertos: {pre['acertos']}",
+        f"  Accuracy: <b>{pre['accuracy']}%</b>",
+        f"  ROI: <b>{pre['roi']:+.1f}%</b>",
+        f"  Lucro: <b>{pre['lucro_total']:+.2f}u</b>",
+        "",
+        "<b>⚽ LIVE</b>",
+        f"  Entradas: {live['total']} | Acertos: {live['acertos']}",
+        f"  Accuracy: <b>{live['accuracy']}%</b>",
+        f"  ROI: <b>{self._roi_texto(live)}</b>",
+        f"  Lucro conhecido: <b>{live['lucro_total']:+.2f}u</b>",
+    ]
+
+    if treino:
+        try:
+            data_treino_br = datetime.strptime(treino["date"][:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+        except Exception:
+            data_treino_br = treino["date"][:10]
+        lines.extend([
+            "",
+            "<b>🤖 MODELO</b>",
+            f"  Versão: <code>{treino['modelo_versao']}</code>",
+            f"  Treino: {data_treino_br}",
+            f"  Acc train/test: {(treino['accuracy_train'] or 0) * 100:.1f}% / {(treino['accuracy_test'] or 0) * 100:.1f}%",
+        ])
+
+    lines.extend([
+        "",
+        "<b>📦 BANCO</b>",
+        f"  {resumo['fixtures']:,} fixtures | {resumo['fixtures_com_stats']:,} stats | {resumo['predictions']:,} previsões",
+    ])
+    return "\n".join(lines)
+
+
+def _override_relatorio_resultado_dia(self, data: str = None) -> str:
+    if data is None:
+        data = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    conn = self.db._conn()
+    raw_rows = conn.execute(
+        "SELECT * FROM predictions WHERE date LIKE ? AND acertou IS NOT NULL ORDER BY ev_percent DESC",
+        (f"{data}%",),
+    ).fetchall()
+    blocked_rows = conn.execute(
+        """
+        SELECT
+            cf.context_label,
+            cf.market_won,
+            cf.llm_motivo,
+            sa.home_name,
+            sa.away_name,
+            sa.mercado,
+            sa.prob_modelo,
+            f.goals_home,
+            f.goals_away
+        FROM context_feedback cf
+        JOIN scan_audit sa ON sa.id = cf.scan_audit_id
+        LEFT JOIN fixtures f ON f.fixture_id = cf.fixture_id
+        WHERE sa.scan_date = ? AND cf.approved_final = 0
+        ORDER BY sa.prob_modelo DESC, sa.id ASC
+        """,
+        (data,),
+    ).fetchall()
+    live_rows = conn.execute(
+        "SELECT * FROM live_results WHERE scan_date = ? AND acertou IS NOT NULL ORDER BY created_at ASC, fixture_id ASC, mercado ASC",
+        (data,),
+    ).fetchall()
+    conn.close()
+
+    rows = [dict(r) for r in raw_rows]
+    blocked_rows = [dict(r) for r in blocked_rows]
+    live_rows = [dict(r) for r in live_rows]
+    combos = self.db.combos_por_data(data)
+    try:
+        data_br = datetime.strptime(data, "%Y-%m-%d").strftime("%d/%m")
+    except ValueError:
+        data_br = data
+    if not rows and not live_rows and not blocked_rows:
+        return f"📋 Nenhum resultado para {data_br}"
+
+    nomes_mercado = self._nomes_mercado()
+    lines = [
+        "━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"📋 <b>RESULTADOS — {data_br}</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+    ]
+
+    pre_acertos = 0
+    pre_lucro = 0.0
+    pre_por_mercado = {}
+    if rows:
+        lines.append("<b>PRE-LIVE</b>")
+    for r in rows:
+        acertou = r["acertou"] == 1
+        emoji = "✅" if acertou else "❌"
+        mercado = r["mercado"] or "?"
+        mercado_label = nomes_mercado.get(mercado, mercado)
+        gh = r.get("gols_home")
+        ga = r.get("gols_away")
+        placar = f"{gh}-{ga}" if gh is not None and ga is not None else "?"
+        prob = self._confidence_from_prediction(r)
+        conf_txt = "n/d" if prob is None else f"{((prob * 100) if prob <= 1 else prob):.0f}%"
+        lines.append(
+            f"{emoji} <b>{r['home_name']} vs {r['away_name']}</b> ({placar})\n"
+            f"   Aposta: {mercado_label} | Confiança: {conf_txt}\n"
+            f"   {'✅ Acertou!' if acertou else '❌ Errou'}"
+        )
+        pre_acertos += int(acertou)
+        pre_lucro += float(r.get("lucro") or 0.0)
+        pre_por_mercado.setdefault(mercado, {"total": 0, "acertos": 0})
+        pre_por_mercado[mercado]["total"] += 1
+        pre_por_mercado[mercado]["acertos"] += int(acertou)
+
+    live_acertos = 0
+    live_lucro = 0.0
+    live_com_odd = 0
+    live_por_mercado = {}
+    if live_rows:
+        lines.extend(["", "<b>LIVE</b>"])
+    for r in live_rows:
+        acertou = r["acertou"] == 1
+        emoji = "✅" if acertou else "❌"
+        mercado = r["mercado"] or "?"
+        mercado_label = nomes_mercado.get(mercado, mercado)
+        gh = r.get("gols_home")
+        ga = r.get("gols_away")
+        placar = f"{gh}-{ga}" if gh is not None and ga is not None else "?"
+        odd = r.get("odd_usada")
+        odd_txt = f"{odd:.2f}" if odd not in (None, "") else "n/d"
+        tipo = r.get("watch_type") or "live"
+        tipo_label = "confirmação" if tipo == "approved_prelive" else "oportunidade"
+        lines.append(
+            f"{emoji} <b>{r.get('home_name', '?')} vs {r.get('away_name', '?')}</b> ({placar})\n"
+            f"   Live: {mercado_label} | Odd: {odd_txt} | Tipo: {tipo_label}\n"
+            f"   {'✅ Acertou!' if acertou else '❌ Errou'}"
+        )
+        live_acertos += int(acertou)
+        if r.get("lucro") is not None:
+            live_lucro += float(r.get("lucro") or 0.0)
+            live_com_odd += 1
+        live_por_mercado.setdefault(mercado, {"total": 0, "acertos": 0})
+        live_por_mercado[mercado]["total"] += 1
+        live_por_mercado[mercado]["acertos"] += int(acertou)
+
+    if blocked_rows:
+        lines.extend(["", "<b>BARRADAS NA REVISAO</b>"])
+        for r in blocked_rows:
+            label = r.get("context_label")
+            emoji = "✅" if label == "good_block" else "⚠️"
+            status = "Bloqueio certo" if label == "good_block" else "Bloqueio discutível"
+            mercado = r.get("mercado") or "?"
+            mercado_label = nomes_mercado.get(mercado, mercado)
+            prob = r.get("prob_modelo")
+            conf_txt = f"{(prob * 100):.0f}%" if prob is not None else "n/d"
+            gh = r.get("goals_home")
+            ga = r.get("goals_away")
+            placar = f"{gh}-{ga}" if gh is not None and ga is not None else "?"
+            desfecho = "Teria batido" if r.get("market_won") else "Nao bateria"
+            lines.append(
+                f"{emoji} <b>{r.get('home_name', '?')} vs {r.get('away_name', '?')}</b> ({placar})\n"
+                f"   Observado: {mercado_label} | Confiança: {conf_txt}\n"
+                f"   {status} | {desfecho}"
+            )
+
+    if combos:
+        lines.extend(["", "<b>COMBOS</b>"])
+        for idx, combo in enumerate(combos, start=1):
+            itens = combo.get("items") or []
+            if not itens:
+                continue
+            resolvidos = [i for i in itens if i.get("acertou") is not None]
+            if len(resolvidos) != len(itens):
+                status_emoji = "🟡"
+                status_txt = "Aberto"
+            elif all(i.get("acertou") == 1 for i in itens):
+                status_emoji = "✅"
+                status_txt = "Green"
+            else:
+                status_emoji = "❌"
+                status_txt = "Red"
+            tipo_label = "Dupla" if combo.get("combo_type") == "dupla" else "Tripla"
+            lines.append(f"{status_emoji} <b>{tipo_label} #{idx}</b> | Conf composta: {(combo.get('prob_composta') or 0):.0%} | {status_txt}")
+
+        total_pre = len(rows)
+    total_live = len(live_rows)
+    pct_pre = pre_acertos / total_pre * 100 if total_pre else 0
+    pct_live = live_acertos / total_live * 100 if total_live else 0
+    roi_pre = (pre_lucro / total_pre * 100) if total_pre else 0
+    roi_live = (live_lucro / live_com_odd * 100) if live_com_odd else None
+
+    lines.extend([
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "<b>RESUMO DO DIA</b>",
+        f"  Pre-live: {total_pre} | Acertos: {pre_acertos}/{total_pre} ({pct_pre:.0f}%) | ROI: {roi_pre:+.1f}%" if total_pre else "  Pre-live: 0",
+        f"  Live: {total_live} | Acertos: {live_acertos}/{total_live} ({pct_live:.0f}%) | ROI: {roi_live:+.1f}%" if roi_live is not None and total_live else (
+            f"  Live: {total_live} | Acertos: {live_acertos}/{total_live} ({pct_live:.0f}%) | ROI: n/d" if total_live else "  Live: 0"
+        ),
+    ])
+
+    if len(pre_por_mercado) > 1:
+        lines.extend(["", "<b>Por mercado (pre-live):</b>"])
+        for m, dados in sorted(pre_por_mercado.items()):
+            label = nomes_mercado.get(m, m)
+            pct_m = dados["acertos"] / dados["total"] * 100 if dados["total"] else 0
+            lines.append(f"  {label}: {dados['acertos']}/{dados['total']} ({pct_m:.0f}%)")
+
+    if len(live_por_mercado) > 1:
+        lines.extend(["", "<b>Por mercado (live):</b>"])
+        for m, dados in sorted(live_por_mercado.items()):
+            label = nomes_mercado.get(m, m)
+            pct_m = dados["acertos"] / dados["total"] * 100 if dados["total"] else 0
+            lines.append(f"  {label}: {dados['acertos']}/{dados['total']} ({pct_m:.0f}%)")
+
+    return "\n".join(lines)
+
+
+Learner._nomes_mercado = staticmethod(_override_nomes_mercado)
+Learner._roi_texto = staticmethod(_override_roi_texto)
+Learner.relatorio_diario = _override_relatorio_diario
+Learner.relatorio_resultado_dia = _override_relatorio_resultado_dia

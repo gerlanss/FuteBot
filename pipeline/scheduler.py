@@ -27,7 +27,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from data.database import Database
 from data.bulk_download import baixar_fixtures, baixar_stats, _check_limite
-from pipeline.scanner import Scanner
+from pipeline.scanner import Scanner, _MERCADO_CATEGORIA, _CATEGORIA_MERCADOS
 from pipeline.collector import Collector
 from models.trainer import Trainer
 from models.autotuner import AutoTuner
@@ -59,7 +59,14 @@ class Scheduler:
         """
         self.db = db or Database()
         self.telegram_callback = telegram_callback
-        self.scheduler = BackgroundScheduler(timezone=TIMEZONE)
+        self.scheduler = BackgroundScheduler(
+            timezone=TIMEZONE,
+            job_defaults={
+                "coalesce": True,
+                "max_instances": 2,
+                "misfire_grace_time": 120,
+            },
+        )
         self._configurar_jobs()
 
     def _configurar_jobs(self):
@@ -240,6 +247,25 @@ class Scheduler:
     @staticmethod
     def _liga_eh_copa(league_id: int) -> bool:
         return int(league_id) in DISCOVERY_CUP_LEAGUE_IDS
+
+    def _notification_sent(self, notification_date: str, kind: str) -> bool:
+        fn = getattr(self.db, "notification_sent", None)
+        if not callable(fn):
+            return False
+        try:
+            value = fn(notification_date, kind)
+        except Exception:
+            return False
+        return value is True
+
+    def _save_notification_sent(self, notification_date: str, kind: str):
+        fn = getattr(self.db, "save_notification_sent", None)
+        if not callable(fn):
+            return
+        try:
+            fn(notification_date, kind)
+        except Exception:
+            return
 
     def _garantir_radar_do_dia(self, data: str = None) -> bool:
         """Reconstrói silenciosamente o radar do dia se o scheduler subiu depois do scan."""
@@ -644,8 +670,9 @@ class Scheduler:
             # 1. Resultados de ONTEM (dia anterior completo)
             ontem = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
             resultado_dia = learner.relatorio_resultado_dia(ontem)
-            if "Nenhum resultado" not in resultado_dia:
+            if "Nenhum resultado" not in resultado_dia and not self._notification_sent(ontem, "daily_results"):
                 self._enviar_telegram(resultado_dia)
+                self._save_notification_sent(ontem, "daily_results")
 
             # 2. Relatório de performance geral
             msg = learner.relatorio_diario()
@@ -804,6 +831,7 @@ class Scheduler:
                 home_name = item.get("home_name", "?")
                 away_name = item.get("away_name", "?")
                 payload = dict(item.get("payload") or {})
+                scan_date_item = item.get("scan_date") or hoje
 
                 if status in ("1H", "2H", "HT", "ET", "LIVE"):
                     stats = stats_partida(fixture_id)
@@ -847,6 +875,18 @@ class Scheduler:
                                 "elapsed": ((game.get("fixture") or {}).get("status") or {}).get("elapsed") or "?",
                             })
                             payload["live_hit_notified"] = True
+                            resultado_parcial = (
+                                "home" if (int(game.get("goals", {}).get("home") or 0) > int(game.get("goals", {}).get("away") or 0))
+                                else "draw" if (int(game.get("goals", {}).get("home") or 0) == int(game.get("goals", {}).get("away") or 0))
+                                else "away"
+                            )
+                            self.db.resolver_live_result(
+                                item_id,
+                                resultado=resultado_parcial,
+                                gols_home=int(game.get("goals", {}).get("home") or 0),
+                                gols_away=int(game.get("goals", {}).get("away") or 0),
+                                acertou=True,
+                            )
                             self.db.atualizar_live_watch_item(
                                 item_id,
                                 status="resolved",
@@ -867,6 +907,18 @@ class Scheduler:
                                 "elapsed": ((game.get("fixture") or {}).get("status") or {}).get("elapsed") or "?",
                             })
                             payload["live_loss_notified"] = True
+                            resultado_parcial = (
+                                "home" if (int(game.get("goals", {}).get("home") or 0) > int(game.get("goals", {}).get("away") or 0))
+                                else "draw" if (int(game.get("goals", {}).get("home") or 0) == int(game.get("goals", {}).get("away") or 0))
+                                else "away"
+                            )
+                            self.db.resolver_live_result(
+                                item_id,
+                                resultado=resultado_parcial,
+                                gols_home=int(game.get("goals", {}).get("home") or 0),
+                                gols_away=int(game.get("goals", {}).get("away") or 0),
+                                acertou=False,
+                            )
                             self.db.atualizar_live_watch_item(
                                 item_id,
                                 status="resolved",
@@ -881,6 +933,9 @@ class Scheduler:
                     veredito = leitura.get("veredito", "monitorar")
                     elapsed = leitura.get("elapsed") or "?"
                     last_verdict = payload.get("last_live_verdict")
+
+                    if payload.get("live_signal_notified") and veredito == "cancelar":
+                        veredito = "monitorar"
 
                     if veredito in {"sinal_live", "cancelar"}:
                         repetir = last_verdict == veredito
@@ -909,9 +964,22 @@ class Scheduler:
                             if veredito == "cancelar":
                                 novo_status = "resolved"
                                 itens_resolvidos.append(item_id)
-                            elif item.get("watch_type") == "blocked_recheck" and veredito == "sinal_live":
-                                novo_status = "resolved"
-                                itens_resolvidos.append(item_id)
+                            elif veredito == "sinal_live":
+                                payload["live_signal_notified"] = True
+                                try:
+                                    signal_minute = int(leitura.get("elapsed") or 0) or None
+                                except Exception:
+                                    signal_minute = None
+                                self.db.salvar_live_result_signal(
+                                    {
+                                        **item,
+                                        "id": item_id,
+                                        "scan_date": scan_date_item,
+                                        "payload": payload,
+                                    },
+                                    signal_minute=signal_minute,
+                                    signal_note=note,
+                                )
                             self.db.atualizar_live_watch_item(
                                 item_id,
                                 status=novo_status,
@@ -961,6 +1029,13 @@ class Scheduler:
                 resolvidos += 1
 
                 acertou = self._mercado_green_antecipado(item, game, stats_cache.get(fixture_id))
+                self.db.resolver_live_result(
+                    item_id,
+                    resultado=resultado,
+                    gols_home=int(gh),
+                    gols_away=int(ga),
+                    acertou=bool(acertou),
+                )
 
                 if acertou:
                     acertos += 1
@@ -1049,8 +1124,9 @@ class Scheduler:
                     print("   📋 Todas as previsões do dia resolvidas — enviando resumo")
                     learner = Learner(self.db)
                     resumo_dia = learner.relatorio_resultado_dia(hoje)
-                    if "Nenhum resultado" not in resumo_dia:
+                    if "Nenhum resultado" not in resumo_dia and not self._notification_sent(hoje, "daily_results"):
                         self._enviar_telegram_publico(resumo_dia)
+                        self._save_notification_sent(hoje, "daily_results")
 
             if not alertas_admin and not notificacoes_publicas:
                 print("   📭 Nenhuma atualização relevante neste ciclo")
@@ -1214,6 +1290,14 @@ class Scheduler:
             "corners_over_105", "corners_under_105",
         ]
 
+    @staticmethod
+    def _categoria_live_mercado(mercado: str) -> str:
+        return _MERCADO_CATEGORIA.get(mercado, mercado)
+
+    @staticmethod
+    def _mercados_da_categoria_live(categoria: str) -> tuple[str, ...]:
+        return _CATEGORIA_MERCADOS.get(categoria, (categoria,))
+
     def _detectar_oportunidades_live_fixture(
         self,
         *,
@@ -1232,14 +1316,31 @@ class Scheduler:
         away_name = itens_fixture[0].get("away_name", "?")
         base_payload = dict((itens_fixture[0].get("payload") or {}))
         mercados_existentes = {item.get("mercado") for item in itens_fixture if item.get("mercado")}
+        categorias_existentes = {
+            self._categoria_live_mercado(mercado)
+            for mercado in mercados_existentes
+            if mercado
+        }
         alertas = []
         sinais = []
 
         for mercado in self._mercados_live_expandiveis():
             if mercado in mercados_existentes:
                 continue
+            categoria = self._categoria_live_mercado(mercado)
+            if categoria in categorias_existentes:
+                continue
+            if self.db.live_category_notification_exists(
+                scan_date,
+                fixture_id,
+                self._mercados_da_categoria_live(categoria),
+                "sinal_live",
+            ):
+                categorias_existentes.add(categoria)
+                continue
 
             item_virtual = {
+                "scan_date": scan_date,
                 "fixture_id": fixture_id,
                 "date": itens_fixture[0].get("fixture_date") or itens_fixture[0].get("date"),
                 "fixture_date": itens_fixture[0].get("fixture_date") or itens_fixture[0].get("date"),
@@ -1254,6 +1355,15 @@ class Scheduler:
             if leitura.get("veredito") != "sinal_live":
                 continue
             if self.db.live_market_notification_exists(scan_date, fixture_id, mercado, "sinal_live"):
+                categorias_existentes.add(categoria)
+                continue
+            if self.db.live_category_notification_exists(
+                scan_date,
+                fixture_id,
+                self._mercados_da_categoria_live(categoria),
+                "sinal_live",
+            ):
+                categorias_existentes.add(categoria)
                 continue
 
             payload = dict(base_payload)
@@ -1268,6 +1378,19 @@ class Scheduler:
                 "payload": payload,
             }
             item_id = self.db.salvar_live_watch_item(scan_date, item_salvo)
+            try:
+                signal_minute = int(leitura.get("elapsed") or 0) or None
+            except Exception:
+                signal_minute = None
+            self.db.salvar_live_result_signal(
+                {
+                    **item_salvo,
+                    "id": item_id,
+                    "scan_date": scan_date,
+                },
+                signal_minute=signal_minute,
+                signal_note=leitura.get("mensagem"),
+            )
             self.db.salvar_live_market_notification(scan_date, fixture_id, mercado, "sinal_live")
 
             alertas.append(
@@ -1283,6 +1406,7 @@ class Scheduler:
                 "payload": payload,
                 "elapsed": leitura.get("elapsed") or "?",
             })
+            categorias_existentes.add(categoria)
 
         return alertas, sinais
 
@@ -1438,7 +1562,7 @@ class Scheduler:
             if reply_markup:
                 import json as _json
                 payload["reply_markup"] = _json.dumps(reply_markup)
-            resp = requests.post(url, json=payload, timeout=15)
+            resp = requests.post(url, json=payload, timeout=(5, 10))
             if resp.status_code == 200:
                 return True
             print(f"[Scheduler] ⚠️ Telegram API {resp.status_code}: {resp.text[:200]}")
