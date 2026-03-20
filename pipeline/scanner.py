@@ -569,6 +569,16 @@ class Scanner:
     ) -> dict:
         """Salva candidatos da manhã e devolve só os jogos pré-selecionados."""
         candidatos = self._reduzir_para_jogos(tips_gate)
+        fixtures_revisados = {
+            int(item["fixture_id"])
+            for item in self.db.scan_audit_por_data(data)
+            if item.get("fixture_id") is not None
+        }
+        if fixtures_revisados:
+            candidatos = [
+                item for item in candidatos
+                if item.get("fixture_id") not in fixtures_revisados
+            ]
         self.db.limpar_scan_candidates(data)
         self.db.salvar_scan_candidates(data, candidatos)
         print(f"\n🗂️ Etapa 5: {len(candidatos)} jogo(s) pré-selecionado(s) para revisão T-30")
@@ -1768,9 +1778,21 @@ class Scanner:
 
         aprovadas_revisao = int(resultado.get("tips_aprovadas_llm") or 0)
         rejeitadas_revisao = len(resultado.get("tips_rejeitadas_llm", []))
+        mercados_revisados = int(resultado.get("tips_enviadas_llm") or 0)
+        if mercados_revisados == 0:
+            return []
+        ref_raw = resultado.get("reference_time")
+        janela_label = data_br
+        if ref_raw:
+            try:
+                ref_dt = datetime.fromisoformat(str(ref_raw).replace("Z", "+00:00"))
+                ref_local = ref_dt.astimezone(ZoneInfo(TIMEZONE))
+                janela_label = ref_local.strftime("%d/%m %H:%M")
+            except Exception:
+                janela_label = data_br
         header_lines = [
-            f"<b>🚨 Revisão final {data_br}</b>",
-            f"Revisei <b>{resultado.get('tips_enviadas_llm', 0)}</b> mercado(s) nesta janela.",
+            f"<b>🚨 Revisão T-30 | {janela_label}</b>",
+            f"Revisei <b>{mercados_revisados}</b> mercado(s) nesta janela.",
             f"• Jogos analisados: <b>{resultado['fixtures']}</b>",
             f"• Jogos com previsão: <b>{resultado['previsoes']}</b>",
         ]

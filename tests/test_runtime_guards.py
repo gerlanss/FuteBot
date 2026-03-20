@@ -137,6 +137,57 @@ class SchedulerTests(unittest.TestCase):
         self.assertIn("ht_away", conflitos)
         self.assertIn("under05_ht", conflitos)
 
+    def test_live_conflict_map_blocks_equivalent_ft_and_2t_market_in_second_half(self):
+        from pipeline.scheduler import Scheduler
+
+        fixture = {
+            "fixture": {"status": {"short": "2H", "elapsed": 55}},
+            "goals": {"home": 1, "away": 0},
+            "score": {"halftime": {"home": 1, "away": 0}},
+        }
+
+        conflitos = set(Scheduler._mercados_conflitantes_live("over15", fixture))
+
+        self.assertIn("over15", conflitos)
+        self.assertIn("under15", conflitos)
+        self.assertIn("over05_2t", conflitos)
+        self.assertNotIn("over15_2t", conflitos)
+
+    def test_live_conflict_map_does_not_block_distinct_ft_and_2t_market_after_second_half_goal(self):
+        from pipeline.scheduler import Scheduler
+
+        fixture = {
+            "fixture": {"status": {"short": "2H", "elapsed": 67}},
+            "goals": {"home": 1, "away": 1},
+            "score": {"halftime": {"home": 1, "away": 0}},
+        }
+
+        conflitos = set(Scheduler._mercados_conflitantes_live("over15", fixture))
+
+        self.assertIn("over15", conflitos)
+        self.assertIn("under15", conflitos)
+        self.assertNotIn("over05_2t", conflitos)
+
+    def test_suprime_cancelamento_tardio_para_under_ft(self):
+        from pipeline.scheduler import Scheduler
+
+        fixture = {
+            "fixture": {"status": {"short": "2H", "elapsed": 90}},
+        }
+        item = {"mercado": "corners_under_85"}
+
+        self.assertTrue(Scheduler._deve_suprimir_cancelamento_tardio(item, fixture))
+
+    def test_nao_suprime_cancelamento_tardio_para_over(self):
+        from pipeline.scheduler import Scheduler
+
+        fixture = {
+            "fixture": {"status": {"short": "2H", "elapsed": 90}},
+        }
+        item = {"mercado": "corners_over_85"}
+
+        self.assertFalse(Scheduler._deve_suprimir_cancelamento_tardio(item, fixture))
+
 
 class LearnerConfidenceTests(unittest.TestCase):
     @staticmethod
@@ -1218,6 +1269,78 @@ class LiveIntelligenceTests(unittest.TestCase):
         )
 
         self.assertEqual(leitura["veredito"], "monitorar")
+
+    def test_live_intelligence_ft_over_waits_for_second_half_confirmation(self):
+        from services.live_intelligence import LiveIntelligence
+
+        fixture = {
+            "fixture": {"status": {"short": "2H", "elapsed": 63}},
+            "goals": {"home": 1, "away": 1},
+            "score": {"halftime": {"home": 1, "away": 1}},
+        }
+        stats = [
+            {
+                "team": {"name": "Casa"},
+                "statistics": [
+                    {"type": "Shots on Goal", "value": 4},
+                    {"type": "Total Shots", "value": 8},
+                    {"type": "expected_goals", "value": 0.65},
+                ],
+            },
+            {
+                "team": {"name": "Fora"},
+                "statistics": [
+                    {"type": "Shots on Goal", "value": 2},
+                    {"type": "Total Shots", "value": 5},
+                    {"type": "expected_goals", "value": 0.32},
+                ],
+            },
+        ]
+
+        leitura = LiveIntelligence().analisar(
+            {"mercado": "over35", "watch_type": "approved_prelive"},
+            fixture,
+            stats,
+        )
+
+        self.assertNotEqual(leitura["veredito"], "sinal_live")
+
+    def test_live_intelligence_ft_under_can_stay_alive_when_second_half_is_dead(self):
+        from services.live_intelligence import LiveIntelligence
+
+        fixture = {
+            "fixture": {"status": {"short": "2H", "elapsed": 66}},
+            "goals": {"home": 1, "away": 0},
+            "score": {"halftime": {"home": 1, "away": 0}},
+        }
+        stats = [
+            {
+                "team": {"name": "Casa"},
+                "statistics": [
+                    {"type": "Shots on Goal", "value": 3},
+                    {"type": "Total Shots", "value": 7},
+                    {"type": "expected_goals", "value": 0.48},
+                ],
+            },
+            {
+                "team": {"name": "Fora"},
+                "statistics": [
+                    {"type": "Shots on Goal", "value": 1},
+                    {"type": "Total Shots", "value": 4},
+                    {"type": "expected_goals", "value": 0.21},
+                ],
+            },
+        ]
+
+        leitura = LiveIntelligence().analisar(
+            {"mercado": "under25", "watch_type": "approved_prelive"},
+            fixture,
+            stats,
+        )
+
+        self.assertEqual(leitura["veredito"], "sinal_live")
+        self.assertEqual(leitura["estado_partida"], "travado")
+        self.assertIn("Estado: travado.", leitura["mensagem"])
 
 
 if __name__ == "__main__":

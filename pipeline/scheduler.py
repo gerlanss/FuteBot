@@ -940,6 +940,9 @@ class Scheduler:
                     elapsed = leitura.get("elapsed") or "?"
                     last_verdict = payload.get("last_live_verdict")
 
+                    if veredito == "cancelar" and self._deve_suprimir_cancelamento_tardio(item, game):
+                        veredito = "monitorar"
+
                     if payload.get("live_signal_notified") and veredito == "cancelar":
                         veredito = "monitorar"
 
@@ -1212,6 +1215,26 @@ class Scheduler:
             return gh < ga
         return False
 
+    @staticmethod
+    def _deve_suprimir_cancelamento_tardio(item: dict, fixture: dict) -> bool:
+        """Evita cancelamento tardio em under quando o mercado ja esta na reta final."""
+        mercado = (item.get("mercado") or "").lower()
+        if "under" not in mercado:
+            return False
+
+        status_info = (fixture.get("fixture") or {}).get("status") or {}
+        status = (status_info.get("short") or "").upper()
+        elapsed = int(status_info.get("elapsed") or 0)
+
+        if status not in {"1H", "2H", "HT", "LIVE", "ET"}:
+            return False
+
+        if mercado.endswith("_ht") or mercado.startswith("ht_"):
+            return elapsed >= 43
+        if mercado.endswith("_2t"):
+            return elapsed >= 88
+        return elapsed >= 88
+
     def _mercado_red_antecipado(self, item: dict, fixture: dict, stats: list[dict] | None = None) -> bool:
         """Detecta se um mercado já ficou matematicamente red antes do FT."""
         mercado = item.get("mercado", "")
@@ -1305,10 +1328,76 @@ class Scheduler:
         return _CATEGORIA_MERCADOS.get(categoria, (categoria,))
 
     @staticmethod
-    def _mercados_conflitantes_live(mercado: str) -> tuple[str, ...]:
+    def _contexto_equivalencia_live(fixture: dict | None) -> dict[str, int | str] | None:
+        if not fixture:
+            return None
+        status = ((fixture.get("fixture") or {}).get("status") or {}).get("short", "NS")
+        goals = fixture.get("goals") or {}
+        score = fixture.get("score") or {}
+        halftime = score.get("halftime") or {}
+        total_gols = int(goals.get("home") or 0) + int(goals.get("away") or 0)
+        gols_ht = int(halftime.get("home") or 0) + int(halftime.get("away") or 0)
+        gols_2t = max(0, total_gols - gols_ht)
+        return {
+            "status": status,
+            "total_gols": total_gols,
+            "gols_ht": gols_ht,
+            "gols_2t": gols_2t,
+        }
+
+    @staticmethod
+    def _mercados_equivalentes_live(mercado: str, fixture: dict | None = None) -> tuple[str, ...]:
+        ctx = Scheduler._contexto_equivalencia_live(fixture)
+        if not ctx:
+            return ()
+        status = str(ctx["status"])
+        gols_ht = int(ctx["gols_ht"])
+        gols_2t = int(ctx["gols_2t"])
+        if status not in {"2H", "LIVE", "ET"} or gols_2t != 0:
+            return ()
+
+        equivalencias = {
+            0: {
+                "over15": {"over15_2t"},
+                "under15": {"under15_2t"},
+                "over15_2t": {"over15"},
+                "under15_2t": {"under15"},
+            },
+            1: {
+                "over15": {"over05_2t"},
+                "under15": {"under05_2t"},
+                "over25": {"over15_2t"},
+                "under25": {"under15_2t"},
+                "over05_2t": {"over15"},
+                "under05_2t": {"under15"},
+                "over15_2t": {"over25"},
+                "under15_2t": {"under25"},
+            },
+            2: {
+                "over25": {"over05_2t"},
+                "under25": {"under05_2t"},
+                "over35": {"over15_2t"},
+                "under35": {"under15_2t"},
+                "over05_2t": {"over25"},
+                "under05_2t": {"under25"},
+                "over15_2t": {"over35"},
+                "under15_2t": {"under35"},
+            },
+            3: {
+                "over35": {"over05_2t"},
+                "under35": {"under05_2t"},
+                "over05_2t": {"over35"},
+                "under05_2t": {"under35"},
+            },
+        }
+        return tuple(sorted(equivalencias.get(gols_ht, {}).get(mercado, set())))
+
+    @staticmethod
+    def _mercados_conflitantes_live(mercado: str, fixture: dict | None = None) -> tuple[str, ...]:
         categoria = _MERCADO_CATEGORIA.get(mercado, mercado)
         mercados = set(_CATEGORIA_MERCADOS.get(categoria, {mercado}))
         mercados.update(_LIVE_CONFLITOS_EXPLICITOS.get(mercado, set()))
+        mercados.update(Scheduler._mercados_equivalentes_live(mercado, fixture))
         return tuple(sorted(mercados))
 
     def _detectar_oportunidades_live_fixture(
@@ -1341,7 +1430,7 @@ class Scheduler:
             if mercado in mercados_existentes:
                 continue
             categoria = self._categoria_live_mercado(mercado)
-            mercados_conflitantes = self._mercados_conflitantes_live(mercado)
+            mercados_conflitantes = self._mercados_conflitantes_live(mercado, fixture)
             if categoria in categorias_existentes:
                 continue
             if any(m in mercados_existentes for m in mercados_conflitantes):

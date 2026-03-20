@@ -954,6 +954,40 @@ def _override_roi_texto(metricas: dict) -> str:
     return f"{roi:+.1f}%"
 
 
+def _override_metricas_live_janela(self, data_inicio: str) -> dict:
+    conn = self.db._conn()
+    rows = conn.execute(
+        "SELECT * FROM live_results WHERE acertou IS NOT NULL AND scan_date >= ?",
+        (data_inicio,),
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        return {
+            "total": 0,
+            "acertos": 0,
+            "accuracy": 0,
+            "roi": None,
+            "lucro_total": 0.0,
+            "total_com_odd": 0,
+        }
+
+    total = len(rows)
+    acertos = sum(1 for r in rows if r["acertou"] == 1)
+    with_odd = [r for r in rows if r["lucro"] is not None]
+    lucro_total = sum((r["lucro"] or 0.0) for r in with_odd)
+    total_com_odd = len(with_odd)
+
+    return {
+        "total": total,
+        "acertos": acertos,
+        "accuracy": round(acertos / total * 100, 1) if total else 0,
+        "roi": round(lucro_total / total_com_odd * 100, 1) if total_com_odd else None,
+        "lucro_total": round(lucro_total, 2),
+        "total_com_odd": total_com_odd,
+    }
+
+
 def _override_relatorio_diario(self) -> str:
     treino = self.db.ultimo_treino()
     versao = treino["modelo_versao"] if treino else None
@@ -998,6 +1032,62 @@ def _override_relatorio_diario(self) -> str:
         "<b>📦 BANCO</b>",
         f"  {resumo['fixtures']:,} fixtures | {resumo['fixtures_com_stats']:,} stats | {resumo['predictions']:,} previsões",
     ])
+    return "\n".join(lines)
+
+
+def _override_relatorio_saude(self) -> str:
+    check = self.verificar_degradacao()
+    inicio_janela = (datetime.now() - timedelta(days=DEGRADATION_WINDOW_DAYS)).strftime("%Y-%m-%d")
+    live_janela = _override_metricas_live_janela(self, inicio_janela)
+    live_geral = self.db.metricas_live()
+
+    lines = [
+        "📅 <b>Saúde do Modelo</b>",
+        datetime.now().strftime("%d/%m/%Y"),
+        "",
+    ]
+
+    for alerta in check["alertas"]:
+        lines.append(alerta)
+
+    mj = check["metricas_janela"]
+    mg = check["metricas_geral"]
+    slices_ruins = check.get("slices_ruins", [])
+
+    lines.extend([
+        "",
+        f"<b>Últimos {DEGRADATION_WINDOW_DAYS} dias</b>",
+        f"  Pre-live: {mj['total']} | Acertos: {mj['acertos']} | Accuracy: {mj['accuracy']:.1f}% | ROI: {mj['roi']:+.1f}%" if mj["total"] else "  Pre-live: 0",
+        (
+            f"  Live: {live_janela['total']} | Acertos: {live_janela['acertos']} | "
+            f"Accuracy: {live_janela['accuracy']:.1f}% | ROI: {_override_roi_texto(live_janela)}"
+            if live_janela["total"] else "  Live: 0"
+        ),
+    ])
+
+    lines.extend([
+        "",
+        "<b>Acumulado total</b>",
+        f"  Pre-live: {mg['total']} | Acertos: {mg['acertos']} | Accuracy: {mg['accuracy']}% | ROI: {mg['roi']:+.1f}% | Lucro: {mg['lucro_total']:+.2f}u" if mg["total"] else "  Pre-live: 0",
+        (
+            f"  Live: {live_geral['total']} | Acertos: {live_geral['acertos']} | "
+            f"Accuracy: {live_geral['accuracy']:.1f}% | ROI: {_override_roi_texto(live_geral)} | "
+            f"Lucro conhecido: {live_geral['lucro_total']:+.2f}u"
+            if live_geral["total"] else "  Live: 0"
+        ),
+    ])
+
+    if slices_ruins:
+        lines.extend([
+            "",
+            "<b>Slices em quarentena</b>",
+        ])
+        for item in slices_ruins[:8]:
+            lines.append(
+                f"  - Liga {item['league_id']} | {item['mercado']} | "
+                f"{item['acertos']}/{item['total']} | ROI {item['roi']:+.1f}%"
+            )
+
     return "\n".join(lines)
 
 
@@ -1117,7 +1207,7 @@ def _override_relatorio_resultado_dia(self, data: str = None) -> str:
         for r in blocked_rows:
             label = r.get("context_label")
             emoji = "✅" if label == "good_block" else "⚠️"
-            status = "Bloqueio certo" if label == "good_block" else "Bloqueio discutível"
+            status = "Bloqueio certo" if label == "good_block" else "Bloqueio discutivel"
             mercado = r.get("mercado") or "?"
             mercado_label = nomes_mercado.get(mercado, mercado)
             prob = r.get("prob_modelo")
@@ -1151,7 +1241,7 @@ def _override_relatorio_resultado_dia(self, data: str = None) -> str:
             tipo_label = "Dupla" if combo.get("combo_type") == "dupla" else "Tripla"
             lines.append(f"{status_emoji} <b>{tipo_label} #{idx}</b> | Conf composta: {(combo.get('prob_composta') or 0):.0%} | {status_txt}")
 
-        total_pre = len(rows)
+    total_pre = len(rows)
     total_live = len(live_rows)
     pct_pre = pre_acertos / total_pre * 100 if total_pre else 0
     pct_live = live_acertos / total_live * 100 if total_live else 0
@@ -1162,6 +1252,7 @@ def _override_relatorio_resultado_dia(self, data: str = None) -> str:
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━━",
         "<b>RESUMO DO DIA</b>",
+        f"  Tips: {total_pre} | Acertos: {pre_acertos}/{total_pre} ({pct_pre:.0f}%)" if total_pre else "  Tips: 0",
         f"  Pre-live: {total_pre} | Acertos: {pre_acertos}/{total_pre} ({pct_pre:.0f}%) | ROI: {roi_pre:+.1f}%" if total_pre else "  Pre-live: 0",
         f"  Live: {total_live} | Acertos: {live_acertos}/{total_live} ({pct_live:.0f}%) | ROI: {roi_live:+.1f}%" if roi_live is not None and total_live else (
             f"  Live: {total_live} | Acertos: {live_acertos}/{total_live} ({pct_live:.0f}%) | ROI: n/d" if total_live else "  Live: 0"
@@ -1188,4 +1279,5 @@ def _override_relatorio_resultado_dia(self, data: str = None) -> str:
 Learner._nomes_mercado = staticmethod(_override_nomes_mercado)
 Learner._roi_texto = staticmethod(_override_roi_texto)
 Learner.relatorio_diario = _override_relatorio_diario
+Learner.relatorio_saude = _override_relatorio_saude
 Learner.relatorio_resultado_dia = _override_relatorio_resultado_dia
