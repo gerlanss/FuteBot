@@ -68,6 +68,40 @@ class TrainerModelDiscoveryTests(unittest.TestCase):
             self.assertIn(feature_name, FeatureFactory.feature_names_full())
 
 
+class PredictorMemoryTests(unittest.TestCase):
+    def test_predictor_evicts_old_league_models_from_cache(self):
+        import models.predictor as predictor_module
+
+        class DummyBooster:
+            def __init__(self):
+                self.loaded_path = None
+
+            def load_model(self, path):
+                self.loaded_path = path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for league_id in (71, 72):
+                league_dir = os.path.join(tmpdir, f"league_{league_id}")
+                os.makedirs(league_dir, exist_ok=True)
+                with open(os.path.join(league_dir, "resultado_1x2.json"), "w", encoding="utf-8") as f:
+                    f.write("{}")
+
+            db = MagicMock()
+
+            with patch.object(predictor_module, "MODELS_DIR", tmpdir), \
+                 patch.object(predictor_module, "PREDICTOR_MAX_LIGAS_CACHE", 1), \
+                 patch.object(predictor_module, "xgb", MagicMock(Booster=DummyBooster)), \
+                 patch.object(predictor_module, "FeatureExtractor", return_value=MagicMock()), \
+                 patch.object(predictor_module, "FeatureFactory", return_value=MagicMock()), \
+                 patch.object(predictor_module.gc, "collect"):
+                predictor = predictor_module.Predictor(db)
+                predictor._carregar_modelos_liga(71)
+                predictor._carregar_modelos_liga(72)
+
+            self.assertNotIn(71, predictor._modelos_liga)
+            self.assertIn(72, predictor._modelos_liga)
+
+
 class SchedulerTests(unittest.TestCase):
     def test_job_relatorio_runs_without_timedelta_name_error(self):
         from pipeline.scheduler import Scheduler

@@ -268,27 +268,33 @@ class Scanner:
             print("   ⚠️ Modelo não treinado. Usando predictions da API-Football.")
             previsoes = self._previsoes_api(fixtures)
         else:
+            fixtures_por_liga = {}
             for f in fixtures:
-                fix_dict = {
-                    "fixture_id": f["fixture"]["id"],
-                    "home_id": f["teams"]["home"]["id"],
-                    "away_id": f["teams"]["away"]["id"],
-                    "home_name": f["teams"]["home"]["name"],
-                    "away_name": f["teams"]["away"]["name"],
-                    "league_id": f["league"]["id"],
-                    "season": f["league"]["season"],
-                    "round": f["league"].get("round", ""),
-                    "date": f["fixture"]["date"],
-                }
-                pred = self.predictor.prever_jogo(fix_dict)
-                if pred:
-                    previsoes.append(pred)
-                    print(f"   ✅ {fix_dict['home_name']} vs {fix_dict['away_name']}: "
-                          f"H={pred.get('prob_home', 0):.0%} D={pred.get('prob_draw', 0):.0%} "
-                          f"A={pred.get('prob_away', 0):.0%}")
-                else:
-                    print(f"   ⚠️ {fix_dict['home_name']} vs {fix_dict['away_name']}: "
-                          f"dados insuficientes")
+                league_id = f["league"]["id"]
+                fixtures_por_liga.setdefault(league_id, []).append(f)
+
+            for league_id, fixtures_liga in fixtures_por_liga.items():
+                for f in fixtures_liga:
+                    fix_dict = {
+                        "fixture_id": f["fixture"]["id"],
+                        "home_id": f["teams"]["home"]["id"],
+                        "away_id": f["teams"]["away"]["id"],
+                        "home_name": f["teams"]["home"]["name"],
+                        "away_name": f["teams"]["away"]["name"],
+                        "league_id": league_id,
+                        "season": f["league"]["season"],
+                        "round": f["league"].get("round", ""),
+                        "date": f["fixture"]["date"],
+                    }
+                    pred = self.predictor.prever_jogo(fix_dict)
+                    if pred:
+                        previsoes.append(pred)
+                        print(f"   ✅ {fix_dict['home_name']} vs {fix_dict['away_name']}: "
+                              f"H={pred.get('prob_home', 0):.0%} D={pred.get('prob_draw', 0):.0%} "
+                              f"A={pred.get('prob_away', 0):.0%}")
+                    else:
+                        print(f"   ⚠️ {fix_dict['home_name']} vs {fix_dict['away_name']}: "
+                              f"dados insuficientes")
 
         print(f"   Previsões geradas: {len(previsoes)}")
 

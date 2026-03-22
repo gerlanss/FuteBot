@@ -20,9 +20,12 @@ Uso:
   oportunidades = pred.calcular_ev(resultado, odds)
 """
 
+import gc
 import os
 import json
+from collections import OrderedDict
 import numpy as np
+from config import PREDICTOR_MAX_LIGAS_CACHE
 from data.database import Database
 from models.features import FeatureExtractor
 from models.feature_factory import FeatureFactory
@@ -58,9 +61,10 @@ class Predictor:
         self.fe = FeatureExtractor(db)
         self.ff = FeatureFactory(db)
         # Cache de modelos per-league — carregados sob demanda (lazy loading)
-        self._modelos_liga = {}  # {league_id: {nome: Booster}}
+        self._modelos_liga = OrderedDict()  # {league_id: {nome: Booster}}
         # Cache de mapas de features por liga — {league_id: {modelo: [feat_names]}}
         self._feature_maps = {}
+        self._max_ligas_cache = int(PREDICTOR_MAX_LIGAS_CACHE or 0)
         print(f"[Predictor] ✅ Inicializado (100% per-league, features dinâmicas)")
 
     def _carregar_modelos_liga(self, league_id: int) -> dict:
@@ -72,6 +76,7 @@ class Predictor:
         Se a liga não tem modelos próprios, retorna dict vazio.
         """
         if league_id in self._modelos_liga:
+            self._modelos_liga.move_to_end(league_id)
             return self._modelos_liga[league_id]
 
         modelos = {}
@@ -97,7 +102,32 @@ class Predictor:
                   f"{' (features evoluídas)' if tem_evo else ''}")
 
         self._modelos_liga[league_id] = modelos
+        self._modelos_liga.move_to_end(league_id)
+        self._aplicar_limite_cache_modelos()
         return modelos
+
+    def _aplicar_limite_cache_modelos(self):
+        if self._max_ligas_cache <= 0:
+            return
+        while len(self._modelos_liga) > self._max_ligas_cache:
+            league_id, _ = self._modelos_liga.popitem(last=False)
+            self._feature_maps.pop(league_id, None)
+            gc.collect()
+
+    def descartar_modelos_liga(self, league_id: int | None):
+        if league_id is None:
+            return
+        removidos = self._modelos_liga.pop(league_id, None)
+        self._feature_maps.pop(league_id, None)
+        if removidos is not None:
+            gc.collect()
+
+    def limpar_cache_modelos(self):
+        if not self._modelos_liga and not self._feature_maps:
+            return
+        self._modelos_liga.clear()
+        self._feature_maps.clear()
+        gc.collect()
 
     def _get_modelo(self, nome: str, league_id: int = None):
         """
