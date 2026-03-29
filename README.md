@@ -10,6 +10,19 @@ FuteBot e um bot de analise de futebol com pipeline automatizado para:
 
 O repositorio publico foi enxugado para expor a arquitetura e o fluxo principal sem levar junto credenciais, dados operacionais ou artefatos privados de runtime.
 
+## Status do repositorio
+
+Este repositorio publico foi organizado para documentar a arquitetura, o pipeline e as rotinas principais do projeto.
+
+Ele nao inclui:
+
+- credenciais ou ambiente de producao
+- bancos e modelos gerados em runtime
+- testes internos de manutencao
+- artefatos locais de debug, auditoria e operacao
+
+Em outras palavras: o codigo central esta aqui, mas a operacao real depende do ambiente privado.
+
 ## O que o repositorio contem
 
 - codigo principal do bot e do scheduler
@@ -36,6 +49,18 @@ O repositorio publico foi enxugado para expor a arquitetura e o fluxo principal 
 - `services/`: integracoes externas e Telegram
 - `data/database.py`: persistencia SQLite
 - `docs/como-o-futebot-funciona.md`: explicacao mais detalhada do fluxo
+
+## Scripts incluidos
+
+Os scripts mantidos em `scripts/` foram reduzidos ao que ainda faz sentido como utilitario tecnico do projeto.
+
+Em geral eles se dividem em:
+
+- treino e discovery
+- aplicacao de strategies descobertas
+- analise exploratoria de slices e mercados
+
+Rotinas claramente temporarias ou internas de debug nao fazem parte da superficie publica.
 
 ## Requisitos
 
@@ -66,3 +91,4 @@ Dependencias Python estao em `requirements.txt`.
 
 - A execucao real depende de chaves e dados locais que nao sao distribuidos aqui.
 - Alguns scripts em `scripts/` existem para analise e manutencao interna do pipeline.
+- O foco deste repositorio publico e mostrar a arquitetura e o fluxo principal, nao empacotar um ambiente plug-and-play completo.
