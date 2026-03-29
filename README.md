@@ -164,6 +164,24 @@ Dependencias Python estao em `requirements.txt`.
 
 - `docs/como-o-futebot-funciona.md`: explicacao detalhada do pipeline e da logica operacional
 
+## Declaracao de uso
+
+Este projeto foi construido como sistema de apoio analitico e automacao operacional.
+
+Ele nao deve ser interpretado como:
+
+- garantia de resultado
+- recomendacao financeira
+- promessa de lucro
+- substituto de validacao humana
+
+Qualquer uso em ambiente real exige:
+
+- configuracao responsavel
+- validacao propria das entradas
+- controle de risco
+- acompanhamento continuo de desempenho
+
 ## Resumo
 
 FuteBot nao e apenas um bot que envia tips.
