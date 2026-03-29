@@ -4,8 +4,20 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.pytest_cache/
+tests/
+tmp_run_scan.py
+*.db
+*.sqlite
+*.log
+*.tar.gz
 
 # Dados locais (não versionados)
+data/**
+!data/
+!data/__init__.py
+!data/bulk_download.py
+!data/database.py
 data/futebot.db
 data/futebot.db-wal
 data/futebot.db-shm
