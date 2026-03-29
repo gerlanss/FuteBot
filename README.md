@@ -1,66 +1,147 @@
 # FuteBot
 
-FuteBot e um bot de analise de futebol com pipeline automatizado para:
+FuteBot e um bot de analise de futebol orientado por dados, com pipeline automatizado para selecao pre-live, revisao contextual perto do horario da partida, monitoramento live e manutencao continua dos modelos.
 
-- buscar fixtures e estatisticas
-- gerar previsoes por liga e mercado
-- aplicar filtros de qualidade e strategies
-- revisar entradas perto do horario do jogo
-- operar via Telegram com scheduler
+O projeto combina:
 
-O repositorio publico foi enxugado para expor a arquitetura e o fluxo principal sem levar junto credenciais, dados operacionais ou artefatos privados de runtime.
+- modelos por liga e por grupo de mercado
+- scanner diario com filtro estatistico
+- strategy gate por slice
+- revisao final perto do kickoff
+- automacao via scheduler e Telegram
+- retreino e discovery de strategies
 
-## Status do repositorio
+## Visao geral da arquitetura
 
-Este repositorio publico foi organizado para documentar a arquitetura, o pipeline e as rotinas principais do projeto.
+O fluxo principal do sistema passa por quatro blocos:
 
-Ele nao inclui:
+1. coleta e persistencia de dados
+2. previsao e filtro de mercados
+3. orquestracao operacional
+4. manutencao de modelos e strategies
 
-- credenciais ou ambiente de producao
-- bancos e modelos gerados em runtime
-- testes internos de manutencao
-- artefatos locais de debug, auditoria e operacao
+### 1. Dados e persistencia
 
-Em outras palavras: o codigo central esta aqui, mas a operacao real depende do ambiente privado.
+Responsavel por baixar fixtures, estatisticas e armazenar o estado operacional do bot.
 
-## O que o repositorio contem
+Arquivos principais:
 
-- codigo principal do bot e do scheduler
-- pipeline de scanner e liberacao
-- treino por liga e autotuning
-- servicos de integracao com APIs externas
-- documentacao funcional do fluxo
+- `data/database.py`: camada SQLite com fixtures, stats, predictions, strategies, auditoria e estado operacional
+- `data/bulk_download.py`: carga inicial e atualizacao incremental de dados
+- `services/apifootball.py`: integracao com API-Football
+- `services/odds_api.py`: integracao de odds e contexto de mercado
 
-## O que nao vai para o repositorio publico
+### 2. Predicao e selecao
 
-- `.env` e credenciais
-- bancos SQLite locais
-- modelos gerados em runtime
-- logs, caches e auditorias locais
-- testes internos e scripts temporarios de operacao
+Aqui vive o nucleo do bot.
 
-## Estrutura
+O `Predictor` carrega modelos por liga e gera probabilidades para diferentes mercados. O `Scanner` transforma essas previsoes em candidatos operacionais, aplica thresholds, strategy gate, filtros anti-conflito e monta o radar do dia.
 
-- `bot.py`: entrypoint da aplicacao
-- `config.py`: configuracoes por ambiente
-- `pipeline/scanner.py`: radar diario, selecao e liberacao
-- `pipeline/scheduler.py`: automacao recorrente
-- `models/`: treino, predictor, discovery e autotuner
-- `services/`: integracoes externas e Telegram
-- `data/database.py`: persistencia SQLite
-- `docs/como-o-futebot-funciona.md`: explicacao mais detalhada do fluxo
+Arquivos principais:
 
-## Scripts incluidos
+- `models/predictor.py`: inferencia por liga
+- `models/features.py`: extracao de features base
+- `models/feature_factory.py`: compatibilidade e composicao de features
+- `pipeline/scanner.py`: selecao de jogos e mercados
 
-Os scripts mantidos em `scripts/` foram reduzidos ao que ainda faz sentido como utilitario tecnico do projeto.
+### 3. Orquestracao
 
-Em geral eles se dividem em:
+Coordena a operacao automatica do produto.
 
-- treino e discovery
-- aplicacao de strategies descobertas
-- analise exploratoria de slices e mercados
+O scheduler executa:
 
-Rotinas claramente temporarias ou internas de debug nao fazem parte da superficie publica.
+- radar diario
+- liberacao final em janela proxima ao jogo
+- check ao vivo
+- coleta de resultados
+- relatorios operacionais
+- rotinas de manutencao
+
+Arquivos principais:
+
+- `pipeline/scheduler.py`: agendamentos e jobs recorrentes
+- `services/telegram_bot.py`: comandos, mensagens e interface operacional via Telegram
+- `bot.py`: entrypoint do processo principal
+
+### 4. Aprendizado e manutencao
+
+O bot nao depende apenas de um treino unico. Ele possui rotinas de evolucao e manutencao para manter strategies e modelos utilizaveis ao longo do tempo.
+
+Arquivos principais:
+
+- `models/trainer.py`: treino base dos modelos
+- `models/autotuner.py`: retreino focal e ajuste por liga
+- `models/market_discovery.py`: discovery de slices e strategies por mercado
+- `models/learner.py`: saude do modelo, degradacao e quarentena de slices
+
+## Como o fluxo funciona
+
+### 1. Radar pre-live
+
+O scanner busca jogos elegiveis nas ligas configuradas e gera mercados candidatos com base nas probabilidades dos modelos.
+
+Depois disso ele aplica:
+
+- confianca minima
+- strategy gate
+- deduplicacao por categoria
+- remocao de conflitos
+
+O resultado vira o radar inicial do dia.
+
+### 2. Revisao final perto do jogo
+
+Os candidatos aprovados no radar nao sao necessariamente liberados imediatamente.
+
+Na janela proxima ao kickoff, o sistema revisita os jogos, enriquece o contexto e decide se cada mercado:
+
+- continua de pe
+- deve ser barrado
+- entra em combinacoes validas
+
+### 3. Operacao live
+
+Depois da liberacao, o scheduler acompanha os jogos ativos, monitora sinais live e atualiza o status operacional das entradas.
+
+Essa camada inclui:
+
+- checagem ao vivo
+- cancelamento de leitura quando o contexto degrada
+- deduplicacao de sinais live
+- resolucao de resultados
+
+### 4. Manutencao continua
+
+Quando slices perdem desempenho, o sistema pode:
+
+- colocar slices em quarentena
+- manter o restante do scanner operando
+- disparar retreino focal
+- executar discovery por liga e mercado
+
+Isso evita retrabalhar tudo quando o problema esta concentrado em poucos segmentos.
+
+## Estrutura do repositorio
+
+- `bot.py`: inicializacao do bot e do scheduler
+- `config.py`: configuracoes por ambiente e parametros de operacao
+- `data/`: persistencia e carga de dados
+- `deploy/`: exemplos de servico e deploy
+- `docs/`: documentacao complementar
+- `models/`: treino, predictor, tuner, discovery e aprendizado
+- `pipeline/`: scanner, scheduler e coleta operacional
+- `scripts/`: utilitarios tecnicos de apoio
+- `services/`: integracoes externas e interface Telegram
+
+## Componentes mais importantes
+
+- `pipeline/scanner.py`: coracao do produto
+- `pipeline/scheduler.py`: automacao e jobs recorrentes
+- `models/predictor.py`: inferencia por liga
+- `models/autotuner.py`: retreino focal
+- `models/market_discovery.py`: descoberta de strategies
+- `services/telegram_bot.py`: superficie operacional do bot
+- `data/database.py`: estado e auditoria
 
 ## Requisitos
 
@@ -76,19 +157,23 @@ Dependencias Python estao em `requirements.txt`.
 1. Crie um ambiente virtual.
 2. Instale as dependencias com `pip install -r requirements.txt`.
 3. Copie `.env.example` para `.env`.
-4. Preencha as credenciais e IDs necessarios.
+4. Preencha as credenciais necessarias.
 5. Execute `python bot.py`.
 
-## Fluxo resumido
+## Documentacao complementar
 
-1. O scanner busca jogos elegiveis das ligas configuradas.
-2. O predictor gera probabilidades por mercado.
-3. O strategy gate filtra o que tem historico valido.
-4. O scheduler roda janelas de revisao e liberacao.
-5. O Telegram entrega radar, entradas e alertas operacionais.
+- `docs/como-o-futebot-funciona.md`: explicacao detalhada do pipeline e da logica operacional
 
-## Observacoes
+## Resumo
 
-- A execucao real depende de chaves e dados locais que nao sao distribuidos aqui.
-- Alguns scripts em `scripts/` existem para analise e manutencao interna do pipeline.
-- O foco deste repositorio publico e mostrar a arquitetura e o fluxo principal, nao empacotar um ambiente plug-and-play completo.
+FuteBot nao e apenas um bot que envia tips.
+
+Ele foi estruturado como um fluxo completo de decisao:
+
+- coleta dados
+- gera previsoes
+- filtra por strategy
+- revisa contexto
+- opera via scheduler
+- monitora saude do modelo
+- reajusta slices degradados ao longo do tempo
