@@ -186,10 +186,10 @@ module futebot.telegram {
 
   task publicar_mensagem_automatica {
     docs {
-      resumo: "Entrega mensagens automaticas do scheduler para chats registrados, com parse adequado e fallback seguro."
+      resumo: "Entrega mensagens automaticas ja geradas para os destinos do Telegram, com parse adequado e fallback seguro."
     }
     input {
-      tipo_mensagem: Texto required
+      texto: Texto required
       destino: Texto required
       parse_mode: Texto required
     }
@@ -198,7 +198,7 @@ module futebot.telegram {
       mensagens_falharam: Inteiro
     }
     rules {
-      tipo_mensagem existe
+      texto existe
       destino existe
       parse_mode existe
     }
@@ -216,7 +216,7 @@ module futebot.telegram {
     tests {
       caso "mensagem automatica admite falha parcial" {
         given {
-          tipo_mensagem: "relatorio_diario"
+          texto: "Relatorio diario consolidado"
           destino: "admins"
           parse_mode: "HTML"
         }
@@ -236,7 +236,7 @@ module futebot.telegram {
     etapa onboarding usa registrar_chat_e_menu com chat_id = chat_id, perfil_acesso = perfil_acesso em_sucesso roteamento em_erro publicacao
     etapa roteamento usa rotear_callback_menu com chat_id = chat_id, perfil_acesso = perfil_acesso, callback_data = comando_ou_callback depende_de onboarding em_sucesso comandos em_erro comandos
     etapa comandos usa executar_comando_operacional com chat_id = chat_id, perfil_acesso = perfil_acesso, comando = comando_ou_callback, origem = origem depende_de roteamento
-    etapa publicacao usa publicar_mensagem_automatica com tipo_mensagem = origem, destino = perfil_acesso, parse_mode = HTML depende_de comandos
+    etapa publicacao usa publicar_mensagem_automatica com texto = comando_ou_callback, destino = perfil_acesso, parse_mode = HTML depende_de comandos
     effects {
       auditoria interface_operacional_telegram criticidade = alta
       persistencia telemetria_telegram criticidade = media

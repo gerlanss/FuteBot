@@ -428,48 +428,110 @@ def _registrar_update(update: Update):
 _app_instance = None
 
 
+def _resolver_destinos_envio(destino) -> list[int]:
+    """Normaliza o destino logico de envio para chat_ids concretos."""
+    if destino in (None, "", "admins"):
+        return sorted(_ADMIN_CHAT_IDS)
+
+    if destino == "registrados":
+        return sorted(set(_db.telegram_chat_ids()))
+
+    texto_destino = str(destino).strip()
+    if texto_destino.lstrip("-").isdigit():
+        return [int(texto_destino)]
+
+    raise ValueError(f"Destino de Telegram nao suportado: {destino}")
+
+
+def _obter_bot_envio():
+    """Usa a instancia ativa do bot quando existir; senao cria um cliente direto."""
+    if _app_instance is not None:
+        return _app_instance.bot
+    return Bot(token=TELEGRAM_TOKEN)
+
+
+def _normalizar_blocos_envio(texto: str | list[str]) -> list[str]:
+    """Aceita texto unico ou blocos ja quebrados e garante strings seguras."""
+    if isinstance(texto, str):
+        if len(texto) > 4000:
+            texto = texto[:4000] + "\n\n... (truncado)"
+        return [texto]
+
+    blocos = []
+    for bloco in list(texto or []):
+        bloco = str(bloco)
+        if len(bloco) > 4000:
+            bloco = bloco[:4000] + "\n\n... (truncado)"
+        blocos.append(bloco)
+    return blocos
+
+
+async def _send_to_chats(texto: str | list[str], destino: str = "admins", parse_mode: str = "HTML") -> dict:
+    """Faz fan-out de mensagens automaticas e retorna um resumo estruturado."""
+    destinos = _resolver_destinos_envio(destino)
+    if not destinos:
+        return {"destinatarios": 0, "entregues": 0, "falhas": []}
+
+    bot = _obter_bot_envio()
+    blocos = _normalizar_blocos_envio(texto)
+    parse_mode_normalizado = str(parse_mode).strip() if parse_mode else None
+    entregues = 0
+    falhas = []
+
+    for chat_id in destinos:
+        prefs = get_preferences(chat_id)
+        if prefs and not prefs.get("alerts_enabled", True):
+            continue
+
+        try:
+            for bloco in blocos:
+                try:
+                    payload = {"chat_id": chat_id, "text": bloco}
+                    if parse_mode_normalizado:
+                        payload["parse_mode"] = parse_mode_normalizado
+                    await bot.send_message(**payload)
+                except Exception:
+                    if not parse_mode_normalizado:
+                        raise
+                    await bot.send_message(chat_id=chat_id, text=bloco)
+            entregues += 1
+        except Exception as exc:
+            falhas.append({"chat_id": chat_id, "erro": str(exc)})
+
+    return {
+        "destinatarios": len(destinos),
+        "entregues": entregues,
+        "falhas": falhas,
+    }
+
+
 async def enviar_mensagem(texto: str, chat_id: int = None):
     """
     Envia mensagem para o chat registrado.
     Usado pelo scheduler para enviar relatórios automáticos.
     """
-    global _app_instance
-    if _app_instance is None:
-        print("[Bot] App não inicializado, mensagem não enviada")
-        return
+    # Compat wrapper mantido para o scheduler legado.
 
     if chat_id is not None and not _is_admin_chat(chat_id):
         print(f"[Bot] Envio bloqueado para chat nao-admin: {chat_id}")
         return
 
-    ids = [chat_id] if chat_id else sorted(_ADMIN_CHAT_IDS)
-    if not ids:
+    try:
+        resultado = await _send_to_chats(
+            texto,
+            destino=str(chat_id) if chat_id is not None else "admins",
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as exc:
+        print(f"[Bot] Falha no envio automatico: {exc}")
+        return
+
+    if resultado["destinatarios"] == 0:
         print("[Bot] Nenhum chat_id registrado")
         return
 
-    for cid in ids:
-        prefs = get_preferences(cid)
-        if prefs and not prefs.get("alerts_enabled", True):
-            continue
-        try:
-            # Truncar mensagem se muito longa (Telegram limite: 4096 chars)
-            if len(texto) > 4000:
-                texto = texto[:4000] + "\n\n... (truncado)"
-
-            await _app_instance.bot.send_message(
-                chat_id=cid,
-                text=texto,
-                parse_mode=ParseMode.HTML,
-            )
-        except Exception as e:
-            # Tentar sem Markdown se falhar
-            try:
-                await _app_instance.bot.send_message(
-                    chat_id=cid,
-                    text=texto,
-                )
-            except Exception as e2:
-                print(f"[Bot] Erro ao enviar para {cid}: {e2}")
+    for falha in resultado["falhas"]:
+        print(f"[Bot] Erro ao enviar para {falha['chat_id']}: {falha['erro']}")
 
 
 def _quebrar_texto(texto: str, limite: int = 3800) -> list[str]:
@@ -574,33 +636,8 @@ def _formatar_scan_publico_html(data: str = None) -> list[str]:
 
 async def broadcast_scan_publico(data: str = None) -> dict:
     """Envia o scan validado do dia para todos os chats persistidos."""
-    destinos = sorted(set(_db.telegram_chat_ids()))
-    if not destinos:
-        return {"destinatarios": 0, "entregues": 0, "falhas": []}
-
-    bot = Bot(token=TELEGRAM_TOKEN)
     blocos = _formatar_scan_publico_html(data=data)
-    entregues = 0
-    falhas = []
-
-    for chat_id in destinos:
-        try:
-            for bloco in blocos:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=bloco,
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
-                )
-            entregues += 1
-        except Exception as exc:
-            falhas.append({"chat_id": chat_id, "erro": str(exc)})
-
-    return {
-        "destinatarios": len(destinos),
-        "entregues": entregues,
-        "falhas": falhas,
-    }
+    return await _send_to_chats(blocos, destino="registrados", parse_mode=ParseMode.HTML)
 
 
 # ══════════════════════════════════════════════
