@@ -20,6 +20,8 @@ O terceiro modulo modelado esta em [telegram_operacao.sema](/C:/GitHub/FuteBot/s
 
 O quarto modulo modelado esta em [integracoes_externas.sema](/C:/GitHub/FuteBot/sema/integracoes_externas.sema).
 
+O quinto modulo modelado esta em [ciclo_previsao.sema](/C:/GitHub/FuteBot/sema/ciclo_previsao.sema).
+
 Ele descreve quatro tarefas centrais:
 
 - gerar radar pre-live
@@ -49,6 +51,14 @@ No lado de integracoes, o modulo externo cobre:
 - bulk de fixtures e stats
 - enriquecimento com odds de referencia
 - garantias minimas contra payload torto e falta de cobertura
+
+No ciclo central do produto, o modulo de previsao cobre:
+
+- registro do candidato no radar
+- promocao para prediction liberada
+- acompanhamento live com sinal, cancelamento ou manutencao
+- resolucao final da prediction
+- feedback contextual para learner e saude do modelo
 
 ## Regra pratica para usar daqui pra frente
 
@@ -94,6 +104,12 @@ Se a mudanca for em API-Football, odds ou bulk download:
 2. Rode `sema ast sema/integracoes_externas.sema --json`
 3. Rode `sema ir sema/integracoes_externas.sema --json`
 
+Se a mudanca for no ciclo de vida de predictions:
+
+1. Rode `sema contexto-ia sema/ciclo_previsao.sema`
+2. Rode `sema ast sema/ciclo_previsao.sema --json`
+3. Rode `sema ir sema/ciclo_previsao.sema --json`
+
 Depois de editar:
 
 1. Rode `sema formatar sema/operacao_futebot.sema`
@@ -132,6 +148,6 @@ Preferencia de pasta:
 Se essa integracao se provar util, os melhores proximos candidatos para modelagem sao:
 
 - contratos do Telegram e callbacks principais
-- ciclo de vida de uma previsao
 - fluxo de retreino focal e quarentena
 - discovery semanal de strategies
+- estrategia, slice e gate operacional

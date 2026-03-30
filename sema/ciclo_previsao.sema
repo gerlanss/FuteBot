@@ -1,0 +1,297 @@
+module futebot.previsao {
+  docs {
+    resumo: "Contrato semantico do ciclo de vida de uma previsao no FuteBot, do radar inicial ate a resolucao final e o feedback para aprendizado."
+  }
+
+  state previsao_operacional {
+    origem: ciclo_previsao
+    fields {
+      fixture_id: Id
+      mercado: Texto
+      fase_atual: Texto
+      watch_type: Texto
+      data_operacao: Texto
+    }
+  }
+
+  state monitoramento_live {
+    origem: ciclo_previsao
+    fields {
+      watch_id: Id
+      fixture_id: Id
+      mercado: Texto
+      status_atual: Texto
+      ultimo_veredito: Texto
+    }
+  }
+
+  state resolucao_previsao {
+    origem: ciclo_previsao
+    fields {
+      fixture_id: Id
+      mercado: Texto
+      resultado_final: Texto
+      acertou: Booleano
+    }
+  }
+
+  task registrar_candidatos_radar {
+    docs {
+      resumo: "Persiste os candidatos do radar diario antes da reavaliacao T-30, mantendo trilha auditavel para o que entrou ou saiu do funil."
+    }
+    input {
+      data_operacao: Texto required
+      fixture_id: Id required
+      mercado: Texto required
+    }
+    output {
+      candidatos_registrados: Inteiro
+      auditoria_atualizada: Booleano
+    }
+    rules {
+      data_operacao existe
+      fixture_id existe
+      mercado existe
+    }
+    effects {
+      persistencia scan_candidates criticidade = alta
+      persistencia scan_audit criticidade = alta
+      auditoria radar_pre_live criticidade = media
+    }
+    impl {
+      py: data.database.Database.salvar_scan_candidates
+    }
+    guarantees {
+      candidatos_registrados existe
+      auditoria_atualizada existe
+    }
+    tests {
+      caso "candidato unico pode entrar no radar sem quebrar o lote" {
+        given {
+          data_operacao: "2026-03-30"
+          fixture_id: 10
+          mercado: "under35"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+    }
+  }
+
+  task liberar_previsao_aprovada {
+    docs {
+      resumo: "Promove um candidato aprovado na revisao final para prediction persistida, pronta para resolucao e acompanhamento live."
+    }
+    input {
+      fixture_id: Id required
+      mercado: Texto required
+      modelo_versao: Texto required
+    }
+    output {
+      prediction_registrada: Booleano
+      watchlist_habilitada: Booleano
+    }
+    rules {
+      fixture_id existe
+      mercado existe
+      modelo_versao existe
+    }
+    effects {
+      persistencia predictions criticidade = alta
+      persistencia live_watch criticidade = alta
+      auditoria liberacao_previsao criticidade = media
+    }
+    impl {
+      py: data.database.Database.salvar_prediction
+    }
+    guarantees {
+      prediction_registrada existe
+      watchlist_habilitada existe
+    }
+    error {
+      previsao_duplicada: "Ja existe previsao registrada para o fixture e mercado informados."
+      prediction_incompleta: "A liberacao nao trouxe os metadados minimos para persistencia correta."
+    }
+    tests {
+      caso "previsao aprovada pode ser registrada uma unica vez" {
+        given {
+          fixture_id: 10
+          mercado: "under35"
+          modelo_versao: "at_20260328_1325"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+    }
+  }
+
+  task acompanhar_previsao_live {
+    docs {
+      resumo: "Monitora a previsao aprovada ao vivo, emitindo sinal, cancelamento ou resolucao antecipada quando o contexto permitir."
+    }
+    input {
+      data_operacao: Texto required
+      fixture_id: Id required
+      mercado: Texto required
+      referencia_iso: Texto required
+    }
+    output {
+      watch_atualizado: Booleano
+      resolvida_no_live: Booleano
+    }
+    rules {
+      data_operacao existe
+      fixture_id existe
+      mercado existe
+      referencia_iso existe
+    }
+    effects {
+      consulta fixtures criticidade = alta
+      consulta stats_partida criticidade = media
+      persistencia live_watch criticidade = alta
+      notificacao telegram_publico detalhe_previsao_live criticidade = alta
+      auditoria acompanhamento_live criticidade = media
+    }
+    impl {
+      py: pipeline.scheduler.Scheduler._job_check_ao_vivo
+    }
+    guarantees {
+      watch_atualizado existe
+      resolvida_no_live existe
+    }
+    error {
+      watch_item_inexistente: "Nao existe item ativo de live watch para a previsao informada."
+      cancelamento_tardio_suprimido: "O contexto pediu cancelamento tarde demais e a leitura foi mantida ate a resolucao."
+    }
+    tests {
+      caso "monitoramento live aceita previsao sem sinal novo" {
+        given {
+          data_operacao: "2026-03-30"
+          fixture_id: 10
+          mercado: "under35"
+          referencia_iso: "2026-03-30T18:45:00-04:00"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+    }
+  }
+
+  task resolver_previsao_encerrada {
+    docs {
+      resumo: "Fecha a previsao quando a partida termina, registrando resultado, gols, acerto e impacto operacional."
+    }
+    input {
+      fixture_id: Id required
+      mercado: Texto required
+      resultado_final: Texto required
+    }
+    output {
+      previsoes_resolvidas: Inteiro
+      acerto_registrado: Booleano
+    }
+    rules {
+      fixture_id existe
+      mercado existe
+      resultado_final existe
+    }
+    effects {
+      persistencia predictions criticidade = alta
+      persistencia fixture_stats criticidade = media
+      auditoria resolucao_previsao criticidade = alta
+    }
+    impl {
+      py: data.database.Database.resolver_prediction
+    }
+    guarantees {
+      previsoes_resolvidas existe
+      acerto_registrado existe
+    }
+    error {
+      fixture_sem_resultado: "A partida ainda nao possui placar final confiavel para resolver a previsao."
+      previsao_nao_encontrada: "Nenhuma prediction correspondente foi localizada para o fixture informado."
+    }
+    tests {
+      caso "resolucao final pode fechar um under35 corretamente" {
+        given {
+          fixture_id: 10
+          mercado: "under35"
+          resultado_final: "draw"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+    }
+  }
+
+  task registrar_feedback_aprendizado {
+    docs {
+      resumo: "Anexa feedback contextual da partida resolvida para ajudar learner, auditoria e saude do modelo."
+    }
+    input {
+      fixture_id: Id required
+      mercado: Texto required
+      resultado_final: Texto required
+    }
+    output {
+      feedback_registrado: Booleano
+      saude_reavaliada: Booleano
+    }
+    rules {
+      fixture_id existe
+      mercado existe
+      resultado_final existe
+    }
+    effects {
+      consulta predictions criticidade = alta
+      persistencia aprendizado_contextual criticidade = media
+      auditoria feedback_previsao criticidade = media
+    }
+    impl {
+      py: models.learner.Learner._registrar_feedback_contextual_fixture
+    }
+    guarantees {
+      feedback_registrado existe
+      saude_reavaliada existe
+    }
+    tests {
+      caso "feedback contextual pode ser registrado apos a resolucao" {
+        given {
+          fixture_id: 10
+          mercado: "under35"
+          resultado_final: "draw"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+    }
+  }
+
+  flow ciclo_previsao_futebot {
+    data_operacao: Texto
+    fixture_id: Id
+    mercado: Texto
+    modelo_versao: Texto
+    referencia_iso: Texto
+    resultado_final: Texto
+    etapa radar usa registrar_candidatos_radar com data_operacao = data_operacao, fixture_id = fixture_id, mercado = mercado em_sucesso liberacao em_erro feedback
+    etapa liberacao usa liberar_previsao_aprovada com fixture_id = fixture_id, mercado = mercado, modelo_versao = modelo_versao depende_de radar em_sucesso acompanhamento em_erro acompanhamento
+    etapa acompanhamento usa acompanhar_previsao_live com data_operacao = data_operacao, fixture_id = fixture_id, mercado = mercado, referencia_iso = referencia_iso depende_de liberacao em_sucesso resolucao em_erro resolucao
+    etapa resolucao usa resolver_previsao_encerrada com fixture_id = fixture_id, mercado = mercado, resultado_final = resultado_final depende_de acompanhamento em_sucesso feedback em_erro feedback
+    etapa feedback usa registrar_feedback_aprendizado com fixture_id = fixture_id, mercado = mercado, resultado_final = resultado_final depende_de resolucao
+    effects {
+      auditoria ciclo_previsao criticidade = alta
+      persistencia estado_previsao criticidade = alta
+    }
+  }
+}

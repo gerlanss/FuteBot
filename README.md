@@ -175,12 +175,14 @@ Arquivo inicial:
 - `sema/quarentena_retreino_focal.sema`
 - `sema/telegram_operacao.sema`
 - `sema/integracoes_externas.sema`
+- `sema/ciclo_previsao.sema`
 
 Use Sema principalmente quando a mudanca envolver:
 
 - contratos de operacao
 - fluxo entre scanner, liberacao T-30, live e relatorios
 - estados de previsoes
+- resolucao de predictions e feedback para learner
 - garantias entre notificacao, persistencia e auditoria
 
 Fluxo curto recomendado:
