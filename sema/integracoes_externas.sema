@@ -1,0 +1,257 @@
+module futebot.integracoes {
+  docs {
+    resumo: "Contrato semantico das integracoes externas do FuteBot, cobrindo API-Football, The Odds API e bulk download historico."
+  }
+
+  state requisicao_externa {
+    origem: integracoes
+    fields {
+      endpoint: Texto
+      provedor: Texto
+      status_atual: Texto
+      payload_tipo: Texto
+    }
+  }
+
+  state ciclo_bulk {
+    origem: integracoes
+    fields {
+      etapa_atual: Texto
+      season: Texto
+      league_id: Id
+      status_atual: Texto
+    }
+  }
+
+  task consultar_status_api_football {
+    docs {
+      resumo: "Busca o status da conta na API-Football para decidir se ainda e seguro continuar consumindo requests."
+    }
+    input {
+      endpoint: Texto required
+      data_referencia: Texto required
+    }
+    output {
+      requests_usadas: Inteiro
+      pode_continuar: Booleano
+    }
+    rules {
+      endpoint existe
+      data_referencia existe
+    }
+    effects {
+      consulta api_football criticidade = alta
+      auditoria status_api_football criticidade = media
+    }
+    impl {
+      py: data.bulk_download._check_limite
+    }
+    guarantees {
+      requests_usadas existe
+      pode_continuar existe
+    }
+    tests {
+      caso "status da conta retorna estrutura valida" {
+        given {
+          endpoint: "status"
+          data_referencia: "2026-03-30"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+    }
+  }
+
+  task normalizar_payload_api_football {
+    docs {
+      resumo: "Normaliza payloads inesperados da API-Football para o formato dict esperado pelo restante do sistema."
+    }
+    input {
+      endpoint: Texto required
+      payload_tipo: Texto required
+    }
+    output {
+      payload_normalizado: Booleano
+      response_disponivel: Booleano
+    }
+    rules {
+      endpoint existe
+      payload_tipo existe
+    }
+    effects {
+      consulta api_football criticidade = alta
+      auditoria payload_api_football criticidade = media
+    }
+    impl {
+      py: services.apifootball.raw_request
+    }
+    guarantees {
+      payload_normalizado existe
+      response_disponivel existe
+    }
+    error {
+      request_falhou: "A requisicao externa nao respondeu e o cliente devolveu estrutura vazia."
+      payload_invalido: "A resposta veio em formato inesperado e precisou de saneamento."
+    }
+    tests {
+      caso "payload em lista pode ser saneado sem quebrar o app" {
+        given {
+          endpoint: "fixtures"
+          payload_tipo: "list"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+    }
+  }
+
+  task baixar_fixtures_historicos {
+    docs {
+      resumo: "Baixa fixtures por liga e temporada, respeitando o estado atual do banco e evitando consumo inutil."
+    }
+    input {
+      season: Texto required
+      origem: Texto required
+    }
+    output {
+      fixtures_salvos: Inteiro
+      ligas_processadas: Inteiro
+    }
+    rules {
+      season existe
+      origem existe
+    }
+    effects {
+      consulta api_football criticidade = alta
+      persistencia fixtures criticidade = alta
+      auditoria bulk_fixtures criticidade = media
+    }
+    impl {
+      py: data.bulk_download.baixar_fixtures
+    }
+    guarantees {
+      fixtures_salvos existe
+      ligas_processadas existe
+    }
+    tests {
+      caso "bulk de fixtures pode encerrar sem novos jogos" {
+        given {
+          season: 2025
+          origem: "bulk"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+    }
+  }
+
+  task baixar_stats_historicos {
+    docs {
+      resumo: "Baixa stats de partidas finalizadas, respeitando limite de seguranca e modo resume."
+    }
+    input {
+      season: Texto required
+      origem: Texto required
+    }
+    output {
+      stats_baixadas: Inteiro
+      limite_respeitado: Booleano
+    }
+    rules {
+      season existe
+      origem existe
+    }
+    effects {
+      consulta api_football criticidade = alta
+      persistencia fixture_stats criticidade = alta
+      auditoria bulk_stats criticidade = media
+    }
+    impl {
+      py: data.bulk_download.baixar_stats
+    }
+    guarantees {
+      stats_baixadas existe
+      limite_respeitado existe
+    }
+    tests {
+      caso "bulk de stats admite zero baixadas sem falhar" {
+        given {
+          season: 2025
+          origem: "bootstrap"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+    }
+  }
+
+  task enriquecer_odds_referencia {
+    docs {
+      resumo: "Consulta The Odds API e expande o contexto de mercado para jogos futuros com linhas de referencia."
+    }
+    input {
+      league_id: Id required
+      mercado: Texto required
+    }
+    output {
+      jogos_com_odds: Inteiro
+      creditos_restantes_conhecidos: Booleano
+    }
+    rules {
+      league_id existe
+      mercado existe
+    }
+    effects {
+      consulta odds_api criticidade = alta
+      persistencia odds_cache criticidade = media
+      auditoria odds_referencia criticidade = media
+    }
+    impl {
+      py: services.odds_api.buscar_odds_por_league_id
+    }
+    guarantees {
+      jogos_com_odds existe
+      creditos_restantes_conhecidos existe
+    }
+    error {
+      liga_sem_mapeamento: "A liga nao possui mapeamento para a The Odds API."
+      sem_cobertura_odds: "Nao houve cobertura de odds para a consulta pedida."
+    }
+    tests {
+      caso "liga sem cobertura ainda retorna contrato valido" {
+        given {
+          league_id: 9999
+          mercado: "under35"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+    }
+  }
+
+  flow ciclo_integracoes_futebot {
+    endpoint: Texto
+    season: Texto
+    league_id: Id
+    mercado: Texto
+    etapa status usa consultar_status_api_football com endpoint = endpoint, data_referencia = season em_sucesso payload em_erro odds
+    etapa payload usa normalizar_payload_api_football com endpoint = endpoint, payload_tipo = dict depende_de status em_sucesso fixtures em_erro fixtures
+    etapa fixtures usa baixar_fixtures_historicos com season = season, origem = bulk depende_de payload em_sucesso stats em_erro odds
+    etapa stats usa baixar_stats_historicos com season = season, origem = bulk depende_de fixtures em_sucesso odds em_erro odds
+    etapa odds usa enriquecer_odds_referencia com league_id = league_id, mercado = mercado depende_de stats
+    effects {
+      auditoria ciclo_integracoes criticidade = alta
+      persistencia estado_integracoes criticidade = alta
+    }
+  }
+}

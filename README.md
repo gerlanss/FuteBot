@@ -174,6 +174,7 @@ Arquivo inicial:
 - `sema/operacao_futebot.sema`
 - `sema/quarentena_retreino_focal.sema`
 - `sema/telegram_operacao.sema`
+- `sema/integracoes_externas.sema`
 
 Use Sema principalmente quando a mudanca envolver:
 

@@ -18,6 +18,8 @@ O segundo modulo modelado esta em [quarentena_retreino_focal.sema](/C:/GitHub/Fu
 
 O terceiro modulo modelado esta em [telegram_operacao.sema](/C:/GitHub/FuteBot/sema/telegram_operacao.sema).
 
+O quarto modulo modelado esta em [integracoes_externas.sema](/C:/GitHub/FuteBot/sema/integracoes_externas.sema).
+
 Ele descreve quatro tarefas centrais:
 
 - gerar radar pre-live
@@ -40,6 +42,13 @@ Na interface operacional, o modulo de Telegram cobre:
 - menu principal e callbacks inline
 - comandos publicos vs administrativos
 - publicacao de mensagens automaticas do scheduler
+
+No lado de integracoes, o modulo externo cobre:
+
+- status e saneamento da API-Football
+- bulk de fixtures e stats
+- enriquecimento com odds de referencia
+- garantias minimas contra payload torto e falta de cobertura
 
 ## Regra pratica para usar daqui pra frente
 
@@ -78,6 +87,12 @@ Se a mudanca for em comandos, menu ou callbacks do bot:
 1. Rode `sema contexto-ia sema/telegram_operacao.sema`
 2. Rode `sema ast sema/telegram_operacao.sema --json`
 3. Rode `sema ir sema/telegram_operacao.sema --json`
+
+Se a mudanca for em API-Football, odds ou bulk download:
+
+1. Rode `sema contexto-ia sema/integracoes_externas.sema`
+2. Rode `sema ast sema/integracoes_externas.sema --json`
+3. Rode `sema ir sema/integracoes_externas.sema --json`
 
 Depois de editar:
 
