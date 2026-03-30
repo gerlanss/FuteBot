@@ -21,6 +21,7 @@ Uso:
 
 from datetime import datetime, timedelta
 import json
+import threading
 from zoneinfo import ZoneInfo
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -65,6 +66,8 @@ class Scheduler:
         """
         self.db = db or Database()
         self.telegram_callback = telegram_callback
+        self._pipeline_lock = threading.Lock()
+        self._pipeline_job = None
         self.scheduler = BackgroundScheduler(
             timezone=TIMEZONE,
             job_defaults={
@@ -205,6 +208,7 @@ class Scheduler:
             self._garantir_radar_do_dia()
             # Recupera imediatamente qualquer janela T-30 perdida durante restart.
             self._job_liberacao_t30()
+            self._garantir_relatorio_diario()
         except Exception as e:
             print(f"⚠️ Falha na recuperação inicial do T-30: {e}")
 
@@ -220,6 +224,24 @@ class Scheduler:
     def parar(self):
         """Para o scheduler."""
         self.scheduler.shutdown()
+
+    def _entrar_secao_critica(self, job_name: str) -> bool:
+        """Serializa jobs pesados para evitar travas por concorrencia no pipeline."""
+        if self._pipeline_lock.acquire(blocking=False):
+            self._pipeline_job = job_name
+            return True
+
+        atual = self._pipeline_job or "outro job crítico"
+        print(f"[Scheduler] ⏭️ Pulando {job_name}: {atual} ainda está em execução")
+        return False
+
+    def _sair_secao_critica(self):
+        """Libera a secao critica compartilhada do pipeline."""
+        self._pipeline_job = None
+        try:
+            self._pipeline_lock.release()
+        except RuntimeError:
+            pass
 
     @staticmethod
     def _priorizar_ligas_quarentena(slices_ruins: list[dict]) -> list[int]:
@@ -298,6 +320,27 @@ class Scheduler:
         total = len(resultado.get("preselecionados") or [])
         print(f"   ✅ Radar reconstruído: {total} jogo(s) pré-selecionado(s)")
         return total > 0
+
+    def _garantir_relatorio_diario(self) -> bool:
+        """Recupera o relatório diário se o serviço subiu depois das 06:45."""
+        agora = datetime.now(ZoneInfo(TIMEZONE))
+        horario_relatorio = agora.replace(hour=6, minute=45, second=0, microsecond=0)
+        if agora < horario_relatorio:
+            return False
+
+        hoje = agora.strftime("%Y-%m-%d")
+        ontem = (agora - timedelta(days=1)).strftime("%Y-%m-%d")
+        pendencias = (
+            not self._notification_sent(ontem, "daily_results")
+            or not self._notification_sent(hoje, "daily_report")
+            or not self._notification_sent(hoje, "daily_health")
+        )
+        if not pendencias:
+            return False
+
+        print(f"🔄 Recuperando relatório diário perdido de {hoje} (janela 06:45)...")
+        self._job_relatorio()
+        return True
 
     @staticmethod
     def _infer_conf_band(best_rule: dict | None) -> tuple[float, float]:
@@ -590,6 +633,8 @@ class Scheduler:
 
     def _job_scanner(self):
         """Job: scanner de oportunidades."""
+        if not self._entrar_secao_critica("scanner"):
+            return
         print(f"\n{'='*60}")
         print(f"🔍 JOB: Scanner de oportunidades — {datetime.now()}")
         print(f"{'='*60}")
@@ -621,9 +666,13 @@ class Scheduler:
         except Exception as e:
             print(f"❌ Erro no scanner: {e}")
             self._enviar_telegram(f"❌ Erro no scanner:\n{e}")
+        finally:
+            self._sair_secao_critica()
 
     def _job_liberacao_t30(self):
         """Job: libera os mercados na janela T-30 e publica o lote final."""
+        if not self._entrar_secao_critica("liberacao_t30"):
+            return
         print(f"\n{'='*60}")
         print(f"⏳ JOB: Liberação T-30 — {datetime.now()}")
         print(f"{'='*60}")
@@ -657,6 +706,8 @@ class Scheduler:
         except Exception as e:
             print(f"❌ Erro na liberação T-30: {e}")
             self._enviar_telegram(f"❌ Erro na liberação T-30:\n{e}")
+        finally:
+            self._sair_secao_critica()
 
     def _job_relatorio(self):
         """Job: relatório diário — resultados do dia ANTERIOR.
@@ -672,31 +723,37 @@ class Scheduler:
 
         try:
             learner = Learner(self.db)
+            hoje = datetime.now(ZoneInfo(TIMEZONE)).strftime("%Y-%m-%d")
 
             # 1. Resultados de ONTEM (dia anterior completo)
-            ontem = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+            ontem = (datetime.now(ZoneInfo(TIMEZONE)) - timedelta(days=1)).strftime("%Y-%m-%d")
             resultado_dia = learner.relatorio_resultado_dia(ontem)
             if "Nenhum resultado" not in resultado_dia and not self._notification_sent(ontem, "daily_results"):
                 self._enviar_telegram(resultado_dia)
                 self._save_notification_sent(ontem, "daily_results")
 
             # 2. Relatório de performance geral
-            msg = learner.relatorio_diario()
-            self._enviar_telegram(msg)
+            if not self._notification_sent(hoje, "daily_report"):
+                msg = learner.relatorio_diario()
+                self._enviar_telegram(msg)
+                self._save_notification_sent(hoje, "daily_report")
 
             # 3. Saúde do modelo (guard rails)
-            saude_msg = learner.relatorio_saude()
-            self._enviar_telegram(saude_msg)
+            if not self._notification_sent(hoje, "daily_health"):
+                saude_msg = learner.relatorio_saude()
+                self._enviar_telegram(saude_msg)
+                self._save_notification_sent(hoje, "daily_health")
 
             # Se modelo degradado, alertar com urgência
             check = learner.verificar_degradacao()
-            if check["degradado"] or check["pausado"]:
+            if (check["degradado"] or check["pausado"]) and not self._notification_sent(hoje, "daily_alert"):
                 urgencia = (
                     "🚨 *ALERTA: Modelo precisa de atenção!*\n\n"
                     + "\n".join(check["alertas"])
                     + "\n\nUse /treinar para retreinar."
                 )
                 self._enviar_telegram(urgencia)
+                self._save_notification_sent(hoje, "daily_alert")
 
         except Exception as e:
             print(f"❌ Erro no relatório: {e}")
@@ -772,6 +829,8 @@ class Scheduler:
           - resolve previsões aprovadas
           - fecha itens observados
         """
+        if not self._entrar_secao_critica("check_ao_vivo"):
+            return
         print(f"\n{'='*60}")
         print(f"⚽ JOB: Check ao vivo — {datetime.now()}")
         print(f"{'='*60}")
@@ -1143,6 +1202,8 @@ class Scheduler:
         except Exception as e:
             print(f"❌ Erro no check ao vivo: {e}")
             self._enviar_telegram(f"❌ Erro no check ao vivo:\n{e}")
+        finally:
+            self._sair_secao_critica()
 
     def _mercado_green_antecipado(self, item: dict, fixture: dict, stats: list[dict] | None = None) -> bool:
         """Detecta se um mercado já ficou matematicamente green antes do FT."""
