@@ -1,0 +1,209 @@
+module futebot.quarentena {
+  docs {
+    resumo: "Contrato semantico para deteccao de slices degradados, quarentena seletiva e retreino focal automatico no FuteBot."
+  }
+
+  state slice_quarentena {
+    origem: manutencao_modelo
+    fields {
+      league_id: Id
+      mercado: Texto
+      status_atual: Texto
+      modelo_versao: Texto
+    }
+  }
+
+  state ciclo_retreino_focal {
+    origem: manutencao_modelo
+    fields {
+      league_id: Id
+      motivo: Texto
+      status_atual: Texto
+    }
+  }
+
+  task avaliar_degradacao_modelo {
+    docs {
+      resumo: "Analisa a janela recente do modelo ativo, detecta slices ruins e monta os alertas operacionais."
+    }
+    input {
+      modelo_versao: Texto required
+      data_referencia: Texto required
+    }
+    output {
+      degradado: Booleano
+      pausado: Booleano
+      slices_ruins_detectados: Inteiro
+    }
+    rules {
+      modelo_versao existe
+      data_referencia existe
+    }
+    effects {
+      consulta predictions criticidade = alta
+      consulta metricas_modelo criticidade = media
+      consulta slices_degradados criticidade = alta
+      auditoria degradacao_modelo criticidade = media
+    }
+    impl {
+      py: models.learner.Learner.verificar_degradacao
+    }
+    guarantees {
+      degradado existe
+      pausado existe
+      slices_ruins_detectados existe
+    }
+    tests {
+      caso "degradacao sem slices ruins ainda retorna estrutura valida" {
+        given {
+          modelo_versao: "at_20260328_1325"
+          data_referencia: "2026-03-30"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+    }
+  }
+
+  task aplicar_quarentena_seletiva {
+    docs {
+      resumo: "Desativa apenas slices degradados da versao ativa, sem pausar o bot inteiro."
+    }
+    input {
+      modelo_versao: Texto required
+      data_referencia: Texto required
+    }
+    output {
+      slices_desativados: Inteiro
+      scanner_pausado: Booleano
+    }
+    rules {
+      modelo_versao existe
+      data_referencia existe
+    }
+    effects {
+      consulta slices_degradados criticidade = alta
+      persistencia strategies criticidade = alta
+      auditoria quarentena_seletiva criticidade = media
+    }
+    impl {
+      py: pipeline.scanner.Scanner._verificar_auto_pause
+    }
+    guarantees {
+      slices_desativados existe
+      scanner_pausado existe
+    }
+    tests {
+      caso "quarentena seletiva nao precisa pausar o scanner inteiro" {
+        given {
+          modelo_versao: "at_20260328_1325"
+          data_referencia: "2026-03-30"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+    }
+  }
+
+  task priorizar_ligas_quarentena {
+    docs {
+      resumo: "Ordena ligas em quarentena pela urgencia de manutencao para alimentar o retreino focal."
+    }
+    input {
+      modelo_versao: Texto required
+      data_referencia: Texto required
+    }
+    output {
+      ligas_alvo: Json
+      total_ligas_alvo: Inteiro
+    }
+    rules {
+      modelo_versao existe
+      data_referencia existe
+    }
+    effects {
+      consulta slices_degradados criticidade = alta
+      auditoria priorizacao_quarentena criticidade = media
+    }
+    impl {
+      py: pipeline.scheduler.Scheduler._priorizar_ligas_quarentena
+    }
+    guarantees {
+      ligas_alvo existe
+      total_ligas_alvo existe
+    }
+    tests {
+      caso "priorizacao pode retornar lista vazia" {
+        given {
+          modelo_versao: "at_20260328_1325"
+          data_referencia: "2026-03-30"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+    }
+  }
+
+  task executar_retreino_focal_quarentena {
+    docs {
+      resumo: "Roda o AutoTuner apenas nas ligas em quarentena, com custo baixo e trials reduzidos."
+    }
+    input {
+      modelo_versao: Texto required
+      data_referencia: Texto required
+    }
+    output {
+      ligas_processadas: Inteiro
+      strategies_ativas_geradas: Inteiro
+    }
+    rules {
+      modelo_versao existe
+      data_referencia existe
+    }
+    effects {
+      consulta slices_degradados criticidade = alta
+      persistencia models criticidade = alta
+      persistencia strategies criticidade = alta
+      notificacao telegram_admin detalhe_retreino_focal criticidade = media
+      auditoria retreino_focal criticidade = alta
+    }
+    impl {
+      py: pipeline.scheduler.Scheduler._job_retreino_quarentena
+    }
+    guarantees {
+      ligas_processadas existe
+      strategies_ativas_geradas existe
+    }
+    tests {
+      caso "retreino focal pode encerrar sem ligas alvo" {
+        given {
+          modelo_versao: "at_20260328_1325"
+          data_referencia: "2026-03-30"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+    }
+  }
+
+  flow manutencao_quarentena_futebot {
+    modelo_versao: Texto
+    data_referencia: Texto
+    etapa degradacao usa avaliar_degradacao_modelo com modelo_versao = modelo_versao, data_referencia = data_referencia em_sucesso quarentena em_erro retreino
+    etapa quarentena usa aplicar_quarentena_seletiva com modelo_versao = modelo_versao, data_referencia = data_referencia depende_de degradacao em_sucesso priorizacao em_erro retreino
+    etapa priorizacao usa priorizar_ligas_quarentena com modelo_versao = modelo_versao, data_referencia = data_referencia depende_de quarentena
+    etapa retreino usa executar_retreino_focal_quarentena com modelo_versao = modelo_versao, data_referencia = data_referencia depende_de priorizacao
+    effects {
+      auditoria manutencao_quarentena criticidade = alta
+      persistencia estado_modelo criticidade = alta
+    }
+  }
+}

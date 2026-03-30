@@ -1,0 +1,14 @@
+{
+  "name": "futebot",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Tooling auxiliar para verificacao de modulos Sema no FuteBot.",
+  "scripts": {
+    "sema:contexto": "sema contexto-ia sema/operacao_futebot.sema",
+    "sema:validar": "sema validar sema/operacao_futebot.sema --json",
+    "sema:verificar": "sema verificar sema --json"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.6"
+  }
+}

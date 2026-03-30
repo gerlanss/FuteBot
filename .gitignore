@@ -5,6 +5,8 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+node_modules/
+.tmp/
 tests/
 tmp_run_scan.py
 *.db

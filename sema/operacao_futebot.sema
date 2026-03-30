@@ -1,0 +1,223 @@
+module futebot.operacao {
+  docs {
+    resumo: "Contrato semantico da operacao diaria do FuteBot, cobrindo radar pre-live, liberacao T-30, acompanhamento live e relatorio operacional."
+  }
+
+  state ciclo_oportunidade {
+    origem: operacao_diaria
+    fields {
+      fixture_id: Id
+      mercado: Texto
+      status_atual: Texto
+      data_operacao: Texto
+    }
+  }
+
+  state ciclo_liberacao {
+    origem: operacao_diaria
+    fields {
+      fixture_id: Id
+      mercado: Texto
+      status_atual: Texto
+    }
+  }
+
+  state ciclo_resultado {
+    origem: operacao_diaria
+    fields {
+      fixture_id: Id
+      mercado: Texto
+      resultado_atual: Texto
+    }
+  }
+
+  task gerar_radar_pre_live {
+    docs {
+      resumo: "Executa o scanner pre-live e reconstrui o radar do dia quando necessario."
+    }
+    input {
+      data_operacao: Texto required
+      referencia_iso: Texto required
+    }
+    output {
+      radar_id: Id
+      jogos_analisados: Inteiro
+      jogos_no_radar: Inteiro
+    }
+    rules {
+      data_operacao existe
+      referencia_iso existe
+    }
+    effects {
+      consulta fixtures criticidade = alta
+      consulta odds criticidade = media
+      persistencia radar_diario criticidade = alta
+      auditoria scanner_pre_live criticidade = media
+    }
+    impl {
+      py: pipeline.scheduler.Scheduler._garantir_radar_do_dia
+    }
+    guarantees {
+      radar_id existe
+      jogos_analisados existe
+      jogos_no_radar existe
+    }
+    tests {
+      caso "radar vazio ainda e valido" {
+        given {
+          data_operacao: "2026-03-30"
+          referencia_iso: "2026-03-30T08:10:00-04:00"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+    }
+  }
+
+  task liberar_mercados_t30 {
+    docs {
+      resumo: "Reavalia o radar do dia na janela T-30 e decide o que continua de pe, o que e barrado e o que pode ser publicado."
+    }
+    input {
+      data_operacao: Texto required
+      referencia_iso: Texto required
+    }
+    output {
+      entradas_liberadas: Inteiro
+      entradas_barradas: Inteiro
+    }
+    rules {
+      data_operacao existe
+      referencia_iso existe
+    }
+    effects {
+      consulta fixtures criticidade = alta
+      consulta contexto_live criticidade = media
+      persistencia liberacao_t30 criticidade = alta
+      notificacao telegram_publico detalhe_liberacao_t30 criticidade = alta
+      auditoria liberacao_t30 criticidade = media
+    }
+    impl {
+      py: pipeline.scheduler.Scheduler._job_liberacao_t30
+    }
+    guarantees {
+      entradas_liberadas existe
+      entradas_barradas existe
+    }
+    tests {
+      caso "liberacao sem candidatos nao quebra o fluxo" {
+        given {
+          data_operacao: "2026-03-30"
+          referencia_iso: "2026-03-30T08:10:00-04:00"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+    }
+  }
+
+  task monitorar_ao_vivo {
+    docs {
+      resumo: "Acompanha jogos ativos, resolve entradas e emite atualizacoes relevantes no Telegram."
+    }
+    input {
+      data_operacao: Texto required
+      referencia_iso: Texto required
+    }
+    output {
+      atualizacoes_publicas: Inteiro
+      alertas_admin: Inteiro
+    }
+    rules {
+      data_operacao existe
+      referencia_iso existe
+    }
+    effects {
+      consulta fixtures criticidade = alta
+      consulta stats_partida criticidade = media
+      persistencia predictions criticidade = alta
+      notificacao telegram_publico detalhe_resultado_live criticidade = alta
+      notificacao telegram_admin detalhe_alerta_live criticidade = media
+      auditoria check_ao_vivo criticidade = media
+    }
+    impl {
+      py: pipeline.scheduler.Scheduler._job_check_ao_vivo
+    }
+    guarantees {
+      atualizacoes_publicas existe
+      alertas_admin existe
+    }
+    tests {
+      caso "ciclo live aceita ausencia de alertas" {
+        given {
+          data_operacao: "2026-03-30"
+          referencia_iso: "2026-03-30T10:15:00-04:00"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+    }
+  }
+
+  task emitir_relatorio_diario {
+    docs {
+      resumo: "Envia o resumo de performance, a saude do modelo e alertas de degradacao."
+    }
+    input {
+      data_operacao: Texto required
+      referencia_iso: Texto required
+    }
+    output {
+      relatorio_emitido: Booleano
+      saude_emitida: Booleano
+    }
+    rules {
+      data_operacao existe
+      referencia_iso existe
+    }
+    effects {
+      consulta predictions criticidade = alta
+      consulta saude_modelo criticidade = media
+      notificacao telegram_admin detalhe_relatorio_diario criticidade = alta
+      auditoria relatorio_diario criticidade = media
+    }
+    impl {
+      py: pipeline.scheduler.Scheduler._job_relatorio
+    }
+    guarantees {
+      relatorio_emitido existe
+      saude_emitida existe
+    }
+    tests {
+      caso "relatorio atrasado pode ser recuperado no restart" {
+        given {
+          data_operacao: "2026-03-30"
+          referencia_iso: "2026-03-30T08:11:22-04:00"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+    }
+  }
+
+  flow operacao_diaria_futebot {
+    data_operacao: Texto
+    referencia_iso: Texto
+    etapa radar usa gerar_radar_pre_live com data_operacao = data_operacao, referencia_iso = referencia_iso em_sucesso liberacao em_erro relatorio
+    etapa liberacao usa liberar_mercados_t30 com data_operacao = data_operacao, referencia_iso = referencia_iso depende_de radar em_sucesso acompanhamento em_erro relatorio
+    etapa acompanhamento usa monitorar_ao_vivo com data_operacao = data_operacao, referencia_iso = referencia_iso depende_de liberacao
+    etapa relatorio usa emitir_relatorio_diario com data_operacao = data_operacao, referencia_iso = referencia_iso depende_de radar
+    effects {
+      auditoria operacao_diaria criticidade = alta
+      persistencia estado_operacional criticidade = alta
+    }
+  }
+}

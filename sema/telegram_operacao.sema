@@ -1,0 +1,245 @@
+module futebot.telegram {
+  docs {
+    resumo: "Contrato semantico da interface operacional do FuteBot no Telegram, cobrindo onboarding, comandos, callbacks e controle de acesso."
+  }
+
+  state sessao_telegram {
+    origem: interface_operacional
+    fields {
+      chat_id: Id
+      perfil_acesso: Texto
+      menu_atual: Texto
+      callback_atual: Texto
+    }
+  }
+
+  state comando_telegram {
+    origem: interface_operacional
+    fields {
+      comando: Texto
+      exige_admin: Booleano
+      origem: Texto
+    }
+  }
+
+  task registrar_chat_e_menu {
+    docs {
+      resumo: "Registra o chat no bot, configura comandos visiveis e entrega o menu inicial adequado ao perfil do usuario."
+    }
+    input {
+      chat_id: Id required
+      perfil_acesso: Texto required
+    }
+    output {
+      chat_registrado: Booleano
+      menu_entregue: Booleano
+    }
+    rules {
+      chat_id existe
+      perfil_acesso existe
+    }
+    effects {
+      persistencia telegram_chat criticidade = alta
+      notificacao telegram_privado detalhe_boas_vindas criticidade = alta
+      auditoria telegram_start criticidade = media
+    }
+    impl {
+      py: services.telegram_bot.cmd_start
+    }
+    guarantees {
+      chat_registrado existe
+      menu_entregue existe
+    }
+    tests {
+      caso "start admin recebe menu operacional" {
+        given {
+          chat_id: 531620892
+          perfil_acesso: "admin"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+    }
+  }
+
+  task executar_comando_operacional {
+    docs {
+      resumo: "Executa um comando do Telegram, respeitando as restricoes de acesso e roteando para scanner, saude, treino ou status."
+    }
+    input {
+      chat_id: Id required
+      perfil_acesso: Texto required
+      comando: Texto required
+      origem: Texto required
+    }
+    output {
+      comando_executado: Booleano
+      acesso_liberado: Booleano
+    }
+    rules {
+      chat_id existe
+      perfil_acesso existe
+      comando existe
+      origem existe
+    }
+    effects {
+      consulta scanner criticidade = alta
+      consulta learner criticidade = media
+      consulta autotuner criticidade = media
+      notificacao telegram_privado detalhe_comando criticidade = alta
+      auditoria comando_telegram criticidade = media
+    }
+    impl {
+      py: services.telegram_bot._executar_via_callback
+    }
+    guarantees {
+      comando_executado existe
+      acesso_liberado existe
+    }
+    error {
+      acesso_restrito: "O comando exige perfil de administrador."
+      comando_desconhecido: "O callback ou comando informado nao existe no mapa do bot."
+      falha_operacional: "A execucao do comando falhou e retornou mensagem de erro."
+    }
+    tests {
+      caso "comando publico pode rodar sem admin" {
+        given {
+          chat_id: 1000
+          perfil_acesso: "publico"
+          comando: "resultados"
+          origem: "slash"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+      caso "comando admin bloqueia usuario comum" {
+        given {
+          chat_id: 1000
+          perfil_acesso: "publico"
+          comando: "saude"
+          origem: "slash"
+        }
+
+        expect {
+          sucesso: falso
+        }
+
+        error {
+          tipo: "acesso_restrito"
+        }
+      }
+    }
+  }
+
+  task rotear_callback_menu {
+    docs {
+      resumo: "Recebe callback_data do menu inline, valida permissao e dispara a mesma logica dos comandos equivalentes."
+    }
+    input {
+      chat_id: Id required
+      perfil_acesso: Texto required
+      callback_data: Texto required
+    }
+    output {
+      callback_reconhecido: Booleano
+      resposta_emitida: Booleano
+    }
+    rules {
+      chat_id existe
+      perfil_acesso existe
+      callback_data existe
+    }
+    effects {
+      consulta callback_map criticidade = alta
+      notificacao telegram_privado detalhe_callback criticidade = alta
+      auditoria callback_telegram criticidade = media
+    }
+    impl {
+      py: services.telegram_bot._callback_handler
+    }
+    guarantees {
+      callback_reconhecido existe
+      resposta_emitida existe
+    }
+    error {
+      callback_desconhecido: "O botao nao esta mapeado para nenhum handler."
+      acesso_restrito: "O callback exige perfil de administrador."
+    }
+    tests {
+      caso "menu principal responde callback valido" {
+        given {
+          chat_id: 531620892
+          perfil_acesso: "admin"
+          callback_data: "cmd_menu"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+    }
+  }
+
+  task publicar_mensagem_automatica {
+    docs {
+      resumo: "Entrega mensagens automaticas do scheduler para chats registrados, com parse adequado e fallback seguro."
+    }
+    input {
+      tipo_mensagem: Texto required
+      destino: Texto required
+      parse_mode: Texto required
+    }
+    output {
+      mensagens_entregues: Inteiro
+      mensagens_falharam: Inteiro
+    }
+    rules {
+      tipo_mensagem existe
+      destino existe
+      parse_mode existe
+    }
+    effects {
+      notificacao telegram_privado detalhe_scheduler criticidade = alta
+      auditoria entrega_telegram criticidade = media
+    }
+    impl {
+      py: services.telegram_bot._send_to_chats
+    }
+    guarantees {
+      mensagens_entregues existe
+      mensagens_falharam existe
+    }
+    tests {
+      caso "mensagem automatica admite falha parcial" {
+        given {
+          tipo_mensagem: "relatorio_diario"
+          destino: "admins"
+          parse_mode: "HTML"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+    }
+  }
+
+  flow interface_operacional_telegram {
+    chat_id: Id
+    perfil_acesso: Texto
+    comando_ou_callback: Texto
+    origem: Texto
+    etapa onboarding usa registrar_chat_e_menu com chat_id = chat_id, perfil_acesso = perfil_acesso em_sucesso roteamento em_erro publicacao
+    etapa roteamento usa rotear_callback_menu com chat_id = chat_id, perfil_acesso = perfil_acesso, callback_data = comando_ou_callback depende_de onboarding em_sucesso comandos em_erro comandos
+    etapa comandos usa executar_comando_operacional com chat_id = chat_id, perfil_acesso = perfil_acesso, comando = comando_ou_callback, origem = origem depende_de roteamento
+    etapa publicacao usa publicar_mensagem_automatica com tipo_mensagem = origem, destino = perfil_acesso, parse_mode = HTML depende_de comandos
+    effects {
+      auditoria interface_operacional_telegram criticidade = alta
+      persistencia telemetria_telegram criticidade = media
+    }
+  }
+}

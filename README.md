@@ -163,6 +163,39 @@ Dependencias Python estao em `requirements.txt`.
 ## Documentacao complementar
 
 - `docs/como-o-futebot-funciona.md`: explicacao detalhada do pipeline e da logica operacional
+- `docs/sema-no-futebot.md`: como usar Sema no projeto e quando modelar antes de editar Python
+
+## Sema no projeto
+
+O FuteBot agora tambem tem uma camada inicial de modelagem com Sema para fluxos operacionais mais sensiveis.
+
+Arquivo inicial:
+
+- `sema/operacao_futebot.sema`
+- `sema/quarentena_retreino_focal.sema`
+- `sema/telegram_operacao.sema`
+
+Use Sema principalmente quando a mudanca envolver:
+
+- contratos de operacao
+- fluxo entre scanner, liberacao T-30, live e relatorios
+- estados de previsoes
+- garantias entre notificacao, persistencia e auditoria
+
+Fluxo curto recomendado:
+
+1. `sema contexto-ia sema/operacao_futebot.sema`
+2. `sema ir sema/operacao_futebot.sema --json`
+3. edite o modulo
+4. `sema formatar sema/operacao_futebot.sema`
+5. `sema validar sema/operacao_futebot.sema --json`
+6. `sema verificar sema`
+
+Atalhos disponiveis:
+
+- `npm run sema:contexto`
+- `npm run sema:validar`
+- `npm run sema:verificar`
 
 ## Declaracao de uso
 
