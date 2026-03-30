@@ -60,7 +60,7 @@ O scheduler executa:
 Arquivos principais:
 
 - `pipeline/scheduler.py`: agendamentos e jobs recorrentes
-- `services/telegram_bot.py`: comandos, mensagens e interface operacional via Telegram
+- `services/telegram_bot.py`: comandos, callbacks e fan-out de mensagens automaticas via Telegram
 - `bot.py`: entrypoint do processo principal
 
 ### 4. Aprendizado e manutencao
@@ -140,7 +140,7 @@ Isso evita retrabalhar tudo quando o problema esta concentrado em poucos segment
 - `models/predictor.py`: inferencia por liga
 - `models/autotuner.py`: retreino focal
 - `models/market_discovery.py`: descoberta de strategies
-- `services/telegram_bot.py`: superficie operacional do bot
+- `services/telegram_bot.py`: superficie operacional do bot e entrega automatica para admins/chats registrados
 - `data/database.py`: estado e auditoria
 
 ## Requisitos
@@ -169,6 +169,8 @@ Dependencias Python estao em `requirements.txt`.
 
 O FuteBot agora tambem tem uma camada inicial de modelagem com Sema para fluxos operacionais mais sensiveis.
 
+O modulo de Telegram agora esta alinhado com o runtime real: a task `publicar_mensagem_automatica` referencia `services.telegram_bot._send_to_chats`, que centraliza envio automatico para admins, chats registrados e fallback sem parse quando necessario.
+
 Arquivo inicial:
 
 - `sema/operacao_futebot.sema`
@@ -189,6 +191,7 @@ Fluxo curto recomendado:
 
 1. `sema contexto-ia sema/operacao_futebot.sema`
 2. `sema ir sema/operacao_futebot.sema --json`
+3. `sema drift sema/operacao_futebot.sema --json`
 3. edite o modulo
 4. `sema formatar sema/operacao_futebot.sema`
 5. `sema validar sema/operacao_futebot.sema --json`

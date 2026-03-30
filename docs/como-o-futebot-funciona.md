@@ -425,6 +425,18 @@ Hoje o bot separa:
 - bulk
 - alertas de manutencao
 
+No runtime, a entrega automatica passa por `services.telegram_bot._send_to_chats`.
+
+Essa funcao:
+
+- aceita texto unico ou blocos ja quebrados
+- resolve destino logico para `admins`, `registrados` ou chat numerico explicito
+- respeita `alerts_enabled` por chat quando existir preferencia salva
+- tenta envio com `parse_mode` e cai para texto puro se o parse falhar
+- devolve resumo estruturado com `destinatarios`, `entregues` e `falhas`
+
+`enviar_mensagem(...)` ficou como wrapper de compatibilidade para o scheduler legado, e `broadcast_scan_publico(...)` usa a mesma primitiva para evitar logica duplicada e drift entre contrato e Python.
+
 
 ## Formato visual
 
@@ -453,6 +465,8 @@ Hoje o FuteBot funciona assim:
 6. salva tudo para auditoria
 7. aprende por liga e mercado
 8. mantem manutencao automatica sem derrubar o bot inteiro
+
+Na superficie de Telegram, isso agora tambem significa que o contrato semantico e o runtime apontam para a mesma verdade de entrega automatica, sem simbolo fantasma no meio do caminho.
 
 
 ## Resumo pratico

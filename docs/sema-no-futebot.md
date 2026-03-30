@@ -45,6 +45,8 @@ Na interface operacional, o modulo de Telegram cobre:
 - comandos publicos vs administrativos
 - publicacao de mensagens automaticas do scheduler
 
+Hoje esse contrato esta amarrado ao runtime real via `services.telegram_bot._send_to_chats`, que centraliza fan-out, destino logico (`admins` e `registrados`), fallback sem parse e resumo estruturado de entrega.
+
 No lado de integracoes, o modulo externo cobre:
 
 - status e saneamento da API-Football
@@ -97,6 +99,7 @@ Se a mudanca for em comandos, menu ou callbacks do bot:
 1. Rode `sema contexto-ia sema/telegram_operacao.sema`
 2. Rode `sema ast sema/telegram_operacao.sema --json`
 3. Rode `sema ir sema/telegram_operacao.sema --json`
+4. Rode `sema drift sema/telegram_operacao.sema --json`
 
 Se a mudanca for em API-Football, odds ou bulk download:
 
@@ -115,7 +118,8 @@ Depois de editar:
 1. Rode `sema formatar sema/operacao_futebot.sema`
 2. Rode `sema validar sema/operacao_futebot.sema --json`
 3. Se der ruim, rode `sema diagnosticos sema/operacao_futebot.sema --json`
-4. Feche com `sema verificar sema`
+4. Rode `sema drift sema --json` para garantir que os `impl` continuam apontando para simbolos reais
+5. Feche com `sema verificar sema`
 
 Atalho pelo projeto:
 
@@ -142,6 +146,7 @@ Preferencia de pasta:
 - nao tratar Sema como gerador magico de UI
 - nao sair gerando codigo derivado sem validar IR e diagnosticos
 - nao deixar contrato `.sema` velho e codigo Python seguindo outra verdade
+- nao deixar `impl` verde no papel e quebrado no runtime; se o simbolo nao existe, ajuste o contrato ou crie a implementacao real
 
 ## Proximo passo natural
 
