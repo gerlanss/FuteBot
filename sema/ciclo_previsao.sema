@@ -136,7 +136,7 @@ module futebot.previsao {
 
   task acompanhar_previsao_live {
     docs {
-      resumo: "Monitora a previsao aprovada ao vivo,emitindo sinal,cancelamento ou resolucao antecipada quando o contexto permitir,com piso operacional de confianca em 60%."
+      resumo: "Monitora a previsao aprovada ao vivo,emitindo sinal,cancelamento ou resolucao antecipada quando o contexto permitir,com piso operacional de confianca em 60%; leituras barradas no pre-live que ficaram em reavaliacao tambem seguem o mesmo watch live e podem voltar como oportunidade publica."
     }
     input {
       data_operacao: Texto required

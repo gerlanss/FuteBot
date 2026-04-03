@@ -78,7 +78,7 @@ module futebot.operacao {
 
   task liberar_mercados_t30 {
     docs {
-      resumo: "Reavalia o radar do dia na janela T-30 e decide o que continua de pe,o que e barrado e o que pode ser publicado,aplicando gate final de OddsPapi/1xBet,odd minima simples de 1.40,EV minimo e combos apenas para selecoes ja aprovadas."
+      resumo: "Reavalia o radar do dia na janela T-30 e decide o que continua de pe,o que e barrado e o que pode ser publicado,aplicando gate final de OddsPapi/1xBet,odd minima simples de 1.40,EV minimo e combos apenas para selecoes ja aprovadas; quando uma entrada e barrada,o publico deve ser avisado e o fixture segue elegivel para observacao live."
     }
     input {
       data_operacao: Texto required
@@ -132,7 +132,7 @@ module futebot.operacao {
 
   task monitorar_ao_vivo {
     docs {
-      resumo: "Acompanha jogos ativos,resolve entradas e emite atualizacoes relevantes no Telegram,usando piso operacional de confianca do modelo em 60% para pre-live e live."
+      resumo: "Acompanha jogos ativos,resolve entradas e emite atualizacoes relevantes no Telegram,usando piso operacional de confianca do modelo em 60% para pre-live e live; itens barrados no pre-live com reavaliacao pendente continuam em watch live e podem virar alerta publico unitario."
     }
     input {
       data_operacao: Texto required

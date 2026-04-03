@@ -233,6 +233,18 @@ class SchedulerTests(unittest.TestCase):
 
 
 class TelegramBotMessagingTests(unittest.TestCase):
+    def test_reply_text_safe_retries_on_timeout(self):
+        import services.telegram_bot as telegram_bot
+        from telegram.error import TimedOut
+
+        message = SimpleNamespace()
+        message.reply_text = AsyncMock(side_effect=[TimedOut("slow"), {"ok": True}])
+
+        resultado = asyncio.run(telegram_bot._reply_text_safe(message, "ping"))
+
+        self.assertEqual(resultado, {"ok": True})
+        self.assertEqual(message.reply_text.await_count, 2)
+
     def test_send_to_chats_resolves_admins_and_falls_back_without_parse_mode(self):
         import services.telegram_bot as telegram_bot
 
@@ -1078,7 +1090,41 @@ class ScannerAuditFormattingTests(unittest.TestCase):
         self.assertIn("Entradas barradas", joined)
         self.assertIn("Entrada cancelada nesta janela.", joined)
         self.assertIn("• Desfalques ofensivos importantes.", joined)
+        self.assertIn("Segue em observação para live.", joined)
         self.assertIn("1xBet", joined)
+
+    def test_formatar_relatorio_rejeitado_explica_watch_live(self):
+        from pipeline.scanner import Scanner
+
+        scanner = Scanner.__new__(Scanner)
+        scanner.db = MagicMock()
+        scanner.db.metricas_modelo.return_value = {"total": 0}
+
+        msgs = scanner.formatar_relatorio({
+            "fixtures": 3,
+            "previsoes": 3,
+            "tips_brutas": 9,
+            "tips_pos_filtros": 3,
+            "tips_bloqueadas_ev": 1,
+            "tips_enviadas_llm": 1,
+            "tips_aprovadas_llm": 0,
+            "tips_rejeitadas_llm": [{
+                "league_id": 71,
+                "home_name": "San Lorenzo",
+                "away_name": "Estudiantes",
+                "mercado": "under35",
+                "descricao": "Under 3.5 gols",
+                "prob_modelo": 0.64,
+                "llm_validacao": {"motivo": "Odd abaixo do mínimo operacional."},
+            }],
+            "ev_positivas": [],
+            "combos": [],
+            "data": "2026-04-03",
+        })
+
+        joined = "\n\n".join(texto for texto, _ in msgs)
+        self.assertIn("Segue em observação para live.", joined)
+        self.assertIn("Se o jogo continuar travado", joined)
 
     def test_formatar_resumo_revisao_shortens_llm_text(self):
         from pipeline.scanner import Scanner
@@ -1548,6 +1594,43 @@ class LiveIntelligenceTests(unittest.TestCase):
         self.assertEqual(leitura["veredito"], "sinal_live")
         self.assertEqual(leitura["estado_partida"], "travado")
         self.assertIn("Estado: travado.", leitura["mensagem"])
+
+
+class SchedulerLivePublicFormattingTests(unittest.TestCase):
+    def test_formatar_sinais_live_publicos_destaca_reavaliacao_bloqueada(self):
+        from pipeline.scheduler import Scheduler
+
+        texto = Scheduler._formatar_sinais_live_publicos([{
+            "home_name": "San Lorenzo",
+            "away_name": "Estudiantes",
+            "descricao": "Under 3.5 gols",
+            "watch_type": "blocked_recheck",
+            "elapsed": 62,
+            "note": "Jogo segue travado e sem pressão real.",
+            "payload": {"last_live_message": "Jogo segue travado e sem pressão real."},
+        }])
+
+        self.assertIn("Oportunidades live do FuteBot", texto)
+        self.assertIn("Reavaliacao live", texto)
+        self.assertIn("San Lorenzo x Estudiantes", texto)
+        self.assertIn("Entrada barrada no pre-live, mas o jogo seguiu em observacao.", texto)
+        self.assertIn("Minuto 62", texto)
+
+    def test_formatar_sinais_live_publicos_destaca_sinal_liberado(self):
+        from pipeline.scheduler import Scheduler
+
+        texto = Scheduler._formatar_sinais_live_publicos([{
+            "home_name": "Casa",
+            "away_name": "Fora",
+            "descricao": "Over 2.5 gols",
+            "watch_type": "approved_prelive",
+            "elapsed": 55,
+            "note": "Ritmo aumentou e a pressão ofensiva apareceu.",
+            "payload": {"last_live_message": "Ritmo aumentou e a pressão ofensiva apareceu."},
+        }])
+
+        self.assertIn("Entrada live liberada", texto)
+        self.assertIn("Leitura confirmada no acompanhamento ao vivo.", texto)
 
 
 if __name__ == "__main__":

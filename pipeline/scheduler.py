@@ -1068,6 +1068,7 @@ class Scheduler:
                             )
                             payload["last_live_verdict"] = veredito
                             payload["last_live_minute"] = elapsed
+                            payload["last_live_message"] = leitura.get("mensagem", item.get("note"))
                             note = leitura.get("mensagem", item.get("note"))
                             novo_status = None
                             if veredito == "cancelar":
@@ -1173,6 +1174,11 @@ class Scheduler:
             if alertas_admin:
                 bloco = "⚽ <b>Leitura live do FuteBot</b>\n\n" + "\n\n".join(alertas_admin)
                 self._enviar_telegram(bloco)
+
+            if sinais_live:
+                bloco_sinais_live = self._formatar_sinais_live_publicos(sinais_live)
+                if bloco_sinais_live:
+                    self._enviar_telegram_publico(bloco_sinais_live)
 
             combos_live = self._gerar_combos_live(sinais_live)
             if combos_live:
@@ -1577,6 +1583,7 @@ class Scheduler:
             payload = dict(base_payload)
             payload["last_live_verdict"] = "sinal_live"
             payload["last_live_minute"] = leitura.get("elapsed")
+            payload["last_live_message"] = leitura.get("mensagem")
             payload["origin"] = "fixture_live_scan"
             item_salvo = {
                 **item_virtual,
@@ -1750,6 +1757,40 @@ class Scheduler:
                 )
         linhas.append("\n<i>Combo live sugestivo. Nao entra nas metricas oficiais do dia.</i>")
         return "\n".join(linhas)
+
+    @staticmethod
+    def _formatar_sinais_live_publicos(sinais_live: list[dict]) -> str:
+        """Formata sinais live unitarios para o publico, inclusive reavaliacoes."""
+        if not sinais_live:
+            return ""
+
+        linhas = ["⚽ <b>Oportunidades live do FuteBot</b>"]
+        for item in sinais_live:
+            home = item.get("home_name", "?")
+            away = item.get("away_name", "?")
+            mercado = item.get("descricao") or item.get("mercado", "")
+            minuto = item.get("elapsed") or "?"
+            payload = item.get("payload") or {}
+            mensagem = payload.get("last_live_message") or item.get("note") or "Sem leitura adicional."
+            if item.get("watch_type") == "blocked_recheck":
+                titulo = "🟡 <b>Reavaliacao live</b>"
+                contexto = "Entrada barrada no pre-live, mas o jogo seguiu em observacao."
+            else:
+                titulo = "🟢 <b>Entrada live liberada</b>"
+                contexto = "Leitura confirmada no acompanhamento ao vivo."
+
+            linhas.append(
+                "\n".join([
+                    "",
+                    titulo,
+                    f"<b>{home} x {away}</b>",
+                    f"• {mercado}",
+                    f"• Minuto {minuto}",
+                    f"• {mensagem}",
+                    f"<i>{contexto}</i>",
+                ]).rstrip()
+            )
+        return "\n\n".join(linhas)
 
     def _post_telegram(self, chat_id: int, texto: str, reply_markup: dict | None = None) -> bool:
         """Envia uma mensagem para um chat específico via API HTTP do Telegram."""

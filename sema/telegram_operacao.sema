@@ -1,6 +1,6 @@
 module futebot.telegram {
   docs {
-    resumo: "Contrato semantico da interface operacional do FuteBot no Telegram, cobrindo onboarding, comandos, callbacks e controle de acesso."
+    resumo: "Contrato semantico da interface operacional do FuteBot no Telegram,cobrindo onboarding,comandos,callbacks e controle de acesso."
   }
 
   state sessao_telegram {
@@ -24,7 +24,7 @@ module futebot.telegram {
 
   task registrar_chat_e_menu {
     docs {
-      resumo: "Registra o chat no bot, configura comandos visiveis e entrega o menu inicial adequado ao perfil do usuario."
+      resumo: "Registra o chat no bot,configura comandos visiveis e entrega o menu inicial adequado ao perfil do usuario."
     }
     input {
       chat_id: Id required
@@ -66,7 +66,7 @@ module futebot.telegram {
 
   task executar_comando_operacional {
     docs {
-      resumo: "Executa um comando do Telegram, respeitando as restricoes de acesso e roteando para scanner, saude, treino ou status."
+      resumo: "Executa um comando do Telegram,respeitando as restricoes de acesso e roteando para scanner,saude,treino ou status,com retry curto quando o transporte do Telegram oscila."
     }
     input {
       chat_id: Id required
@@ -137,7 +137,7 @@ module futebot.telegram {
 
   task rotear_callback_menu {
     docs {
-      resumo: "Recebe callback_data do menu inline, valida permissao e dispara a mesma logica dos comandos equivalentes."
+      resumo: "Recebe callback_data do menu inline,valida permissao e dispara a mesma logica dos comandos equivalentes,com tolerancia curta a timeout de transporte."
     }
     input {
       chat_id: Id required
@@ -186,7 +186,7 @@ module futebot.telegram {
 
   task publicar_mensagem_automatica {
     docs {
-      resumo: "Entrega mensagens automaticas ja geradas para os destinos do Telegram, com parse adequado e fallback seguro."
+      resumo: "Entrega mensagens automaticas ja geradas para os destinos do Telegram,com parse adequado e fallback seguro; barradas no T-30 devem avisar continuidade do watch live,e sinais live unitarios tambem precisam chegar ao publico."
     }
     input {
       texto: Texto required

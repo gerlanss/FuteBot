@@ -1887,6 +1887,10 @@ class Scanner:
                     linhas.append(f"  🔗 {self._link_bet365_html(tip)}")
                     if llm.get("motivo"):
                         linhas.extend(self._formatar_resumo_revisao(llm["motivo"], bloqueado=True, tip=tip))
+                    observacao_live = self._observacao_bloqueio_live(tip)
+                    if observacao_live:
+                        linhas.append("  👀 <i>Segue em observação para live.</i>")
+                        linhas.append(f"  • {observacao_live}.")
                 msgs.append(("\n".join(linhas).rstrip(), []))
 
         return msgs

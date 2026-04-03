@@ -20,6 +20,7 @@ Uso:
   python bot.py
 """
 
+import asyncio
 import os
 import sys
 import subprocess
@@ -44,6 +45,7 @@ from telegram.ext import (
     ContextTypes,
 )
 from telegram.constants import ParseMode
+from telegram.error import NetworkError, TimedOut
 
 from config import (
     TELEGRAM_TOKEN,
@@ -184,11 +186,11 @@ async def _garantir_admin_message(message) -> bool:
 async def _reply_html(message, texto: str, reply_markup=None):
     """Envia resposta HTML com fallback para texto puro."""
     try:
-        await message.reply_text(
+        await _reply_text_safe(
+            message,
             texto,
             parse_mode=ParseMode.HTML,
             reply_markup=reply_markup,
-            disable_web_page_preview=True,
         )
     except Exception:
         limpo = (
@@ -196,11 +198,36 @@ async def _reply_html(message, texto: str, reply_markup=None):
             .replace("<code>", "").replace("</code>", "")
             .replace("<i>", "").replace("</i>", "")
         )
-        await message.reply_text(
+        await _reply_text_safe(
+            message,
             limpo,
             reply_markup=reply_markup,
-            disable_web_page_preview=True,
         )
+
+
+async def _reply_text_safe(message, texto: str, parse_mode=None, reply_markup=None, disable_web_page_preview=True):
+    """Envia resposta ao Telegram com retry curto para instabilidade de transporte."""
+    payload = {
+        "text": texto,
+        "reply_markup": reply_markup,
+        "disable_web_page_preview": disable_web_page_preview,
+    }
+    if parse_mode is not None:
+        payload["parse_mode"] = parse_mode
+
+    ultima_exc = None
+    for tentativa in range(2):
+        try:
+            return await message.reply_text(**payload)
+        except (TimedOut, NetworkError) as exc:
+            ultima_exc = exc
+            if tentativa == 1:
+                raise
+            await asyncio.sleep(1.5)
+    if ultima_exc:
+        raise ultima_exc
+
+    return None
 
 
 def _formatar_modelo_html(treino: dict | None) -> str:
@@ -664,7 +691,7 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _registrar_update(update)
     if not await _garantir_admin_message(update.message):
         return
-    await update.message.reply_text("🗓️ Executando radar do dia... aguarde.")
+    await _reply_text_safe(update.message, "🗓️ Executando radar do dia... aguarde.")
 
     try:
         scanner = Scanner(_db)
@@ -683,12 +710,7 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             elif i == len(msgs) - 1:
                 kb = _botao_voltar()
-            await update.message.reply_text(
-                texto,
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb,
-                disable_web_page_preview=True,
-            )
+            await _reply_text_safe(update.message, texto, parse_mode=ParseMode.HTML, reply_markup=kb)
 
         # Se o /scan manual cair já dentro da janela T-30, dispara a revisão
         # imediatamente para não depender do próximo ciclo automático.
@@ -699,7 +721,7 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             release.get("tips_rejeitadas_llm"),
             release.get("combos"),
         ]):
-            await update.message.reply_text("🚨 Encontrei jogo(s) já na janela T-30. Rodando revisão final agora.")
+            await _reply_text_safe(update.message, "🚨 Encontrei jogo(s) já na janela T-30. Rodando revisão final agora.")
             release_msgs = scanner.formatar_relatorio(release)
             for i, (texto, botoes) in enumerate(release_msgs):
                 kb = None
@@ -709,16 +731,9 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 elif i == len(release_msgs) - 1:
                     kb = _botao_voltar()
-                await update.message.reply_text(
-                    texto,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=kb,
-                    disable_web_page_preview=True,
-                )
+                await _reply_text_safe(update.message, texto, parse_mode=ParseMode.HTML, reply_markup=kb)
     except Exception as e:
-        await update.message.reply_text(
-            f"❌ Erro no scanner:\n{e}", reply_markup=_botao_voltar()
-        )
+        await _reply_text_safe(update.message, f"❌ Erro no scanner:\n{e}", reply_markup=_botao_voltar())
 
 
 async def cmd_scan_final(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -726,7 +741,7 @@ async def cmd_scan_final(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _registrar_update(update)
     if not await _garantir_admin_message(update.message):
         return
-    await update.message.reply_text("🚨 Rodando liberação final T-30... aguarde.")
+    await _reply_text_safe(update.message, "🚨 Rodando liberação final T-30... aguarde.")
 
     try:
         scanner = Scanner(_db)
@@ -740,12 +755,7 @@ async def cmd_scan_final(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             elif i == len(msgs) - 1:
                 kb = _botao_voltar()
-            await update.message.reply_text(
-                texto,
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb,
-                disable_web_page_preview=True,
-            )
+            await _reply_text_safe(update.message, texto, parse_mode=ParseMode.HTML, reply_markup=kb)
     except Exception as e:
         await update.message.reply_text(
             f"❌ Erro na liberação final:\n{e}", reply_markup=_botao_voltar()
@@ -1351,6 +1361,10 @@ def criar_bot() -> Application:
     app = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
+        .connect_timeout(20)
+        .read_timeout(30)
+        .write_timeout(30)
+        .pool_timeout(30)
         .post_init(post_init)
         .build()
     )
