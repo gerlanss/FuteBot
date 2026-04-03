@@ -1,6 +1,6 @@
 module futebot.previsao {
   docs {
-    resumo: "Contrato semantico do ciclo de vida de uma previsao no FuteBot, do radar inicial ate a resolucao final e o feedback para aprendizado."
+    resumo: "Contrato semantico do ciclo de vida de uma previsao no FuteBot,do radar inicial ate a resolucao final e o feedback para aprendizado."
   }
 
   state previsao_operacional {
@@ -37,7 +37,7 @@ module futebot.previsao {
 
   task registrar_candidatos_radar {
     docs {
-      resumo: "Persiste os candidatos do radar diario antes da reavaliacao T-30, mantendo trilha auditavel para o que entrou ou saiu do funil."
+      resumo: "Persiste os candidatos do radar diario antes da reavaliacao T-30,mantendo trilha auditavel para o que entrou ou saiu do funil."
     }
     input {
       data_operacao: Texto required
@@ -82,7 +82,7 @@ module futebot.previsao {
 
   task liberar_previsao_aprovada {
     docs {
-      resumo: "Promove um candidato aprovado na revisao final para prediction persistida, pronta para resolucao e acompanhamento live."
+      resumo: "Promove um candidato aprovado na revisao final para prediction persistida,pronta para resolucao e acompanhamento live,mas exige odd valida da OddsPapi/1xBet,bloqueia entrada simples abaixo de 1.40 e preserva piso operacional de confianca em 60%."
     }
     input {
       fixture_id: Id required
@@ -92,6 +92,7 @@ module futebot.previsao {
     output {
       prediction_registrada: Booleano
       watchlist_habilitada: Booleano
+      odd_validada: Booleano
     }
     rules {
       fixture_id existe
@@ -101,6 +102,7 @@ module futebot.previsao {
     effects {
       persistencia predictions criticidade = alta
       persistencia live_watch criticidade = alta
+      consulta oddspapi criticidade = media
       auditoria liberacao_previsao criticidade = media
     }
     impl {
@@ -109,10 +111,13 @@ module futebot.previsao {
     guarantees {
       prediction_registrada existe
       watchlist_habilitada existe
+      odd_validada existe
     }
     error {
       previsao_duplicada: "Ja existe previsao registrada para o fixture e mercado informados."
       prediction_incompleta: "A liberacao nao trouxe os metadados minimos para persistencia correta."
+      fixture_sem_odd: "A previsao aprovada nao retornou odd valida da OddsPapi/1xBet e nao pode ser registrada."
+      odd_minima_nao_atendida: "A previsao aprovada ficou abaixo da odd minima operacional para entrada simples."
     }
     tests {
       caso "previsao aprovada pode ser registrada uma unica vez" {
@@ -131,7 +136,7 @@ module futebot.previsao {
 
   task acompanhar_previsao_live {
     docs {
-      resumo: "Monitora a previsao aprovada ao vivo, emitindo sinal, cancelamento ou resolucao antecipada quando o contexto permitir."
+      resumo: "Monitora a previsao aprovada ao vivo,emitindo sinal,cancelamento ou resolucao antecipada quando o contexto permitir,com piso operacional de confianca em 60%."
     }
     input {
       data_operacao: Texto required
@@ -151,6 +156,7 @@ module futebot.previsao {
     }
     effects {
       consulta fixtures criticidade = alta
+      consulta oddspapi criticidade = media
       consulta stats_partida criticidade = media
       persistencia live_watch criticidade = alta
       notificacao telegram_publico detalhe_previsao_live criticidade = alta
@@ -185,7 +191,7 @@ module futebot.previsao {
 
   task resolver_previsao_encerrada {
     docs {
-      resumo: "Fecha a previsao quando a partida termina, registrando resultado, gols, acerto e impacto operacional."
+      resumo: "Fecha a previsao quando a partida termina,registrando resultado,gols,acerto e impacto operacional."
     }
     input {
       fixture_id: Id required
@@ -234,7 +240,7 @@ module futebot.previsao {
 
   task registrar_feedback_aprendizado {
     docs {
-      resumo: "Anexa feedback contextual da partida resolvida para ajudar learner, auditoria e saude do modelo."
+      resumo: "Anexa feedback contextual da partida resolvida para ajudar learner,auditoria e saude do modelo."
     }
     input {
       fixture_id: Id required

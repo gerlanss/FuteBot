@@ -1,0 +1,724 @@
+{
+  "comando": "resumo-projeto",
+  "geradoEm": "2026-04-03T18:08:11.787Z",
+  "cliVersao": "1.2.17",
+  "baseProjeto": "c:\\GitHub\\FuteBot",
+  "totalModulos": 5,
+  "entradaCanonica": {
+    "descricao": "Entrada canonica do repositorio para IA. O repo nao e human-first; a IA deve começar por esses artefatos antes de abrir codigo cru.",
+    "ordemLeitura": [
+      "llms.txt",
+      "SEMA_BRIEF.md",
+      "SEMA_INDEX.json",
+      "AGENTS.md",
+      "README.md",
+      "llms-full.txt"
+    ],
+    "porCapacidade": {
+      "pequena": [
+        "llms.txt",
+        "SEMA_BRIEF.micro.txt",
+        "SEMA_INDEX.json",
+        "AGENTS.md"
+      ],
+      "media": [
+        "llms.txt",
+        "SEMA_BRIEF.curto.txt",
+        "SEMA_INDEX.json",
+        "AGENTS.md",
+        "README.md"
+      ],
+      "grande": [
+        "llms-full.txt",
+        "SEMA_BRIEF.md",
+        "SEMA_INDEX.json",
+        "AGENTS.md",
+        "README.md"
+      ]
+    },
+    "docsSuporte": [
+      "docs/AGENT_STARTER.md",
+      "docs/integracao-com-ia.md",
+      "docs/fluxo-pratico-ia-sema.md",
+      "docs/como-ensinar-a-sema-para-ia.md",
+      "docs/sintaxe.md",
+      "docs/cli.md"
+    ],
+    "guiaPorCapacidade": {
+      "pequena": {
+        "descricao": "IA gratuita ou com contexto curto. Leia so o cartao semantico e o briefing minimo.",
+        "artefatos": [
+          "resumo.micro.txt",
+          "briefing.min.json",
+          "prompt-curto.txt"
+        ],
+        "ordemLeitura": [
+          "resumo.micro.txt",
+          "briefing.min.json",
+          "resumo.curto.txt"
+        ],
+        "evitar": [
+          "ast.json",
+          "ir.json",
+          "diagnosticos.json"
+        ]
+      },
+      "media": {
+        "descricao": "IA com contexto medio. Aguenta resumo expandido, briefing minimo e drift.",
+        "artefatos": [
+          "resumo.curto.txt",
+          "briefing.min.json",
+          "drift.json",
+          "prompt-curto.txt"
+        ],
+        "ordemLeitura": [
+          "resumo.curto.txt",
+          "briefing.min.json",
+          "drift.json",
+          "resumo.md"
+        ],
+        "evitar": [
+          "ast.json"
+        ]
+      },
+      "grande": {
+        "descricao": "IA com contexto grande ou tool use. Pode consumir o pacote completo.",
+        "artefatos": [
+          "README.md",
+          "resumo.md",
+          "briefing.json",
+          "drift.json",
+          "ir.json",
+          "ast.json"
+        ],
+        "ordemLeitura": [
+          "README.md",
+          "resumo.md",
+          "briefing.json",
+          "drift.json",
+          "ir.json",
+          "ast.json"
+        ],
+        "evitar": []
+      }
+    }
+  },
+  "guiaPorCapacidade": {
+    "pequena": {
+      "descricao": "IA gratuita ou com contexto curto. Leia so o cartao semantico e o briefing minimo.",
+      "artefatos": [
+        "resumo.micro.txt",
+        "briefing.min.json",
+        "prompt-curto.txt"
+      ],
+      "ordemLeitura": [
+        "resumo.micro.txt",
+        "briefing.min.json",
+        "resumo.curto.txt"
+      ],
+      "evitar": [
+        "ast.json",
+        "ir.json",
+        "diagnosticos.json"
+      ]
+    },
+    "media": {
+      "descricao": "IA com contexto medio. Aguenta resumo expandido, briefing minimo e drift.",
+      "artefatos": [
+        "resumo.curto.txt",
+        "briefing.min.json",
+        "drift.json",
+        "prompt-curto.txt"
+      ],
+      "ordemLeitura": [
+        "resumo.curto.txt",
+        "briefing.min.json",
+        "drift.json",
+        "resumo.md"
+      ],
+      "evitar": [
+        "ast.json"
+      ]
+    },
+    "grande": {
+      "descricao": "IA com contexto grande ou tool use. Pode consumir o pacote completo.",
+      "artefatos": [
+        "README.md",
+        "resumo.md",
+        "briefing.json",
+        "drift.json",
+        "ir.json",
+        "ast.json"
+      ],
+      "ordemLeitura": [
+        "README.md",
+        "resumo.md",
+        "briefing.json",
+        "drift.json",
+        "ir.json",
+        "ast.json"
+      ],
+      "evitar": []
+    }
+  },
+  "modulos": [
+    {
+      "geradoEm": "2026-04-03T18:08:11.787Z",
+      "arquivo": "c:\\GitHub\\FuteBot\\sema\\ciclo_previsao.sema",
+      "modulo": "futebot.previsao",
+      "perfilCompatibilidade": "interno",
+      "scoreSemantico": 75,
+      "confiancaGeral": "alta",
+      "riscoOperacional": "alto",
+      "faz": "governa 5 task(s) com foco em registrar candidatos radar",
+      "tarefasPrincipais": [
+        "registrar_candidatos_radar",
+        "liberar_previsao_aprovada",
+        "acompanhar_previsao_live",
+        "resolver_previsao_encerrada",
+        "registrar_feedback_aprendizado"
+      ],
+      "entradasChave": [
+        "registrar_candidatos_radar(data_operacao, fixture_id, mercado)",
+        "liberar_previsao_aprovada(fixture_id, mercado, modelo_versao)",
+        "acompanhar_previsao_live(data_operacao, fixture_id, mercado, referencia_iso)",
+        "resolver_previsao_encerrada(fixture_id, mercado, resultado_final)"
+      ],
+      "saidasChave": [
+        "registrar_candidatos_radar(candidatos_registrados, auditoria_atualizada)",
+        "liberar_previsao_aprovada(prediction_registrada, watchlist_habilitada)",
+        "acompanhar_previsao_live(watch_atualizado, resolvida_no_live)",
+        "resolver_previsao_encerrada(previsoes_resolvidas, acerto_registrado)"
+      ],
+      "superficiesPublicas": [],
+      "regrasCriticas": [
+        "acerto_registrado existe",
+        "auditoria_atualizada existe",
+        "candidatos_registrados existe",
+        "data_operacao existe",
+        "feedback_registrado existe",
+        "fixture_id existe",
+        "mercado existe",
+        "modelo_versao existe"
+      ],
+      "efeitos": [
+        "auditoria acompanhamento_live criticidade = media",
+        "auditoria feedback_previsao criticidade = media",
+        "auditoria liberacao_previsao criticidade = media",
+        "auditoria radar_pre_live criticidade = media",
+        "auditoria resolucao_previsao criticidade = alta",
+        "consulta fixtures criticidade = alta",
+        "consulta predictions criticidade = alta",
+        "consulta stats_partida criticidade = media"
+      ],
+      "erros": [
+        "cancelamento_tardio_suprimido",
+        "fixture_sem_resultado",
+        "prediction_incompleta",
+        "previsao_duplicada",
+        "previsao_nao_encontrada",
+        "watch_item_inexistente"
+      ],
+      "entidadesAfetadas": [
+        "acompanhamento_live",
+        "aprendizado_contextual",
+        "feedback_previsao",
+        "fixture_stats",
+        "fixtures",
+        "liberacao_previsao",
+        "live_watch",
+        "predictions"
+      ],
+      "arquivosProvaveis": [
+        "c:\\GitHub\\FuteBot\\data\\database.py",
+        "c:\\GitHub\\FuteBot\\models\\learner.py",
+        "c:\\GitHub\\FuteBot\\pipeline\\scheduler.py"
+      ],
+      "simbolosRelacionados": [
+        "Database.resolver_prediction",
+        "Database.salvar_prediction",
+        "Database.salvar_scan_candidates",
+        "Learner._registrar_feedback_contextual_fixture",
+        "Scheduler._job_check_ao_vivo"
+      ],
+      "riscosPrincipais": [
+        "acompanhar_previsao_live:alto",
+        "altera_persistencia",
+        "efeito_critico",
+        "efeito_privilegiado",
+        "liberar_previsao_aprovada:alto",
+        "registrar_candidatos_radar:alto"
+      ],
+      "lacunas": [
+        "audit_ausente",
+        "authz_frouxa",
+        "dados_nao_classificados",
+        "execucao_critica_sem_bloco",
+        "execucao_implicita",
+        "proibicoes_ausentes"
+      ],
+      "inferido": [],
+      "checksSugeridos": [
+        "endurecer execucao e rastreabilidade para producao",
+        "explicitar contratos de seguranca semantica",
+        "revisar efeitos operacionais",
+        "rodar sema validar --json",
+        "verificar guarantees"
+      ],
+      "testesMinimos": [
+        "sema drift <arquivo> --json",
+        "sema validar <arquivo> --json",
+        "sema verificar <arquivo-ou-pasta> --json"
+      ],
+      "consumerFramework": null,
+      "appRoutes": [],
+      "consumerSurfaces": [],
+      "consumerBridges": [],
+      "arquivosProvaveisEditar": [
+        "c:\\GitHub\\FuteBot\\data\\database.py",
+        "c:\\GitHub\\FuteBot\\models\\learner.py",
+        "c:\\GitHub\\FuteBot\\pipeline\\scheduler.py"
+      ]
+    },
+    {
+      "geradoEm": "2026-04-03T18:08:11.787Z",
+      "arquivo": "c:\\GitHub\\FuteBot\\sema\\integracoes_externas.sema",
+      "modulo": "futebot.integracoes",
+      "perfilCompatibilidade": "interno",
+      "scoreSemantico": 75,
+      "confiancaGeral": "alta",
+      "riscoOperacional": "alto",
+      "faz": "governa 5 task(s) com foco em consultar status api football",
+      "tarefasPrincipais": [
+        "consultar_status_api_football",
+        "normalizar_payload_api_football",
+        "baixar_fixtures_historicos",
+        "baixar_stats_historicos",
+        "enriquecer_odds_referencia"
+      ],
+      "entradasChave": [
+        "consultar_status_api_football(endpoint, data_referencia)",
+        "normalizar_payload_api_football(endpoint, payload_tipo)",
+        "baixar_fixtures_historicos(season, origem)",
+        "baixar_stats_historicos(season, origem)"
+      ],
+      "saidasChave": [
+        "consultar_status_api_football(requests_usadas, pode_continuar)",
+        "normalizar_payload_api_football(payload_normalizado, response_disponivel)",
+        "baixar_fixtures_historicos(fixtures_salvos, ligas_processadas)",
+        "baixar_stats_historicos(stats_baixadas, limite_respeitado)"
+      ],
+      "superficiesPublicas": [],
+      "regrasCriticas": [
+        "creditos_restantes_conhecidos existe",
+        "data_referencia existe",
+        "endpoint existe",
+        "fixtures_salvos existe",
+        "jogos_com_odds existe",
+        "league_id existe",
+        "ligas_processadas existe",
+        "limite_respeitado existe"
+      ],
+      "efeitos": [
+        "auditoria bulk_fixtures criticidade = media",
+        "auditoria bulk_stats criticidade = media",
+        "auditoria odds_referencia criticidade = media",
+        "auditoria payload_api_football criticidade = media",
+        "auditoria status_api_football criticidade = media",
+        "consulta api_football criticidade = alta",
+        "consulta odds_api criticidade = alta",
+        "persistencia fixture_stats criticidade = alta"
+      ],
+      "erros": [
+        "liga_sem_mapeamento",
+        "payload_invalido",
+        "request_falhou",
+        "sem_cobertura_odds"
+      ],
+      "entidadesAfetadas": [
+        "api_football",
+        "bulk_fixtures",
+        "bulk_stats",
+        "fixture_stats",
+        "fixtures",
+        "odds_api",
+        "odds_cache",
+        "odds_referencia"
+      ],
+      "arquivosProvaveis": [
+        "c:\\GitHub\\FuteBot\\data\\bulk_download.py",
+        "c:\\GitHub\\FuteBot\\services\\apifootball.py",
+        "c:\\GitHub\\FuteBot\\services\\odds_api.py"
+      ],
+      "simbolosRelacionados": [
+        "_check_limite",
+        "baixar_fixtures",
+        "baixar_stats",
+        "buscar_odds_por_league_id",
+        "raw_request"
+      ],
+      "riscosPrincipais": [
+        "altera_persistencia",
+        "baixar_fixtures_historicos:alto",
+        "baixar_stats_historicos:alto",
+        "consultar_status_api_football:alto",
+        "efeito_critico",
+        "efeito_privilegiado"
+      ],
+      "lacunas": [
+        "audit_ausente",
+        "authz_frouxa",
+        "dados_nao_classificados",
+        "execucao_critica_sem_bloco",
+        "execucao_implicita",
+        "proibicoes_ausentes"
+      ],
+      "inferido": [],
+      "checksSugeridos": [
+        "endurecer execucao e rastreabilidade para producao",
+        "explicitar contratos de seguranca semantica",
+        "revisar efeitos operacionais",
+        "rodar sema validar --json",
+        "verificar guarantees"
+      ],
+      "testesMinimos": [
+        "sema drift <arquivo> --json",
+        "sema validar <arquivo> --json",
+        "sema verificar <arquivo-ou-pasta> --json"
+      ],
+      "consumerFramework": null,
+      "appRoutes": [],
+      "consumerSurfaces": [],
+      "consumerBridges": [],
+      "arquivosProvaveisEditar": [
+        "c:\\GitHub\\FuteBot\\data\\bulk_download.py",
+        "c:\\GitHub\\FuteBot\\services\\apifootball.py",
+        "c:\\GitHub\\FuteBot\\services\\odds_api.py"
+      ]
+    },
+    {
+      "geradoEm": "2026-04-03T18:08:11.787Z",
+      "arquivo": "c:\\GitHub\\FuteBot\\sema\\operacao_futebot.sema",
+      "modulo": "futebot.operacao",
+      "perfilCompatibilidade": "interno",
+      "scoreSemantico": 75,
+      "confiancaGeral": "alta",
+      "riscoOperacional": "alto",
+      "faz": "governa 4 task(s) com foco em gerar radar pre live",
+      "tarefasPrincipais": [
+        "gerar_radar_pre_live",
+        "liberar_mercados_t30",
+        "monitorar_ao_vivo",
+        "emitir_relatorio_diario"
+      ],
+      "entradasChave": [
+        "gerar_radar_pre_live(data_operacao, referencia_iso)",
+        "liberar_mercados_t30(data_operacao, referencia_iso)",
+        "monitorar_ao_vivo(data_operacao, referencia_iso)",
+        "emitir_relatorio_diario(data_operacao, referencia_iso)"
+      ],
+      "saidasChave": [
+        "gerar_radar_pre_live(radar_id, jogos_analisados, jogos_no_radar)",
+        "liberar_mercados_t30(entradas_liberadas, entradas_barradas)",
+        "monitorar_ao_vivo(atualizacoes_publicas, alertas_admin)",
+        "emitir_relatorio_diario(relatorio_emitido, saude_emitida)"
+      ],
+      "superficiesPublicas": [],
+      "regrasCriticas": [
+        "alertas_admin existe",
+        "atualizacoes_publicas existe",
+        "data_operacao existe",
+        "entradas_barradas existe",
+        "entradas_liberadas existe",
+        "jogos_analisados existe",
+        "jogos_no_radar existe",
+        "radar_id existe"
+      ],
+      "efeitos": [
+        "auditoria check_ao_vivo criticidade = media",
+        "auditoria liberacao_t30 criticidade = media",
+        "auditoria relatorio_diario criticidade = media",
+        "auditoria scanner_pre_live criticidade = media",
+        "consulta contexto_live criticidade = media",
+        "consulta fixtures criticidade = alta",
+        "consulta odds criticidade = media",
+        "consulta predictions criticidade = alta"
+      ],
+      "erros": [],
+      "entidadesAfetadas": [
+        "check_ao_vivo",
+        "contexto_live",
+        "fixtures",
+        "liberacao_t30",
+        "odds",
+        "predictions",
+        "radar_diario",
+        "relatorio_diario"
+      ],
+      "arquivosProvaveis": [
+        "c:\\GitHub\\FuteBot\\pipeline\\scheduler.py"
+      ],
+      "simbolosRelacionados": [
+        "Scheduler._garantir_radar_do_dia",
+        "Scheduler._job_check_ao_vivo",
+        "Scheduler._job_liberacao_t30",
+        "Scheduler._job_relatorio"
+      ],
+      "riscosPrincipais": [
+        "altera_persistencia",
+        "efeito_critico",
+        "efeito_privilegiado",
+        "emitir_relatorio_diario:alto",
+        "gerar_radar_pre_live:alto",
+        "liberar_mercados_t30:alto"
+      ],
+      "lacunas": [
+        "audit_ausente",
+        "authz_frouxa",
+        "dados_nao_classificados",
+        "execucao_critica_sem_bloco",
+        "execucao_implicita",
+        "proibicoes_ausentes"
+      ],
+      "inferido": [],
+      "checksSugeridos": [
+        "endurecer execucao e rastreabilidade para producao",
+        "explicitar contratos de seguranca semantica",
+        "revisar efeitos operacionais",
+        "rodar sema validar --json",
+        "verificar guarantees"
+      ],
+      "testesMinimos": [
+        "sema drift <arquivo> --json",
+        "sema validar <arquivo> --json",
+        "sema verificar <arquivo-ou-pasta> --json"
+      ],
+      "consumerFramework": null,
+      "appRoutes": [],
+      "consumerSurfaces": [],
+      "consumerBridges": [],
+      "arquivosProvaveisEditar": [
+        "c:\\GitHub\\FuteBot\\pipeline\\scheduler.py"
+      ]
+    },
+    {
+      "geradoEm": "2026-04-03T18:08:11.787Z",
+      "arquivo": "c:\\GitHub\\FuteBot\\sema\\quarentena_retreino_focal.sema",
+      "modulo": "futebot.quarentena",
+      "perfilCompatibilidade": "interno",
+      "scoreSemantico": 75,
+      "confiancaGeral": "alta",
+      "riscoOperacional": "alto",
+      "faz": "governa 4 task(s) com foco em avaliar degradacao modelo",
+      "tarefasPrincipais": [
+        "avaliar_degradacao_modelo",
+        "aplicar_quarentena_seletiva",
+        "priorizar_ligas_quarentena",
+        "executar_retreino_focal_quarentena"
+      ],
+      "entradasChave": [
+        "avaliar_degradacao_modelo(modelo_versao, data_referencia)",
+        "aplicar_quarentena_seletiva(modelo_versao, data_referencia)",
+        "priorizar_ligas_quarentena(modelo_versao, data_referencia)",
+        "executar_retreino_focal_quarentena(modelo_versao, data_referencia)"
+      ],
+      "saidasChave": [
+        "avaliar_degradacao_modelo(degradado, pausado, slices_ruins_detectados)",
+        "aplicar_quarentena_seletiva(slices_desativados, scanner_pausado)",
+        "priorizar_ligas_quarentena(ligas_alvo, total_ligas_alvo)",
+        "executar_retreino_focal_quarentena(ligas_processadas, strategies_ativas_geradas)"
+      ],
+      "superficiesPublicas": [],
+      "regrasCriticas": [
+        "data_referencia existe",
+        "degradado existe",
+        "ligas_alvo existe",
+        "ligas_processadas existe",
+        "modelo_versao existe",
+        "pausado existe",
+        "scanner_pausado existe",
+        "slices_desativados existe"
+      ],
+      "efeitos": [
+        "auditoria degradacao_modelo criticidade = media",
+        "auditoria priorizacao_quarentena criticidade = media",
+        "auditoria quarentena_seletiva criticidade = media",
+        "auditoria retreino_focal criticidade = alta",
+        "consulta metricas_modelo criticidade = media",
+        "consulta predictions criticidade = alta",
+        "consulta slices_degradados criticidade = alta",
+        "notificacao telegram_admin detalhe_retreino_focal criticidade = media"
+      ],
+      "erros": [],
+      "entidadesAfetadas": [
+        "degradacao_modelo",
+        "metricas_modelo",
+        "models",
+        "predictions",
+        "priorizacao_quarentena",
+        "quarentena_seletiva",
+        "retreino_focal",
+        "slices_degradados"
+      ],
+      "arquivosProvaveis": [
+        "c:\\GitHub\\FuteBot\\models\\learner.py",
+        "c:\\GitHub\\FuteBot\\pipeline\\scanner.py",
+        "c:\\GitHub\\FuteBot\\pipeline\\scheduler.py"
+      ],
+      "simbolosRelacionados": [
+        "Learner.verificar_degradacao",
+        "Scanner._verificar_auto_pause",
+        "Scheduler._job_retreino_quarentena",
+        "Scheduler._priorizar_ligas_quarentena"
+      ],
+      "riscosPrincipais": [
+        "altera_persistencia",
+        "aplicar_quarentena_seletiva:alto",
+        "avaliar_degradacao_modelo:alto",
+        "efeito_critico",
+        "efeito_privilegiado",
+        "executar_retreino_focal_quarentena:alto"
+      ],
+      "lacunas": [
+        "audit_ausente",
+        "authz_frouxa",
+        "dados_nao_classificados",
+        "execucao_critica_sem_bloco",
+        "execucao_implicita",
+        "proibicoes_ausentes"
+      ],
+      "inferido": [],
+      "checksSugeridos": [
+        "endurecer execucao e rastreabilidade para producao",
+        "explicitar contratos de seguranca semantica",
+        "revisar efeitos operacionais",
+        "rodar sema validar --json",
+        "verificar guarantees"
+      ],
+      "testesMinimos": [
+        "sema drift <arquivo> --json",
+        "sema validar <arquivo> --json",
+        "sema verificar <arquivo-ou-pasta> --json"
+      ],
+      "consumerFramework": null,
+      "appRoutes": [],
+      "consumerSurfaces": [],
+      "consumerBridges": [],
+      "arquivosProvaveisEditar": [
+        "c:\\GitHub\\FuteBot\\models\\learner.py",
+        "c:\\GitHub\\FuteBot\\pipeline\\scanner.py",
+        "c:\\GitHub\\FuteBot\\pipeline\\scheduler.py"
+      ]
+    },
+    {
+      "geradoEm": "2026-04-03T18:08:11.787Z",
+      "arquivo": "c:\\GitHub\\FuteBot\\sema\\telegram_operacao.sema",
+      "modulo": "futebot.telegram",
+      "perfilCompatibilidade": "interno",
+      "scoreSemantico": 75,
+      "confiancaGeral": "alta",
+      "riscoOperacional": "alto",
+      "faz": "governa 4 task(s) com foco em registrar chat e menu",
+      "tarefasPrincipais": [
+        "registrar_chat_e_menu",
+        "executar_comando_operacional",
+        "rotear_callback_menu",
+        "publicar_mensagem_automatica"
+      ],
+      "entradasChave": [
+        "registrar_chat_e_menu(chat_id, perfil_acesso)",
+        "executar_comando_operacional(chat_id, perfil_acesso, comando, origem)",
+        "rotear_callback_menu(chat_id, perfil_acesso, callback_data)",
+        "publicar_mensagem_automatica(texto, destino, parse_mode)"
+      ],
+      "saidasChave": [
+        "registrar_chat_e_menu(chat_registrado, menu_entregue)",
+        "executar_comando_operacional(comando_executado, acesso_liberado)",
+        "rotear_callback_menu(callback_reconhecido, resposta_emitida)",
+        "publicar_mensagem_automatica(mensagens_entregues, mensagens_falharam)"
+      ],
+      "superficiesPublicas": [],
+      "regrasCriticas": [
+        "acesso_liberado existe",
+        "callback_data existe",
+        "callback_reconhecido existe",
+        "chat_id existe",
+        "chat_registrado existe",
+        "comando existe",
+        "comando_executado existe",
+        "destino existe"
+      ],
+      "efeitos": [
+        "auditoria callback_telegram criticidade = media",
+        "auditoria comando_telegram criticidade = media",
+        "auditoria entrega_telegram criticidade = media",
+        "auditoria telegram_start criticidade = media",
+        "consulta autotuner criticidade = media",
+        "consulta callback_map criticidade = alta",
+        "consulta learner criticidade = media",
+        "consulta scanner criticidade = alta"
+      ],
+      "erros": [
+        "acesso_restrito",
+        "callback_desconhecido",
+        "comando_desconhecido",
+        "falha_operacional"
+      ],
+      "entidadesAfetadas": [
+        "autotuner",
+        "callback_map",
+        "callback_telegram",
+        "comando_telegram",
+        "entrega_telegram",
+        "learner",
+        "scanner",
+        "telegram_chat"
+      ],
+      "arquivosProvaveis": [
+        "c:\\GitHub\\FuteBot\\services\\telegram_bot.py"
+      ],
+      "simbolosRelacionados": [
+        "_callback_handler",
+        "_executar_via_callback",
+        "_send_to_chats",
+        "cmd_start"
+      ],
+      "riscosPrincipais": [
+        "altera_persistencia",
+        "efeito_critico",
+        "efeito_privilegiado",
+        "executar_comando_operacional:alto",
+        "publicar_mensagem_automatica:alto",
+        "registrar_chat_e_menu:alto"
+      ],
+      "lacunas": [
+        "audit_ausente",
+        "authz_frouxa",
+        "dados_nao_classificados",
+        "execucao_critica_sem_bloco",
+        "execucao_implicita",
+        "proibicoes_ausentes"
+      ],
+      "inferido": [],
+      "checksSugeridos": [
+        "endurecer execucao e rastreabilidade para producao",
+        "explicitar contratos de seguranca semantica",
+        "revisar efeitos operacionais",
+        "rodar sema validar --json",
+        "verificar guarantees"
+      ],
+      "testesMinimos": [
+        "sema drift <arquivo> --json",
+        "sema validar <arquivo> --json",
+        "sema verificar <arquivo-ou-pasta> --json"
+      ],
+      "consumerFramework": null,
+      "appRoutes": [],
+      "consumerSurfaces": [],
+      "consumerBridges": [],
+      "arquivosProvaveisEditar": [
+        "c:\\GitHub\\FuteBot\\services\\telegram_bot.py"
+      ]
+    }
+  ]
+}

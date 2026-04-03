@@ -42,11 +42,12 @@ from config import (
     DISCOVERY_TARGET_PRECISION_COPA, DISCOVERY_MIN_TRAIN_SAMPLES, DISCOVERY_MIN_TRAIN_SAMPLES_COPA,
     DISCOVERY_MIN_TEST_SAMPLES, DISCOVERY_MIN_TEST_SAMPLES_COPA,
     DISCOVERY_OPTUNA_TRIALS, DISCOVERY_CUP_LEAGUE_IDS, LEAGUES, LIBERACAO_T30_INTERVALO_MIN,
-    LIVE_CHECK_INTERVALO_MIN, SCAN_INTERVALO_HORAS, SCAN_LOOKAHEAD_HORAS,
+    LIVE_CHECK_INTERVALO_MIN, MODEL_CONFIDENCE_MIN, ODDSPAPI_USE_LIVE, SCAN_INTERVALO_HORAS, SCAN_LOOKAHEAD_HORAS,
 )
 
 from services.apifootball import raw_request, stats_partida
 from services.live_intelligence import LiveIntelligence
+from services.oddspapi import enriquecer_tips_com_odds_oddspapi
 
 _LIVE_CONFLITOS_EXPLICITOS = {
     "under05_ht": {"ht_home", "ht_away"},
@@ -295,6 +296,45 @@ class Scheduler:
         except Exception:
             return
 
+    def _refresh_live_odds_context(self, itens: list[dict]):
+        """
+        Atualiza contexto de odds apenas para fixtures já monitorados.
+        Não abre varredura ampla nova no live.
+        """
+        if not ODDSPAPI_USE_LIVE or not itens:
+            return
+        payloads = []
+        id_map: dict[tuple[int, str], tuple[int, dict, dict]] = {}
+        for item in itens:
+            payload = dict(item.get("payload") or {})
+            payload.setdefault("fixture_id", item.get("fixture_id"))
+            payload.setdefault("date", item.get("fixture_date") or item.get("date"))
+            payload.setdefault("league_id", item.get("league_id"))
+            payload.setdefault("home_name", item.get("home_name"))
+            payload.setdefault("away_name", item.get("away_name"))
+            payload.setdefault("mercado", item.get("mercado"))
+            payloads.append(payload)
+            id_map[(item.get("fixture_id"), item.get("mercado"))] = (item.get("id"), payload, item)
+
+        try:
+            enriquecer_tips_com_odds_oddspapi(payloads, phase_operacional="live_monitor")
+        except Exception as exc:
+            print(f"[Scheduler] ⚠️ Falha ao atualizar odds live OddsPapi: {exc}")
+            return
+
+        for payload in payloads:
+            key = (payload.get("fixture_id"), payload.get("mercado"))
+            item_ref = id_map.get(key)
+            if not item_ref:
+                continue
+            item_id, original_payload, item = item_ref
+            original_payload.update(payload)
+            item["payload"] = original_payload
+            try:
+                self.db.atualizar_live_watch_item(item_id, payload=original_payload)
+            except Exception:
+                continue
+
     def _garantir_radar_do_dia(self, data: str = None) -> bool:
         """Reconstrói silenciosamente o radar do dia se o scheduler subiu depois do scan."""
         agora = datetime.now(ZoneInfo(TIMEZONE))
@@ -344,7 +384,7 @@ class Scheduler:
 
     @staticmethod
     def _infer_conf_band(best_rule: dict | None) -> tuple[float, float]:
-        conf_min = 0.70
+        conf_min = MODEL_CONFIDENCE_MIN
         conf_max = 1.01
         if not best_rule:
             return conf_min, conf_max
@@ -844,6 +884,7 @@ class Scheduler:
                 return
 
             print(f"   🔍 Verificando {len(itens)} item(ns) monitorados...")
+            self._refresh_live_odds_context(itens)
             itens_por_fixture = {}
             for item in itens:
                 itens_por_fixture.setdefault(item["fixture_id"], []).append(item)

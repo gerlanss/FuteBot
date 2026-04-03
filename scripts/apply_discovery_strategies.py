@@ -8,6 +8,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from data.database import Database
+from config import MODEL_CONFIDENCE_MIN
 
 
 def _latest_run(root: Path) -> Path:
@@ -18,7 +19,7 @@ def _latest_run(root: Path) -> Path:
 
 
 def _infer_conf_band(best_rule: dict | None) -> tuple[float, float]:
-    conf_min = 0.70
+    conf_min = MODEL_CONFIDENCE_MIN
     conf_max = 1.01
     if not best_rule:
         return conf_min, conf_max

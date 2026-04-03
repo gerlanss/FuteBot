@@ -15,19 +15,26 @@ class ConfigTests(unittest.TestCase):
         original = {
             "API_FOOTBALL_KEY": os.environ.get("API_FOOTBALL_KEY"),
             "ODDS_API_KEY": os.environ.get("ODDS_API_KEY"),
+            "ODDSPAPI_KEY": os.environ.get("ODDSPAPI_KEY"),
             "TIMEZONE": os.environ.get("TIMEZONE"),
         }
 
         try:
             os.environ["API_FOOTBALL_KEY"] = "api-key-test"
             os.environ["ODDS_API_KEY"] = "odds-key-test"
+            os.environ["ODDSPAPI_KEY"] = "oddspapi-key-test"
             os.environ["TIMEZONE"] = "America/Manaus"
+            os.environ["MODEL_CONFIDENCE_MIN"] = "0.60"
+            os.environ["COMBO_TIP_CONFIDENCE_MIN"] = "0.60"
 
             config = importlib.reload(config)
 
             self.assertEqual(config.API_FOOTBALL_KEY, "api-key-test")
             self.assertEqual(config.ODDS_API_KEY, "odds-key-test")
+            self.assertEqual(config.ODDSPAPI_KEY, "oddspapi-key-test")
             self.assertEqual(config.TIMEZONE, "America/Manaus")
+            self.assertEqual(config.MODEL_CONFIDENCE_MIN, 0.60)
+            self.assertEqual(config.COMBO_TIP_CONFIDENCE_MIN, 0.60)
         finally:
             for key, value in original.items():
                 if value is None:
@@ -251,7 +258,14 @@ class TelegramBotMessagingTests(unittest.TestCase):
         self.assertEqual(resultado["entregues"], 2)
         self.assertEqual(resultado["falhas"], [])
         self.assertEqual(fake_bot.calls[0]["parse_mode"], "HTML")
-        self.assertEqual(fake_bot.calls[1], {"chat_id": 11, "text": "Resumo <b>automatico</b>"})
+        self.assertEqual(
+            fake_bot.calls[1],
+            {
+                "chat_id": 11,
+                "text": "Resumo <b>automatico</b>",
+                "disable_web_page_preview": True,
+            },
+        )
 
     def test_send_to_chats_skips_disabled_alerts_and_reports_failures(self):
         import services.telegram_bot as telegram_bot
@@ -646,17 +660,68 @@ class StrategySliceTests(unittest.TestCase):
 
 
 class ScannerSelectionTests(unittest.TestCase):
+    def test_enriquecer_odds_usa_oddspapi_na_shortlist_final(self):
+        from pipeline.scanner import Scanner
+
+        scanner = Scanner.__new__(Scanner)
+        tips = [{"fixture_id": 1, "mercado": "over15", "prob_modelo": 0.72}]
+
+        with patch("pipeline.scanner.ODDSPAPI_USE_PRELIVE", True), \
+             patch("pipeline.scanner.enriquecer_tips_com_odds_oddspapi") as enrich_mock:
+            enrich_mock.return_value = [{"fixture_id": 1, "mercado": "over15", "prob_modelo": 0.72, "odd_usada": 1.65}]
+            resultado = scanner._enriquecer_odds(tips)
+
+        enrich_mock.assert_called_once()
+        self.assertEqual(resultado[0]["odd_usada"], 1.65)
+
+    def test_aplicar_gate_odds_ev_barra_sem_odd_valida(self):
+        from pipeline.scanner import Scanner
+
+        scanner = Scanner.__new__(Scanner)
+        aprovadas, bloqueadas = scanner._aplicar_gate_odds_ev([
+            {"fixture_id": 1, "mercado": "over15", "prob_modelo": 0.71},
+        ])
+
+        self.assertEqual(aprovadas, [])
+        self.assertEqual(len(bloqueadas), 1)
+        self.assertEqual(bloqueadas[0]["odd_block_reason"], "fixture_sem_odd")
+        self.assertEqual((bloqueadas[0]["llm_validacao"] or {}).get("decisao"), "REJECT")
+
+    def test_aplicar_gate_odds_ev_barra_odd_abaixo_do_minimo(self):
+        from pipeline.scanner import Scanner
+
+        scanner = Scanner.__new__(Scanner)
+        aprovadas, bloqueadas = scanner._aplicar_gate_odds_ev([
+            {"fixture_id": 1, "mercado": "over15", "prob_modelo": 0.75, "odd_usada": 1.39, "ev_percent": 6.0},
+        ])
+
+        self.assertEqual(aprovadas, [])
+        self.assertEqual(len(bloqueadas), 1)
+        self.assertIn("Odd abaixo do mínimo operacional", (bloqueadas[0]["llm_validacao"] or {}).get("motivo", ""))
+
+    def test_aplicar_gate_odds_ev_mantem_tip_valida(self):
+        from pipeline.scanner import Scanner
+
+        scanner = Scanner.__new__(Scanner)
+        aprovadas, bloqueadas = scanner._aplicar_gate_odds_ev([
+            {"fixture_id": 1, "mercado": "over15", "prob_modelo": 0.75, "odd_usada": 1.55, "ev_percent": 16.2},
+        ])
+
+        self.assertEqual(len(aprovadas), 1)
+        self.assertEqual(bloqueadas, [])
+        self.assertTrue(aprovadas[0]["approved_odds_gate"])
+
     def test_scanner_limits_total_combos_and_keeps_tripla_possible(self):
         from pipeline.scanner import Scanner
 
         scanner = Scanner.__new__(Scanner)
         tips = [
-            {"fixture_id": 1, "prob_modelo": 0.90},
-            {"fixture_id": 2, "prob_modelo": 0.88},
-            {"fixture_id": 3, "prob_modelo": 0.86},
-            {"fixture_id": 4, "prob_modelo": 0.84},
-            {"fixture_id": 5, "prob_modelo": 0.82},
-            {"fixture_id": 6, "prob_modelo": 0.80},
+            {"fixture_id": 1, "prob_modelo": 0.90, "odd_usada": 1.35, "ev_percent": 21.5},
+            {"fixture_id": 2, "prob_modelo": 0.88, "odd_usada": 1.40, "ev_percent": 23.2},
+            {"fixture_id": 3, "prob_modelo": 0.86, "odd_usada": 1.42, "ev_percent": 22.1},
+            {"fixture_id": 4, "prob_modelo": 0.84, "odd_usada": 1.38, "ev_percent": 15.9},
+            {"fixture_id": 5, "prob_modelo": 0.82, "odd_usada": 1.33, "ev_percent": 9.1},
+            {"fixture_id": 6, "prob_modelo": 0.80, "odd_usada": 1.30, "ev_percent": 4.0},
         ]
 
         combos = scanner._gerar_combos(tips)
@@ -665,6 +730,21 @@ class ScannerSelectionTests(unittest.TestCase):
         self.assertTrue(all(len(c["tips"]) in (2, 3) for c in combos))
         self.assertEqual(len({t["fixture_id"] for c in combos for t in c["tips"]}),
                          sum(len(c["tips"]) for c in combos))
+        self.assertTrue(all(c.get("odd_composta", 0) >= 1.80 for c in combos))
+        self.assertTrue(all(c.get("ev_composto_percent", 0) >= 6.0 for c in combos))
+
+    def test_gerar_combos_ignora_perna_com_ev_fraco(self):
+        from pipeline.scanner import Scanner
+
+        scanner = Scanner.__new__(Scanner)
+        combos = scanner._gerar_combos([
+            {"fixture_id": 1, "prob_modelo": 0.85, "odd_usada": 1.25, "ev_percent": 6.0},
+            {"fixture_id": 2, "prob_modelo": 0.84, "odd_usada": 1.25, "ev_percent": 2.9},
+            {"fixture_id": 3, "prob_modelo": 0.83, "odd_usada": 1.30, "ev_percent": 7.0},
+        ])
+
+        fixtures_usados = {t["fixture_id"] for combo in combos for t in combo["tips"]}
+        self.assertNotIn(2, fixtures_usados)
 
     def test_extrair_odd_mercado_requires_exact_total_line(self):
         from pipeline.scanner import Scanner
@@ -715,9 +795,9 @@ class ScannerSelectionTests(unittest.TestCase):
                 "date": "2026-03-07T13:30:00+00:00",
                 "prob_modelo": 0.822,
                 "descricao": "Over 1.5 gols",
-                "odd_pinnacle": 1.90,
+                "odd_usada": 1.90,
                 "ev_percent": 56.1,
-                "odd_fonte": "Pinnacle",
+                "bookmaker": "1xBet",
             }],
             "combos": [],
             "data": "2026-03-07",
@@ -728,7 +808,7 @@ class ScannerSelectionTests(unittest.TestCase):
         self.assertIn("Bloqueadas por EV: <b>2</b>", header)
         self.assertIn("Mercados revisados: <b>117</b>", header)
         self.assertIn("<code>RB Leipzig</code> <b>x</b> <code>FC Augsburg</code>", body)
-        self.assertIn("Bet365", body)
+        self.assertIn("1xBet", body)
 
 
 class TelegramChatPersistenceTests(unittest.TestCase):
@@ -851,7 +931,19 @@ class MarketDiscoveryTests(unittest.TestCase):
             ]
         })
 
-        self.assertEqual(conf_min, 0.70)
+        self.assertEqual(conf_min, 0.654)
+        self.assertEqual(conf_max, 1.01)
+
+    def test_apply_discovery_uses_60_percent_floor_when_rule_missing(self):
+        from scripts.apply_discovery_strategies import _infer_conf_band
+
+        conf_min, conf_max = _infer_conf_band({
+            "conditions": [
+                ["away_btts_pct", ">=", 0.4],
+            ]
+        })
+
+        self.assertEqual(conf_min, 0.60)
         self.assertEqual(conf_max, 1.01)
 
     def test_strategy_rule_match_checks_tip_features(self):
@@ -986,7 +1078,7 @@ class ScannerAuditFormattingTests(unittest.TestCase):
         self.assertIn("Entradas barradas", joined)
         self.assertIn("Entrada cancelada nesta janela.", joined)
         self.assertIn("• Desfalques ofensivos importantes.", joined)
-        self.assertIn("Bet365", joined)
+        self.assertIn("1xBet", joined)
 
     def test_formatar_resumo_revisao_shortens_llm_text(self):
         from pipeline.scanner import Scanner

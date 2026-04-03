@@ -122,6 +122,19 @@ LEAGUES = {
 # The Odds API
 # Plano Starter: 500 créditos/mês, odds em tempo real
 # ──────────────────────────────────────────────
+ODDSPAPI_KEY = _get_env_str("ODDSPAPI_KEY")
+ODDSPAPI_BASE = _get_env_str("ODDSPAPI_BASE", "https://api.oddspapi.io/v4")
+ODDSPAPI_BOOKMAKER_SLUG = _get_env_str("ODDSPAPI_BOOKMAKER_SLUG", "1xbet")
+ODDSPAPI_BOOKMAKER_LABEL = _get_env_str("ODDSPAPI_BOOKMAKER_LABEL", "1xBet")
+ODDSPAPI_USE_PRELIVE = _get_env_bool("ODDSPAPI_USE_PRELIVE", True)
+ODDSPAPI_USE_LIVE = _get_env_bool("ODDSPAPI_USE_LIVE", True)
+ODDSPAPI_SIMPLE_MIN_ODD = _get_env_float("ODDSPAPI_SIMPLE_MIN_ODD", 1.40)
+ODDSPAPI_SIMPLE_MIN_EV_PERCENT = _get_env_float("ODDSPAPI_SIMPLE_MIN_EV_PERCENT", 5.0)
+ODDSPAPI_COMBO_LEG_MIN_ODD = _get_env_float("ODDSPAPI_COMBO_LEG_MIN_ODD", 1.20)
+ODDSPAPI_COMBO_LEG_MIN_EV_PERCENT = _get_env_float("ODDSPAPI_COMBO_LEG_MIN_EV_PERCENT", 3.0)
+ODDSPAPI_COMBO_MIN_ODD = _get_env_float("ODDSPAPI_COMBO_MIN_ODD", 1.80)
+ODDSPAPI_COMBO_MIN_EV_PERCENT = _get_env_float("ODDSPAPI_COMBO_MIN_EV_PERCENT", 6.0)
+
 ODDS_API_KEY = _get_env_str("ODDS_API_KEY")
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 
@@ -177,14 +190,16 @@ ADMIN_CHAT_IDS = _get_env_int_list("ADMIN_CHAT_IDS", [])
 # ──────────────────────────────────────────────
 # Pipeline / Scanner
 # ──────────────────────────────────────────────
-MAX_JOGOS_ODDS = 10           # Máximo de jogos para buscar odds (economia de créditos)
-EV_THRESHOLD = 0.03           # EV mínimo para considerar oportunidade (3%)
+MAX_JOGOS_ODDS = _get_env_int("MAX_JOGOS_ODDS", 10)
+EV_THRESHOLD = _get_env_float("EV_THRESHOLD", 0.03)
+MODEL_CONFIDENCE_MIN = _get_env_float("MODEL_CONFIDENCE_MIN", 0.60)
+COMBO_TIP_CONFIDENCE_MIN = _get_env_float("COMBO_TIP_CONFIDENCE_MIN", MODEL_CONFIDENCE_MIN)
 
 # Casa de apostas preferida (key do The Odds API)
 # Pinnacle: odds sharp de referência, melhor cobertura na API, opera no Brasil
-PREFERRED_BOOKMAKER = "pinnacle"
-PREFERRED_BOOKMAKER_LABEL = "Pinnacle"
-BET365_URL = _get_env_str("BET365_URL", "https://www.bet365.bet.br/")
+PREFERRED_BOOKMAKER = ODDSPAPI_BOOKMAKER_SLUG
+PREFERRED_BOOKMAKER_LABEL = ODDSPAPI_BOOKMAKER_LABEL
+BET365_URL = _get_env_str("BET365_URL", "https://1xbet.bet.br/")
 SCAN_HORA = "07:00"           # Horário base do scan recorrente
 SCAN_INTERVALO_HORAS = _get_env_int("SCAN_INTERVALO_HORAS", 2)
 SCAN_LOOKAHEAD_HORAS = _get_env_int("SCAN_LOOKAHEAD_HORAS", 2)

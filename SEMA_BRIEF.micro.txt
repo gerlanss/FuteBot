@@ -1,0 +1,7 @@
+PROJETO: FuteBot
+MODULOS: 5
+ENTRADA_IA: llms.txt -> SEMA_BRIEF.micro.txt -> SEMA_INDEX.json -> AGENTS.md
+TOP_MODULOS: futebot.previsao, futebot.integracoes, futebot.operacao (+2)
+TOP_RISCOS: acompanhar_previsao_live:alto, altera_persistencia, aplicar_quarentena_seletiva:alto (+15)
+TOP_LACUNAS: audit_ausente, authz_frouxa, dados_nao_classificados (+3)
+GERADO_EM: 2026-04-03T18:08:11.787Z

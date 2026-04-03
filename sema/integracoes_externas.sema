@@ -1,6 +1,6 @@
 module futebot.integracoes {
   docs {
-    resumo: "Contrato semantico das integracoes externas do FuteBot, cobrindo API-Football, The Odds API e bulk download historico."
+    resumo: "Contrato semantico das integracoes externas do FuteBot,cobrindo API-Football,OddsPapi/1xBet e bulk download historico."
   }
 
   state requisicao_externa {
@@ -111,7 +111,7 @@ module futebot.integracoes {
 
   task baixar_fixtures_historicos {
     docs {
-      resumo: "Baixa fixtures por liga e temporada, respeitando o estado atual do banco e evitando consumo inutil."
+      resumo: "Baixa fixtures por liga e temporada,respeitando o estado atual do banco e evitando consumo inutil."
     }
     input {
       season: Texto required
@@ -153,7 +153,7 @@ module futebot.integracoes {
 
   task baixar_stats_historicos {
     docs {
-      resumo: "Baixa stats de partidas finalizadas, respeitando limite de seguranca e modo resume."
+      resumo: "Baixa stats de partidas finalizadas,respeitando limite de seguranca e modo resume."
     }
     input {
       season: Texto required
@@ -193,43 +193,47 @@ module futebot.integracoes {
     }
   }
 
-  task enriquecer_odds_referencia {
+  task enriquecer_odds_oddspapi_final {
     docs {
-      resumo: "Consulta The Odds API e expande o contexto de mercado para jogos futuros com linhas de referencia."
+      resumo: "Consulta a OddsPapi v4 com bookmaker 1xbet para a shortlist final do scanner,enriquecendo apenas os fixtures candidatos com odd,EV e contexto operacional."
     }
     input {
-      league_id: Id required
-      mercado: Texto required
+      fixture_ids: Texto required
+      fase_operacional: Texto required
     }
     output {
-      jogos_com_odds: Inteiro
-      creditos_restantes_conhecidos: Booleano
+      fixtures_consultados: Inteiro
+      fixtures_com_odd_valida: Inteiro
+      fixtures_bloqueados_sem_odd: Inteiro
+      acesso_live_disponivel: Booleano
     }
     rules {
-      league_id existe
-      mercado existe
+      fixture_ids existe
+      fase_operacional existe
     }
     effects {
-      consulta odds_api criticidade = alta
+      consulta oddspapi criticidade = alta
       persistencia odds_cache criticidade = media
-      auditoria odds_referencia criticidade = media
+      auditoria odds_oddspapi_final criticidade = media
     }
     impl {
-      py: services.odds_api.buscar_odds_por_league_id
+      py: services.oddspapi.enriquecer_tips_com_odds_oddspapi
     }
     guarantees {
-      jogos_com_odds existe
-      creditos_restantes_conhecidos existe
+      fixtures_consultados existe
+      fixtures_com_odd_valida existe
+      fixtures_bloqueados_sem_odd existe
+      acesso_live_disponivel existe
     }
     error {
-      liga_sem_mapeamento: "A liga nao possui mapeamento para a The Odds API."
-      sem_cobertura_odds: "Nao houve cobertura de odds para a consulta pedida."
+      fixture_sem_odd: "O fixture finalista nao retornou odd valida da 1xbet e deve ser barrado."
+      acesso_live_restrito: "A conta atual nao possui acesso live ao bookmaker consultado para o fixture."
     }
     tests {
-      caso "liga sem cobertura ainda retorna contrato valido" {
+      caso "fixture sem odd valida ainda retorna contrato operacional" {
         given {
-          league_id: 9999
-          mercado: "under35"
+          fixture_ids: "1001,1002"
+          fase_operacional: "prelive_final"
         }
 
         expect {
@@ -242,13 +246,13 @@ module futebot.integracoes {
   flow ciclo_integracoes_futebot {
     endpoint: Texto
     season: Texto
-    league_id: Id
-    mercado: Texto
+    fixture_ids: Texto
+    fase_operacional: Texto
     etapa status usa consultar_status_api_football com endpoint = endpoint, data_referencia = season em_sucesso payload em_erro odds
     etapa payload usa normalizar_payload_api_football com endpoint = endpoint, payload_tipo = dict depende_de status em_sucesso fixtures em_erro fixtures
     etapa fixtures usa baixar_fixtures_historicos com season = season, origem = bulk depende_de payload em_sucesso stats em_erro odds
     etapa stats usa baixar_stats_historicos com season = season, origem = bulk depende_de fixtures em_sucesso odds em_erro odds
-    etapa odds usa enriquecer_odds_referencia com league_id = league_id, mercado = mercado depende_de stats
+    etapa odds usa enriquecer_odds_oddspapi_final com fixture_ids = fixture_ids, fase_operacional = fase_operacional depende_de stats
     effects {
       auditoria ciclo_integracoes criticidade = alta
       persistencia estado_integracoes criticidade = alta

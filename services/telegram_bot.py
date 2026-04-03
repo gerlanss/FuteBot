@@ -25,7 +25,6 @@ import sys
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 
 from telegram import (
@@ -144,17 +143,7 @@ def _botao_voltar() -> InlineKeyboardMarkup:
 
 
 def _link_bet365_markdown(home_name: str = "", away_name: str = "", mercado: str = "") -> str:
-    query_parts = [
-        "site:bet365.bet.br",
-        str(home_name or "").strip(),
-        str(away_name or "").strip(),
-        str(mercado or "").strip(),
-    ]
-    query = " ".join(part for part in query_parts if part).strip()
-    if not query:
-        return f"[Bet365]({BET365_URL})"
-    search_url = f"https://www.google.com/search?q={quote_plus(query)}"
-    return f"[Buscar na Bet365]({search_url})"
+    return f"[1xBet]({BET365_URL})"
 
 
 async def _configurar_menu(bot, chat_id: int | None = None):
@@ -356,7 +345,7 @@ def _formatar_ajuda_html() -> str:
         "1. <b>Modelo por liga</b>\n"
         "Cada liga tem modelos proprios para resultado, gols, tempos e escanteios.\n\n"
         "2. <b>Confianca minima</b>\n"
-        "Mercado com menos de 65% de confianca ja cai antes de tudo.\n\n"
+        "Mercado com menos de 60% de confianca ja cai antes de tudo.\n\n"
         "3. <b>Strategy Gate</b>\n"
         "So passa se aquela combinacao liga + mercado + faixa de confianca tiver historico validado.\n\n"
         "4. <b>Anti-conflito</b>\n"
@@ -368,7 +357,7 @@ def _formatar_ajuda_html() -> str:
         "7. <b>Selecao final</b>\n"
         "Depois de tudo, o bot ordena as oportunidades e envia so as 12 melhores do dia.\n\n"
         "8. <b>Combos</b>\n"
-        "As combinacoes usam jogos diferentes, exigem no minimo 65% por tip e 50% de confianca composta, e o bot envia no maximo 3 combos priorizando os melhores."
+        "As combinacoes usam jogos diferentes, exigem no minimo 60% por tip e 50% de confianca composta, e o bot envia no maximo 3 combos priorizando os melhores."
     )
 
 def _salvar_chat_id(chat_id: int):
@@ -489,11 +478,16 @@ async def _send_to_chats(texto: str | list[str], destino: str = "admins", parse_
                     payload = {"chat_id": chat_id, "text": bloco}
                     if parse_mode_normalizado:
                         payload["parse_mode"] = parse_mode_normalizado
+                    payload["disable_web_page_preview"] = True
                     await bot.send_message(**payload)
                 except Exception:
                     if not parse_mode_normalizado:
                         raise
-                    await bot.send_message(chat_id=chat_id, text=bloco)
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=bloco,
+                        disable_web_page_preview=True,
+                    )
             entregues += 1
         except Exception as exc:
             falhas.append({"chat_id": chat_id, "erro": str(exc)})
@@ -680,18 +674,20 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lookahead_minutes=SCAN_LOOKAHEAD_HORAS * 60,
         )
         msgs = scanner.formatar_relatorio(resultado)
-        # Envia cada bloco como mensagem separada (com botões ✏️ Odd)
+        # Envia cada bloco como mensagem separada (com botões extras do pré-live)
         for i, (texto, botoes) in enumerate(msgs):
             kb = None
             if botoes:
-                # Botões de odd manual (1 por tip)
                 kb = InlineKeyboardMarkup(
                     [[InlineKeyboardButton(label, callback_data=cb)] for label, cb in botoes]
                 )
             elif i == len(msgs) - 1:
                 kb = _botao_voltar()
             await update.message.reply_text(
-                texto, parse_mode=ParseMode.HTML, reply_markup=kb
+                texto,
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb,
+                disable_web_page_preview=True,
             )
 
         # Se o /scan manual cair já dentro da janela T-30, dispara a revisão
@@ -714,7 +710,10 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif i == len(release_msgs) - 1:
                     kb = _botao_voltar()
                 await update.message.reply_text(
-                    texto, parse_mode=ParseMode.HTML, reply_markup=kb
+                    texto,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=kb,
+                    disable_web_page_preview=True,
                 )
     except Exception as e:
         await update.message.reply_text(
@@ -742,7 +741,10 @@ async def cmd_scan_final(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif i == len(msgs) - 1:
                 kb = _botao_voltar()
             await update.message.reply_text(
-                texto, parse_mode=ParseMode.HTML, reply_markup=kb
+                texto,
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb,
+                disable_web_page_preview=True,
             )
     except Exception as e:
         await update.message.reply_text(
@@ -1145,9 +1147,9 @@ async def _callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Roteia o callback_data para o handler correto.
     """
     query = update.callback_query
-    await query.answer()  # Remove o "loading" do botão
-
     data = query.data
+
+    await query.answer()  # Remove o "loading" do botão
 
     # Botão "← Menu Principal" — reenvia o menu completo
     if data == "cmd_menu":
@@ -1210,7 +1212,12 @@ async def _executar_via_callback(query, handler_fn, context):
                     )
                 elif i == len(msgs) - 1:
                     kb = _botao_voltar()
-                await query.message.reply_text(texto, parse_mode=ParseMode.HTML, reply_markup=kb)
+                await query.message.reply_text(
+                    texto,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=kb,
+                    disable_web_page_preview=True,
+                )
             release = scanner.liberar_mercados()
             if any([
                 release.get("tips_enviadas_llm"),
@@ -1228,7 +1235,12 @@ async def _executar_via_callback(query, handler_fn, context):
                         )
                     elif i == len(release_msgs) - 1:
                         kb = _botao_voltar()
-                    await query.message.reply_text(texto, parse_mode=ParseMode.HTML, reply_markup=kb)
+                    await query.message.reply_text(
+                        texto,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=kb,
+                        disable_web_page_preview=True,
+                    )
         elif handler_fn == cmd_scan_final:
             await query.message.reply_text("🚨 Rodando liberação final T-30... aguarde.")
             scanner = Scanner(_db)
@@ -1243,7 +1255,10 @@ async def _executar_via_callback(query, handler_fn, context):
                 elif i == len(msgs) - 1:
                     kb = _botao_voltar()
                 await query.message.reply_text(
-                    texto, parse_mode=ParseMode.HTML, reply_markup=kb
+                    texto,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=kb,
+                    disable_web_page_preview=True,
                 )
 
         elif handler_fn == cmd_resultados:

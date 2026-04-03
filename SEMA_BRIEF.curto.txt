@@ -1,0 +1,9 @@
+PROJETO: FuteBot
+BASE: c:\GitHub\FuteBot
+MODULOS: 5
+ENTRADA_IA: llms.txt -> SEMA_BRIEF.curto.txt -> SEMA_INDEX.json -> AGENTS.md -> README.md
+TOP_MODULOS: futebot.previsao, futebot.integracoes, futebot.operacao, futebot.quarentena, futebot.telegram
+TOP_RISCOS: acompanhar_previsao_live:alto, altera_persistencia, aplicar_quarentena_seletiva:alto, avaliar_degradacao_modelo:alto, baixar_fixtures_historicos:alto, baixar_stats_historicos:alto (+12)
+TOP_LACUNAS: audit_ausente, authz_frouxa, dados_nao_classificados, execucao_critica_sem_bloco, execucao_implicita, proibicoes_ausentes
+TOP_ARQUIVOS: c:\GitHub\FuteBot\data\bulk_download.py, c:\GitHub\FuteBot\data\database.py, c:\GitHub\FuteBot\models\learner.py, c:\GitHub\FuteBot\pipeline\scanner.py, c:\GitHub\FuteBot\pipeline\scheduler.py, c:\GitHub\FuteBot\services\apifootball.py (+2)
+GERADO_EM: 2026-04-03T18:08:11.787Z
