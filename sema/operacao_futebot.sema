@@ -132,7 +132,7 @@ module futebot.operacao {
 
   task monitorar_ao_vivo {
     docs {
-      resumo: "Acompanha jogos ativos,resolve entradas e emite atualizacoes relevantes no Telegram,usando piso operacional de confianca do modelo em 60% para pre-live e live; itens barrados no pre-live com reavaliacao pendente continuam em watch live e podem virar alerta publico unitario."
+      resumo: "Acompanha jogos ativos,resolve entradas e emite atualizacoes relevantes no Telegram,usando piso operacional de confianca do modelo em 60% para pre-live e live; itens barrados no pre-live com reavaliacao pendente continuam apenas como observacao interna,sem consumir OddsPapi live nem virar oportunidade publica ate existir entrada operacional; uma mesma entrada live nao deve ser republicada em ciclos seguintes sem mudanca real de estado; alertas publicos e operacionais com odd valida devem mostrar odd,EV e bookmaker; no live,o preco so passa a contar depois do primeiro cenario aprovado e entra em janela curta de observacao antes de virar entrada; cada familia de mercado precisa respeitar janela operacional inteligente de tempo,com minimo e maximo diferentes para over,under,cantos e resultado,para bloquear tanto sinais cedo demais quanto sinais tarde demais."
     }
     input {
       data_operacao: Texto required

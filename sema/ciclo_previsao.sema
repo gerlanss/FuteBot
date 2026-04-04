@@ -136,7 +136,7 @@ module futebot.previsao {
 
   task acompanhar_previsao_live {
     docs {
-      resumo: "Monitora a previsao aprovada ao vivo,emitindo sinal,cancelamento ou resolucao antecipada quando o contexto permitir,com piso operacional de confianca em 60%; leituras barradas no pre-live que ficaram em reavaliacao tambem seguem o mesmo watch live e podem voltar como oportunidade publica."
+      resumo: "Monitora a previsao aprovada ao vivo,emitindo sinal,cancelamento ou resolucao antecipada quando o contexto permitir,com piso operacional de confianca em 60%; leituras barradas no pre-live que ficaram em reavaliacao seguem watch interno,mas nao consomem OddsPapi live nem retornam ao publico como oportunidade ate existir entrada valida; apos uma liberacao live,ciclos seguintes so podem atualizar contexto interno,nao republicar o mesmo sinal sem transicao nova; quando o cenario passa mas a odd live ainda nao ficou executavel,o fluxo abre janela curta de observacao de preco antes da promocao; cada mercado precisa respeitar faixa temporal inteligente,com janelas diferentes para over,under,cantos e resultado,para evitar sinal cedo demais ou tarde demais."
     }
     input {
       data_operacao: Texto required

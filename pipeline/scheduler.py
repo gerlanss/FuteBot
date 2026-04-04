@@ -42,7 +42,9 @@ from config import (
     DISCOVERY_TARGET_PRECISION_COPA, DISCOVERY_MIN_TRAIN_SAMPLES, DISCOVERY_MIN_TRAIN_SAMPLES_COPA,
     DISCOVERY_MIN_TEST_SAMPLES, DISCOVERY_MIN_TEST_SAMPLES_COPA,
     DISCOVERY_OPTUNA_TRIALS, DISCOVERY_CUP_LEAGUE_IDS, LEAGUES, LIBERACAO_T30_INTERVALO_MIN,
-    LIVE_CHECK_INTERVALO_MIN, MODEL_CONFIDENCE_MIN, ODDSPAPI_USE_LIVE, SCAN_INTERVALO_HORAS, SCAN_LOOKAHEAD_HORAS,
+    LIVE_CHECK_INTERVALO_MIN, LIVE_PRICE_WATCH_RECHECK_MIN, LIVE_PRICE_WATCH_WINDOW_MIN,
+    MODEL_CONFIDENCE_MIN, ODDSPAPI_SIMPLE_MIN_EV_PERCENT, ODDSPAPI_SIMPLE_MIN_ODD,
+    ODDSPAPI_USE_LIVE, SCAN_INTERVALO_HORAS, SCAN_LOOKAHEAD_HORAS,
 )
 
 from services.apifootball import raw_request, stats_partida
@@ -303,10 +305,15 @@ class Scheduler:
         """
         if not ODDSPAPI_USE_LIVE or not itens:
             return
+        now = datetime.now(ZoneInfo(TIMEZONE))
         payloads = []
         id_map: dict[tuple[int, str], tuple[int, dict, dict]] = {}
         for item in itens:
+            if item.get("watch_type") not in {"approved_prelive", "live_opportunity"}:
+                continue
             payload = dict(item.get("payload") or {})
+            if not self._deve_consultar_odd_live_item(item, payload, now):
+                continue
             payload.setdefault("fixture_id", item.get("fixture_id"))
             payload.setdefault("date", item.get("fixture_date") or item.get("date"))
             payload.setdefault("league_id", item.get("league_id"))
@@ -334,6 +341,176 @@ class Scheduler:
                 self.db.atualizar_live_watch_item(item_id, payload=original_payload)
             except Exception:
                 continue
+
+    @staticmethod
+    def _parse_payload_datetime(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except Exception:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=ZoneInfo(TIMEZONE))
+        return parsed
+
+    def _deve_consultar_odd_live_item(self, item: dict, payload: dict, now: datetime) -> bool:
+        if item.get("watch_type") not in {"approved_prelive", "live_opportunity"}:
+            return False
+        if payload.get("live_signal_notified"):
+            return False
+        if not payload.get("price_watch_active"):
+            return False
+        expires_at = self._parse_payload_datetime(payload.get("price_watch_expires_at"))
+        if expires_at and now > expires_at:
+            return False
+        next_check_at = self._parse_payload_datetime(payload.get("price_watch_next_check_at"))
+        if next_check_at and now < next_check_at:
+            return False
+        return True
+
+    def _consultar_odd_live_agora(self, item: dict, payload: dict) -> dict:
+        probe = dict(payload or {})
+        probe.setdefault("fixture_id", item.get("fixture_id"))
+        probe.setdefault("date", item.get("fixture_date") or item.get("date"))
+        probe.setdefault("league_id", item.get("league_id"))
+        probe.setdefault("home_name", item.get("home_name"))
+        probe.setdefault("away_name", item.get("away_name"))
+        probe.setdefault("mercado", item.get("mercado"))
+        try:
+            enriquecer_tips_com_odds_oddspapi([probe], phase_operacional="live_monitor")
+        except Exception as exc:
+            print(f"[Scheduler] ⚠️ Falha ao consultar odd live on-demand: {exc}")
+        payload.update(probe)
+        return payload
+
+    @staticmethod
+    def _odd_ev_live_aprovados(payload: dict) -> bool:
+        odd = payload.get("odd_usada")
+        ev = payload.get("ev_percent")
+        try:
+            odd_val = float(odd)
+            ev_val = float(ev)
+        except (TypeError, ValueError):
+            return False
+        return odd_val >= ODDSPAPI_SIMPLE_MIN_ODD and ev_val >= ODDSPAPI_SIMPLE_MIN_EV_PERCENT
+
+    def _acionar_janela_preco_live(self, payload: dict, now: datetime) -> tuple[str, str]:
+        if not payload.get("price_watch_active") and payload.get("price_watch_final_state") == "expired":
+            return "expired", payload.get("price_watch_reason") or "Janela de preço já expirou para esta leitura."
+        expires_at = self._parse_payload_datetime(payload.get("price_watch_expires_at"))
+        if payload.get("price_watch_active") and expires_at and now > expires_at:
+            payload["price_watch_active"] = False
+            payload["price_watch_final_state"] = "expired"
+            payload["price_watch_closed_at"] = now.isoformat()
+            payload["price_watch_reason"] = "Janela de preço expirou sem odd executável."
+            payload.pop("price_watch_next_check_at", None)
+            return "expired", payload["price_watch_reason"]
+
+        checks = int(payload.get("price_watch_checks") or 0)
+        if not payload.get("price_watch_active"):
+            payload["price_watch_active"] = True
+            payload["price_watch_started_at"] = now.isoformat()
+            payload["price_watch_expires_at"] = (now + timedelta(minutes=LIVE_PRICE_WATCH_WINDOW_MIN)).isoformat()
+            payload["price_watch_checks"] = 1
+            payload["price_watch_next_check_at"] = (now + timedelta(minutes=LIVE_PRICE_WATCH_RECHECK_MIN)).isoformat()
+            payload["price_watch_final_state"] = "watching"
+            return "started", (
+                "Cenário passou, mas a odd ainda não ficou executável; "
+                f"vou rechecando o preço por até {LIVE_PRICE_WATCH_WINDOW_MIN} minutos."
+            )
+
+        payload["price_watch_checks"] = checks + 1
+        payload["price_watch_next_check_at"] = (now + timedelta(minutes=LIVE_PRICE_WATCH_RECHECK_MIN)).isoformat()
+        payload["price_watch_final_state"] = "watching"
+        return "watching", "Cenário segue bom, mas a odd ainda não ficou executável."
+
+    @staticmethod
+    def _encerrar_janela_preco_live(payload: dict, now: datetime):
+        payload["price_watch_active"] = False
+        payload["price_watch_closed_at"] = now.isoformat()
+        payload["price_watch_final_state"] = "released"
+        payload.pop("price_watch_next_check_at", None)
+
+    def _acionar_janela_preco_live_inteligente(
+        self,
+        payload: dict,
+        item: dict,
+        elapsed: int | str | None,
+        now: datetime,
+    ) -> tuple[str, str]:
+        if not payload.get("price_watch_active") and payload.get("price_watch_final_state") == "expired":
+            return "expired", payload.get("price_watch_reason") or "Janela de preÃ§o jÃ¡ expirou para esta leitura."
+
+        janela_status, janela_msg = self._status_janela_operacional_live(item, elapsed)
+        if janela_status != "ok":
+            payload["price_watch_active"] = False
+            payload["price_watch_final_state"] = "expired"
+            payload["price_watch_closed_at"] = now.isoformat()
+            payload["price_watch_reason"] = janela_msg
+            payload.pop("price_watch_next_check_at", None)
+            return "expired", janela_msg
+
+        expires_at = self._parse_payload_datetime(payload.get("price_watch_expires_at"))
+        if payload.get("price_watch_active") and expires_at and now > expires_at:
+            payload["price_watch_active"] = False
+            payload["price_watch_final_state"] = "expired"
+            payload["price_watch_closed_at"] = now.isoformat()
+            payload["price_watch_reason"] = "Janela de preÃ§o expirou sem odd executÃ¡vel."
+            payload.pop("price_watch_next_check_at", None)
+            return "expired", payload["price_watch_reason"]
+
+        try:
+            minuto_atual = int(elapsed or 0)
+        except Exception:
+            minuto_atual = 0
+        _, minuto_limite = self._janela_operacional_live(item)
+        minutos_restantes = max(0, int(minuto_limite) - minuto_atual)
+        if minutos_restantes < max(1, LIVE_PRICE_WATCH_RECHECK_MIN):
+            payload["price_watch_active"] = False
+            payload["price_watch_final_state"] = "expired"
+            payload["price_watch_closed_at"] = now.isoformat()
+            payload["price_watch_reason"] = "A leitura jÃ¡ entrou tarde demais para rechecagem Ãºtil de preÃ§o."
+            payload.pop("price_watch_next_check_at", None)
+            return "expired", payload["price_watch_reason"]
+
+        janela_efetiva = min(LIVE_PRICE_WATCH_WINDOW_MIN, minutos_restantes)
+        checks = int(payload.get("price_watch_checks") or 0)
+        proximo_check = min(LIVE_PRICE_WATCH_RECHECK_MIN, janela_efetiva)
+        if not payload.get("price_watch_active"):
+            payload["price_watch_active"] = True
+            payload["price_watch_started_at"] = now.isoformat()
+            payload["price_watch_expires_at"] = (now + timedelta(minutes=janela_efetiva)).isoformat()
+            payload["price_watch_checks"] = 1
+            payload["price_watch_next_check_at"] = (now + timedelta(minutes=proximo_check)).isoformat()
+            payload["price_watch_final_state"] = "watching"
+            return "started", (
+                "CenÃ¡rio passou, mas a odd ainda nÃ£o ficou executÃ¡vel; "
+                f"vou rechecando o preÃ§o por atÃ© {janela_efetiva} minutos."
+            )
+
+        payload["price_watch_checks"] = checks + 1
+        payload["price_watch_next_check_at"] = (now + timedelta(minutes=proximo_check)).isoformat()
+        payload["price_watch_final_state"] = "watching"
+        return "watching", "CenÃ¡rio segue bom, mas a odd ainda nÃ£o ficou executÃ¡vel."
+
+    @classmethod
+    def _formatar_alerta_preco_live(cls, item: dict, *, titulo: str, contexto: str) -> str:
+        home_name = item.get("home_name", "?")
+        away_name = item.get("away_name", "?")
+        mercado_label = item.get("descricao") or item.get("mercado", "")
+        payload = item.get("payload") or {}
+        minuto = item.get("elapsed") or payload.get("last_live_minute") or "?"
+        mensagem = payload.get("last_live_message") or item.get("note") or "Sem leitura adicional."
+        meta = cls._meta_live_contexto(item)
+        return "\n".join([
+            titulo,
+            f"<code>{home_name}</code> <b>x</b> <code>{away_name}</code>",
+            f"• {mercado_label}" + (f" | {meta}" if meta else ""),
+            f"• Minuto {minuto}",
+            f"• {mensagem}",
+            f"<i>{contexto}</i>",
+        ]).rstrip()
 
     def _garantir_radar_do_dia(self, data: str = None) -> bool:
         """Reconstrói silenciosamente o radar do dia se o scheduler subiu depois do scan."""
@@ -897,6 +1074,7 @@ class Scheduler:
             erros = 0
             notificacoes_publicas = []
             alertas_admin = []
+            alertas_preco_publicos = []
             sinais_live = []
             greens_antecipados = []
             reds_antecipados = []
@@ -967,7 +1145,7 @@ class Scheduler:
                         itens_resolvidos.append(item_id)
                         continue
 
-                    if item.get("watch_type") in {"approved_prelive", "live_opportunity"}:
+                    if item.get("watch_type") == "approved_prelive" or payload.get("live_signal_notified"):
                         green_agora = self._mercado_green_antecipado(item, game, stats)
                         red_agora = self._mercado_red_antecipado(item, game, stats)
                         if green_agora and not payload.get("live_hit_notified"):
@@ -1040,12 +1218,74 @@ class Scheduler:
                     elapsed = leitura.get("elapsed") or "?"
                     last_verdict = payload.get("last_live_verdict")
 
-                    if veredito == "cancelar" and self._deve_suprimir_cancelamento_tardio(item, game):
+                    bloqueio_operacional = False
+                    if veredito == "sinal_live":
+                        status_janela, mensagem_janela = self._status_janela_operacional_live(item, elapsed)
+                        if status_janela == "cedo":
+                            veredito = "monitorar"
+                            bloqueio_operacional = True
+                        elif status_janela == "tarde":
+                            veredito = "cancelar"
+                            leitura["mensagem"] = mensagem_janela or "A leitura apareceu tarde demais para virar tip operacional."
+                            bloqueio_operacional = True
+
+                    if veredito == "cancelar" and not bloqueio_operacional and self._deve_suprimir_cancelamento_tardio(item, game):
                         veredito = "monitorar"
 
                     if payload.get("live_signal_notified") and veredito == "cancelar":
                         veredito = "monitorar"
 
+                    if veredito == "sinal_live" and item.get("watch_type") in {"approved_prelive", "live_opportunity"}:
+                        now_local = datetime.now(ZoneInfo(TIMEZONE))
+                        if payload.get("price_watch_final_state") == "expired" and not payload.get("price_watch_active"):
+                            veredito = "monitorar"
+                        elif payload.get("price_watch_active") and not self._deve_consultar_odd_live_item(item, payload, now_local):
+                            veredito = "monitorar"
+                        else:
+                            payload = self._consultar_odd_live_agora(item, payload)
+                            item["payload"] = payload
+                        if veredito == "sinal_live" and self._odd_ev_live_aprovados(payload):
+                            self._encerrar_janela_preco_live(payload, now_local)
+                        elif veredito == "sinal_live":
+                            acao_preco, motivo_preco = self._acionar_janela_preco_live_inteligente(
+                                payload,
+                                item,
+                                elapsed,
+                                now_local,
+                            )
+                            payload["last_live_verdict"] = "price_watch"
+                            payload["last_live_minute"] = elapsed
+                            payload["last_live_message"] = leitura.get("mensagem", item.get("note"))
+                            payload["price_watch_reason"] = motivo_preco
+                            self.db.atualizar_live_watch_item(
+                                item_id,
+                                note=motivo_preco,
+                                payload=payload,
+                            )
+                            item["note"] = motivo_preco
+                            item["payload"] = payload
+                            if acao_preco in {"started", "expired"}:
+                                bloco_preco = self._formatar_alerta_preco_live(
+                                    {
+                                        **item,
+                                        "payload": payload,
+                                        "elapsed": elapsed,
+                                    },
+                                    titulo="🟡 <b>Janela de preço em observação</b>" if acao_preco == "started" else "🔴 <b>Janela de preço encerrada</b>",
+                                    contexto=(
+                                        f"Cenário passou, mas a odd ainda não ficou boa; vou rechecando por até {LIVE_PRICE_WATCH_WINDOW_MIN} minutos."
+                                        if acao_preco == "started"
+                                        else motivo_preco
+                                    ),
+                                )
+                                alertas_admin.append(
+                                    bloco_preco
+                                )
+                                if acao_preco == "started":
+                                    alertas_preco_publicos.append(bloco_preco)
+                            veredito = "monitorar"
+
+                    emitir_sinal_publico = False
                     if veredito in {"sinal_live", "cancelar"}:
                         repetir = last_verdict == veredito
                         if not repetir:
@@ -1061,8 +1301,10 @@ class Scheduler:
                                 titulo = "Leitura cancelada"
                             alertas_admin.append(
                                 f"{emoji} <b>{titulo}</b>\n"
-                                f"<b>{home_name} x {away_name}</b>\n"
-                                f"• {mercado_label}\n"
+                                f"<code>{home_name}</code> <b>x</b> <code>{away_name}</code>\n"
+                                f"• {mercado_label}"
+                                + (f" | {self._meta_live_contexto(item)}" if self._meta_live_contexto(item) else "")
+                                + "\n"
                                 f"• Minuto {elapsed}\n"
                                 f"• {leitura.get('mensagem', 'Sem leitura adicional.')}"
                             )
@@ -1075,6 +1317,7 @@ class Scheduler:
                                 novo_status = "resolved"
                                 itens_resolvidos.append(item_id)
                             elif veredito == "sinal_live":
+                                emitir_sinal_publico = True
                                 payload["live_signal_notified"] = True
                                 try:
                                     signal_minute = int(leitura.get("elapsed") or 0) or None
@@ -1096,7 +1339,11 @@ class Scheduler:
                                 note=note,
                                 payload=payload,
                             )
-                    if veredito == "sinal_live":
+                    if (
+                        veredito == "sinal_live"
+                        and item.get("watch_type") in {"approved_prelive", "live_opportunity"}
+                        and emitir_sinal_publico
+                    ):
                         sinal = dict(item)
                         sinal["payload"] = payload
                         sinal["elapsed"] = elapsed
@@ -1174,6 +1421,9 @@ class Scheduler:
             if alertas_admin:
                 bloco = "⚽ <b>Leitura live do FuteBot</b>\n\n" + "\n\n".join(alertas_admin)
                 self._enviar_telegram(bloco)
+
+            if alertas_preco_publicos:
+                self._enviar_telegram_publico("\n\n".join(alertas_preco_publicos))
 
             if sinais_live:
                 bloco_sinais_live = self._formatar_sinais_live_publicos(sinais_live)
@@ -1342,6 +1592,83 @@ class Scheduler:
         if mercado.endswith("_2t"):
             return elapsed >= 88
         return elapsed >= 88
+
+    @staticmethod
+    def _janela_operacional_live(item: dict) -> tuple[int, int]:
+        mercado = (item.get("mercado") or "").lower()
+        ht_market = mercado.endswith("_ht") or mercado.startswith("ht_")
+        second_half_market = mercado.endswith("_2t")
+        is_corners = "corners" in mercado
+        is_resultado = mercado.startswith("h2h_")
+        is_over = "over" in mercado
+        is_under = "under" in mercado
+        is_draw = mercado.endswith("draw")
+
+        if ht_market:
+            if is_corners and is_over:
+                return 20, 37
+            if is_corners and is_under:
+                return 24, 41
+            if is_resultado and is_draw:
+                return 26, 40
+            if is_resultado:
+                return 22, 38
+            if is_over:
+                return 18, 38
+            if is_under:
+                return 24, 41
+            return 20, 39
+
+        if second_half_market:
+            if is_corners and is_over:
+                return 52, 78
+            if is_corners and is_under:
+                return 60, 84
+            if is_resultado and is_draw:
+                return 58, 80
+            if is_resultado:
+                return 52, 78
+            if is_over:
+                return 52, 78
+            if is_under:
+                return 60, 84
+            return 54, 80
+
+        if is_corners and is_over:
+            return 50, 78
+        if is_corners and is_under:
+            return 58, 82
+        if is_resultado and is_draw:
+            return 58, 80
+        if is_resultado:
+            return 52, 78
+        if is_over:
+            return 50, 78
+        if is_under:
+            return 58, 84
+        return 50, 80
+
+    @classmethod
+    def _status_janela_operacional_live(
+        cls,
+        item: dict,
+        elapsed: int | str | None,
+    ) -> tuple[str, str]:
+        try:
+            minuto = int(elapsed or 0)
+        except Exception:
+            return "ok", ""
+        minimo, maximo = cls._janela_operacional_live(item)
+        if minuto < minimo:
+            return "cedo", f"A leitura ainda apareceu cedo demais para este mercado (janela útil a partir de {minimo}')."
+        if minuto >= maximo:
+            return "tarde", f"A leitura apareceu tarde demais para este mercado (janela útil até {maximo}')."
+        return "ok", ""
+
+    @classmethod
+    def _deve_bloquear_sinal_tardio(cls, item: dict, elapsed: int | str | None) -> bool:
+        status, _ = cls._status_janela_operacional_live(item, elapsed)
+        return status == "tarde"
 
     def _mercado_red_antecipado(self, item: dict, fixture: dict, stats: list[dict] | None = None) -> bool:
         """Detecta se um mercado já ficou matematicamente red antes do FT."""
@@ -1568,6 +1895,10 @@ class Scheduler:
             leitura = live.analisar(item_virtual, fixture, stats)
             if leitura.get("veredito") != "sinal_live":
                 continue
+            status_janela, _ = self._status_janela_operacional_live(item_virtual, leitura.get("elapsed"))
+            if status_janela != "ok":
+                categorias_existentes.add(categoria)
+                continue
             if self.db.live_market_notification_exists(scan_date, fixture_id, mercado, "sinal_live"):
                 categorias_existentes.add(categoria)
                 continue
@@ -1592,35 +1923,65 @@ class Scheduler:
                 "note": leitura.get("mensagem"),
                 "payload": payload,
             }
+            payload = self._consultar_odd_live_agora(item_salvo, payload)
+            item_salvo["payload"] = payload
             item_id = self.db.salvar_live_watch_item(scan_date, item_salvo)
-            try:
-                signal_minute = int(leitura.get("elapsed") or 0) or None
-            except Exception:
-                signal_minute = None
-            self.db.salvar_live_result_signal(
-                {
+            now_local = datetime.now(ZoneInfo(TIMEZONE))
+
+            if self._odd_ev_live_aprovados(payload):
+                self._encerrar_janela_preco_live(payload, now_local)
+                self.db.atualizar_live_watch_item(item_id, payload=payload)
+                try:
+                    signal_minute = int(leitura.get("elapsed") or 0) or None
+                except Exception:
+                    signal_minute = None
+                self.db.salvar_live_result_signal(
+                    {
+                        **item_salvo,
+                        "id": item_id,
+                        "scan_date": scan_date,
+                        "payload": payload,
+                    },
+                    signal_minute=signal_minute,
+                    signal_note=leitura.get("mensagem"),
+                )
+                self.db.salvar_live_market_notification(scan_date, fixture_id, mercado, "sinal_live")
+
+                alertas.append(
+                    f"🟢 <b>Entrada live liberada</b>\n"
+                    f"<code>{home_name}</code> <b>x</b> <code>{away_name}</code>\n"
+                    f"• {nomes_mercado.get(mercado, mercado)}"
+                    + (f" | {self._meta_live_contexto({'payload': payload, **item_salvo})}" if self._meta_live_contexto({'payload': payload, **item_salvo}) else "")
+                    + "\n"
+                    f"• Minuto {leitura.get('elapsed') or '?'}\n"
+                    f"• {leitura.get('mensagem', 'Sem leitura adicional.')}"
+                )
+                sinais.append({
                     **item_salvo,
                     "id": item_id,
-                    "scan_date": scan_date,
-                },
-                signal_minute=signal_minute,
-                signal_note=leitura.get("mensagem"),
-            )
-            self.db.salvar_live_market_notification(scan_date, fixture_id, mercado, "sinal_live")
-
-            alertas.append(
-                f"🟢 <b>Entrada live liberada</b>\n"
-                f"<b>{home_name} x {away_name}</b>\n"
-                f"• {nomes_mercado.get(mercado, mercado)}\n"
-                f"• Minuto {leitura.get('elapsed') or '?'}\n"
-                f"• {leitura.get('mensagem', 'Sem leitura adicional.')}"
-            )
-            sinais.append({
-                **item_salvo,
-                "id": item_id,
-                "payload": payload,
-                "elapsed": leitura.get("elapsed") or "?",
-            })
+                    "payload": payload,
+                    "elapsed": leitura.get("elapsed") or "?",
+                })
+            else:
+                _, motivo_preco = self._acionar_janela_preco_live_inteligente(
+                    payload,
+                    item_salvo,
+                    leitura.get("elapsed"),
+                    now_local,
+                )
+                self.db.atualizar_live_watch_item(item_id, note=motivo_preco, payload=payload)
+                bloco_preco = self._formatar_alerta_preco_live(
+                    {
+                        **item_salvo,
+                        "id": item_id,
+                        "payload": payload,
+                        "elapsed": leitura.get("elapsed") or "?",
+                        "note": motivo_preco,
+                    },
+                    titulo="🟡 <b>Janela de preço em observação</b>",
+                    contexto=f"Cenário passou, mas a odd ainda não ficou boa; vou rechecando por até {LIVE_PRICE_WATCH_WINDOW_MIN} minutos.",
+                )
+                alertas.append(bloco_preco)
             categorias_existentes.add(categoria)
 
         return alertas, sinais
@@ -1684,16 +2045,22 @@ class Scheduler:
                 linhas.append(f"🟣 <b>{tipo} em andamento #{idx}</b>")
                 linhas.append(f"• {len(locked)}/{len(itens)} perna(s) ja bateram")
             for item in locked:
+                meta_live = self._meta_live_contexto(item)
                 linhas.append(
                     f"✅ {item.get('home_name', '?')} x {item.get('away_name', '?')} | {item.get('mercado', '?')}"
+                    + (f" | {meta_live}" if meta_live else "")
                 )
             for item in lost:
+                meta_live = self._meta_live_contexto(item)
                 linhas.append(
                     f"❌ {item.get('home_name', '?')} x {item.get('away_name', '?')} | {item.get('mercado', '?')}"
+                    + (f" | {meta_live}" if meta_live else "")
                 )
             for item in pendentes:
+                meta_live = self._meta_live_contexto(item)
                 linhas.append(
                     f"⏳ Falta: {item.get('home_name', '?')} x {item.get('away_name', '?')} | {item.get('mercado', '?')}"
+                    + (f" | {meta_live}" if meta_live else "")
                 )
             linhas.append("")
 
@@ -1738,34 +2105,106 @@ class Scheduler:
         return novos
 
     @staticmethod
+    def _odd_live_contexto(item: dict) -> float | None:
+        payload = item.get("payload") or {}
+        for key in ("odd_usada", "odd_pinnacle", "odd"):
+            value = item.get(key)
+            if value not in (None, ""):
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    pass
+            value = payload.get(key)
+            if value not in (None, ""):
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    pass
+        return None
+
+    @staticmethod
+    def _bookmaker_live_contexto(item: dict) -> str:
+        payload = item.get("payload") or {}
+        return (
+            item.get("bookmaker")
+            or item.get("odd_fonte")
+            or payload.get("bookmaker")
+            or payload.get("odd_fonte")
+            or "1xBet"
+        )
+
+    @classmethod
+    def _meta_live_contexto(cls, item: dict) -> str:
+        partes = []
+        odd = cls._odd_live_contexto(item)
+        if odd and odd > 1:
+            partes.append(f"Odd {odd:.2f}")
+        payload = item.get("payload") or {}
+        ev = item.get("ev_percent")
+        if ev in (None, ""):
+            ev = payload.get("ev_percent")
+        if ev not in (None, ""):
+            try:
+                partes.append(f"EV {float(ev):+.1f}%")
+            except (TypeError, ValueError):
+                pass
+        casa = cls._bookmaker_live_contexto(item)
+        if casa and partes:
+            partes.append(casa)
+        return " | ".join(partes)
+
+    @classmethod
+    def _sinal_live_publicavel(cls, item: dict) -> bool:
+        odd = cls._odd_live_contexto(item)
+        if odd is None or odd <= 1:
+            return False
+        payload = item.get("payload") or {}
+        ev = item.get("ev_percent")
+        if ev in (None, ""):
+            ev = payload.get("ev_percent")
+        try:
+            float(ev)
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    @staticmethod
     def _formatar_combos_live(combos_live: list[dict]) -> str:
         """Formata sugestoes de combo live para o publico."""
         linhas = ["🟣 <b>Combos live em observacao</b>"]
         for idx, combo in enumerate(combos_live, 1):
             tipo = "Dupla" if combo.get("tipo") == "dupla" else "Tripla"
-            linhas.append(
-                f"\n<b>{tipo} live #{idx}</b> | Conf composta {combo.get('prob_composta', 0):.0%}"
-            )
+            detalhes_combo = [f"Conf composta {combo.get('prob_composta', 0):.0%}"]
+            odd_composta = combo.get("odd_composta")
+            if odd_composta:
+                detalhes_combo.append(f"Odd {odd_composta:.2f}")
+            ev_composto = combo.get("ev_composto")
+            if ev_composto is not None:
+                detalhes_combo.append(f"EV {ev_composto:+.1f}%")
+            linhas.append(f"\n<b>{tipo} live #{idx}</b> | {' | '.join(detalhes_combo)}")
             for item in combo.get("tips", []):
                 home = item.get("home_name", "?")
                 away = item.get("away_name", "?")
                 mercado = item.get("descricao") or item.get("mercado", "")
                 minuto = item.get("elapsed") or "?"
                 linhas.append(f"• <b>{home} x {away}</b>")
-                linhas.append(
-                    f"  <i>{mercado} | Conf {item.get('prob_modelo', 0):.0%} | Min {minuto}</i>"
-                )
+                detalhes = [mercado, f"Conf {item.get('prob_modelo', 0):.0%}", f"Min {minuto}"]
+                meta_live = Scheduler._meta_live_contexto(item)
+                if meta_live:
+                    detalhes.append(meta_live)
+                linhas.append(f"  <i>{' | '.join(detalhes)}</i>")
         linhas.append("\n<i>Combo live sugestivo. Nao entra nas metricas oficiais do dia.</i>")
         return "\n".join(linhas)
 
     @staticmethod
     def _formatar_sinais_live_publicos(sinais_live: list[dict]) -> str:
         """Formata sinais live unitarios para o publico, inclusive reavaliacoes."""
-        if not sinais_live:
+        sinais_validos = [item for item in sinais_live if Scheduler._sinal_live_publicavel(item)]
+        if not sinais_validos:
             return ""
 
         linhas = ["⚽ <b>Oportunidades live do FuteBot</b>"]
-        for item in sinais_live:
+        for item in sinais_validos:
             home = item.get("home_name", "?")
             away = item.get("away_name", "?")
             mercado = item.get("descricao") or item.get("mercado", "")
@@ -1778,13 +2217,14 @@ class Scheduler:
             else:
                 titulo = "🟢 <b>Entrada live liberada</b>"
                 contexto = "Leitura confirmada no acompanhamento ao vivo."
+            meta_live = Scheduler._meta_live_contexto(item)
 
             linhas.append(
                 "\n".join([
                     "",
                     titulo,
-                    f"<b>{home} x {away}</b>",
-                    f"• {mercado}",
+                    f"<code>{home}</code> <b>x</b> <code>{away}</code>",
+                    f"• {mercado}" + (f" | {meta_live}" if meta_live else ""),
                     f"• Minuto {minuto}",
                     f"• {mensagem}",
                     f"<i>{contexto}</i>",

@@ -186,7 +186,7 @@ module futebot.telegram {
 
   task publicar_mensagem_automatica {
     docs {
-      resumo: "Entrega mensagens automaticas ja geradas para os destinos do Telegram,com parse adequado e fallback seguro; barradas no T-30 devem avisar continuidade do watch live,e sinais live unitarios tambem precisam chegar ao publico."
+      resumo: "Entrega mensagens automaticas ja geradas para os destinos do Telegram,com parse adequado e fallback seguro; barradas no T-30 devem avisar continuidade do watch live,mas reavaliacoes internas sem entrada operacional nao devem ser tratadas como oportunidade publica; sempre que houver odd final valida,o texto publico ou operacional deve exibir odd,EV e bookmaker de forma explicita; quando o live abrir janela curta de observacao de preco,isso deve ser comunicado como watch de preco e nao como entrada liberada."
     }
     input {
       texto: Texto required

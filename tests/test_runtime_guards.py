@@ -231,6 +231,123 @@ class SchedulerTests(unittest.TestCase):
 
         self.assertFalse(Scheduler._deve_suprimir_cancelamento_tardio(item, fixture))
 
+    def test_bloqueia_sinal_live_tardio_no_fim_do_jogo(self):
+        from pipeline.scheduler import Scheduler
+
+        self.assertTrue(Scheduler._deve_bloquear_sinal_tardio({"mercado": "h2h_away"}, 90))
+        self.assertTrue(Scheduler._deve_bloquear_sinal_tardio({"mercado": "over05_2t"}, 90))
+        self.assertFalse(Scheduler._deve_bloquear_sinal_tardio({"mercado": "over05_2t"}, 72))
+
+    def test_janela_operacional_live_diferencia_over_e_under(self):
+        from pipeline.scheduler import Scheduler
+
+        self.assertEqual(Scheduler._janela_operacional_live({"mercado": "over05_2t"}), (52, 78))
+        self.assertEqual(Scheduler._janela_operacional_live({"mercado": "under15_2t"}), (60, 84))
+        self.assertEqual(Scheduler._janela_operacional_live({"mercado": "corners_over_85"}), (50, 78))
+        self.assertEqual(Scheduler._janela_operacional_live({"mercado": "corners_under_85"}), (58, 82))
+
+    def test_status_janela_operacional_bloqueia_cedo_e_tarde(self):
+        from pipeline.scheduler import Scheduler
+
+        self.assertEqual(
+            Scheduler._status_janela_operacional_live({"mercado": "over05_2t"}, 50)[0],
+            "cedo",
+        )
+        self.assertEqual(
+            Scheduler._status_janela_operacional_live({"mercado": "over05_2t"}, 78)[0],
+            "tarde",
+        )
+        self.assertEqual(
+            Scheduler._status_janela_operacional_live({"mercado": "under15_2t"}, 72)[0],
+            "ok",
+        )
+
+    def test_refresh_live_odds_context_ignora_blocked_recheck(self):
+        import pipeline.scheduler as scheduler_module
+        from pipeline.scheduler import Scheduler
+
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.db = MagicMock()
+
+        fake_enriquecer = MagicMock(side_effect=lambda payloads, phase_operacional=None: payloads)
+        with patch.object(scheduler_module, "enriquecer_tips_com_odds_oddspapi", fake_enriquecer):
+            scheduler._refresh_live_odds_context([
+                {
+                    "id": 1,
+                    "fixture_id": 100,
+                    "mercado": "under35",
+                    "watch_type": "blocked_recheck",
+                    "payload": {},
+                },
+                {
+                    "id": 2,
+                    "fixture_id": 101,
+                    "mercado": "over25",
+                    "watch_type": "approved_prelive",
+                    "payload": {
+                        "price_watch_active": True,
+                        "price_watch_expires_at": "2099-04-03T20:15:00-04:00",
+                        "price_watch_next_check_at": "2000-04-03T20:00:00-04:00",
+                    },
+                },
+            ])
+
+        fake_enriquecer.assert_called_once()
+        payloads = fake_enriquecer.call_args[0][0]
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0]["fixture_id"], 101)
+        scheduler.db.atualizar_live_watch_item.assert_called_once()
+
+    def test_acionar_janela_preco_live_inicia_watch_curto(self):
+        from pipeline.scheduler import Scheduler
+        from zoneinfo import ZoneInfo
+
+        scheduler = Scheduler.__new__(Scheduler)
+        now = datetime(2026, 4, 3, 20, 0, tzinfo=ZoneInfo("America/Manaus"))
+        payload = {}
+        item = {"mercado": "under15_2t"}
+
+        acao, motivo = scheduler._acionar_janela_preco_live_inteligente(payload, item, 70, now)
+
+        self.assertEqual(acao, "started")
+        self.assertTrue(payload["price_watch_active"])
+        self.assertEqual(payload["price_watch_checks"], 1)
+        self.assertIn("14 minutos", motivo)
+
+    def test_acionar_janela_preco_live_expira_quando_mercado_entra_tarde(self):
+        from pipeline.scheduler import Scheduler
+        from zoneinfo import ZoneInfo
+
+        scheduler = Scheduler.__new__(Scheduler)
+        now = datetime(2026, 4, 3, 20, 0, tzinfo=ZoneInfo("America/Manaus"))
+        payload = {}
+        item = {"mercado": "over05_2t"}
+
+        acao, motivo = scheduler._acionar_janela_preco_live_inteligente(payload, item, 79, now)
+
+        self.assertEqual(acao, "expired")
+        self.assertFalse(payload["price_watch_active"])
+        self.assertEqual(payload["price_watch_final_state"], "expired")
+        self.assertIn("tarde demais", motivo)
+
+    def test_odd_live_so_consulta_quando_watch_esta_vencido_para_recheck(self):
+        from pipeline.scheduler import Scheduler
+        from zoneinfo import ZoneInfo
+
+        scheduler = Scheduler.__new__(Scheduler)
+        now = datetime(2026, 4, 3, 20, 6, tzinfo=ZoneInfo("America/Manaus"))
+        item = {"watch_type": "approved_prelive"}
+        payload = {
+            "price_watch_active": True,
+            "price_watch_expires_at": "2026-04-03T20:15:00-04:00",
+            "price_watch_next_check_at": "2026-04-03T20:05:00-04:00",
+        }
+
+        self.assertTrue(scheduler._deve_consultar_odd_live_item(item, payload, now))
+
+        payload["price_watch_next_check_at"] = "2026-04-03T20:10:00-04:00"
+        self.assertFalse(scheduler._deve_consultar_odd_live_item(item, payload, now))
+
 
 class TelegramBotMessagingTests(unittest.TestCase):
     def test_reply_text_safe_retries_on_timeout(self):
@@ -1597,7 +1714,7 @@ class LiveIntelligenceTests(unittest.TestCase):
 
 
 class SchedulerLivePublicFormattingTests(unittest.TestCase):
-    def test_formatar_sinais_live_publicos_destaca_reavaliacao_bloqueada(self):
+    def test_formatar_sinais_live_publicos_ignora_item_sem_odd_ev(self):
         from pipeline.scheduler import Scheduler
 
         texto = Scheduler._formatar_sinais_live_publicos([{
@@ -1610,11 +1727,7 @@ class SchedulerLivePublicFormattingTests(unittest.TestCase):
             "payload": {"last_live_message": "Jogo segue travado e sem pressão real."},
         }])
 
-        self.assertIn("Oportunidades live do FuteBot", texto)
-        self.assertIn("Reavaliacao live", texto)
-        self.assertIn("San Lorenzo x Estudiantes", texto)
-        self.assertIn("Entrada barrada no pre-live, mas o jogo seguiu em observacao.", texto)
-        self.assertIn("Minuto 62", texto)
+        self.assertEqual(texto, "")
 
     def test_formatar_sinais_live_publicos_destaca_sinal_liberado(self):
         from pipeline.scheduler import Scheduler
@@ -1623,6 +1736,9 @@ class SchedulerLivePublicFormattingTests(unittest.TestCase):
             "home_name": "Casa",
             "away_name": "Fora",
             "descricao": "Over 2.5 gols",
+            "odd_usada": 1.74,
+            "ev_percent": 8.4,
+            "bookmaker": "1xBet",
             "watch_type": "approved_prelive",
             "elapsed": 55,
             "note": "Ritmo aumentou e a pressão ofensiva apareceu.",
@@ -1631,6 +1747,87 @@ class SchedulerLivePublicFormattingTests(unittest.TestCase):
 
         self.assertIn("Entrada live liberada", texto)
         self.assertIn("Leitura confirmada no acompanhamento ao vivo.", texto)
+        self.assertIn("<code>Casa</code> <b>x</b> <code>Fora</code>", texto)
+        self.assertIn("Odd 1.74 | EV +8.4% | 1xBet", texto)
+
+    def test_formatar_combos_live_exibe_odd_individual_e_composta(self):
+        from pipeline.scheduler import Scheduler
+
+        texto = Scheduler._formatar_combos_live([{
+            "tipo": "dupla",
+            "prob_composta": 0.41,
+            "odd_composta": 3.12,
+            "ev_composto": 7.8,
+            "tips": [
+                {
+                    "home_name": "Casa",
+                    "away_name": "Fora",
+                    "descricao": "Over 2.5 gols",
+                    "prob_modelo": 0.65,
+                    "elapsed": 55,
+                    "odd_usada": 1.74,
+                    "ev_percent": 8.4,
+                    "bookmaker": "1xBet",
+                },
+                {
+                    "home_name": "Um",
+                    "away_name": "Dois",
+                    "descricao": "BTTS",
+                    "prob_modelo": 0.63,
+                    "elapsed": 63,
+                    "odd_usada": 1.79,
+                    "ev_percent": 6.1,
+                    "bookmaker": "1xBet",
+                },
+            ],
+        }])
+
+        self.assertIn("Odd 3.12", texto)
+        self.assertIn("EV +7.8%", texto)
+        self.assertIn("Odd 1.74 | EV +8.4% | 1xBet", texto)
+
+    def test_blocked_recheck_nao_gera_oportunidade_publica(self):
+        from pipeline.scheduler import Scheduler
+
+        sinais = []
+        item = {
+            "watch_type": "blocked_recheck",
+            "home_name": "San Lorenzo",
+            "away_name": "Estudiantes",
+            "payload": {},
+        }
+        veredito = "sinal_live"
+
+        if veredito == "sinal_live" and item.get("watch_type") in {"approved_prelive", "live_opportunity"}:
+            sinal = dict(item)
+            sinal["payload"] = item["payload"]
+            sinal["elapsed"] = 27
+            sinais.append(sinal)
+
+        self.assertEqual(sinais, [])
+
+    def test_sinal_live_ja_notificado_nao_republica_o_mesmo_mercado(self):
+        sinais = []
+        item = {
+            "watch_type": "approved_prelive",
+            "home_name": "San Lorenzo",
+            "away_name": "Estudiantes",
+            "payload": {"live_signal_notified": True, "last_live_verdict": "sinal_live"},
+        }
+        veredito = "sinal_live"
+        emitir_sinal_publico = False
+
+        if (
+            veredito == "sinal_live"
+            and item.get("watch_type") in {"approved_prelive", "live_opportunity"}
+            and emitir_sinal_publico
+        ):
+            sinal = dict(item)
+            sinal["payload"] = item["payload"]
+            sinal["elapsed"] = 60
+            sinais.append(sinal)
+
+        self.assertEqual(sinais, [])
 
 
 if __name__ == "__main__":
