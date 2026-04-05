@@ -954,45 +954,73 @@ def _override_roi_texto(metricas: dict) -> str:
     return f"{roi:+.1f}%"
 
 
-def _override_metricas_live_janela(self, data_inicio: str) -> dict:
-    conn = self.db._conn()
-    rows = conn.execute(
-        "SELECT * FROM live_results WHERE acertou IS NOT NULL AND scan_date >= ?",
-        (data_inicio,),
-    ).fetchall()
-    conn.close()
+def _override_inicio_banca_visivel(self) -> str | None:
+    return self.db.obter_inicio_banca_visivel()
 
-    if not rows:
-        return {
-            "total": 0,
-            "acertos": 0,
-            "accuracy": 0,
-            "roi": None,
-            "lucro_total": 0.0,
-            "total_com_odd": 0,
-        }
 
-    total = len(rows)
-    acertos = sum(1 for r in rows if r["acertou"] == 1)
-    with_odd = [r for r in rows if r["lucro"] is not None]
-    lucro_total = sum((r["lucro"] or 0.0) for r in with_odd)
-    total_com_odd = len(with_odd)
+def _override_inicio_banca_visivel_data(self) -> str | None:
+    inicio = _override_inicio_banca_visivel(self)
+    return inicio[:10] if inicio else None
+
+
+def _override_inicio_banca_visivel_label(self) -> str | None:
+    inicio = _override_inicio_banca_visivel(self)
+    if not inicio:
+        return None
+    try:
+        if "T" in inicio:
+            return datetime.fromisoformat(inicio).strftime("%d/%m/%Y %H:%M")
+        return datetime.strptime(inicio[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+    except Exception:
+        return inicio
+
+
+def _override_verificar_degradacao_visivel(self) -> dict:
+    inicio_visivel = _override_inicio_banca_visivel(self)
+    inicio_visivel_data = _override_inicio_banca_visivel_data(self)
+    inicio_janela = (datetime.now() - timedelta(days=DEGRADATION_WINDOW_DAYS)).strftime("%Y-%m-%d")
+    data_inicio = max(inicio_janela, inicio_visivel_data) if inicio_visivel_data else inicio_janela
+
+    treino = self.db.ultimo_treino()
+    versao = treino["modelo_versao"] if treino else None
+    metricas_geral = self.db.metricas_modelo(modelo_versao=versao, data_inicio=inicio_visivel)
+    metricas_janela = self._metricas_janela(data_inicio, modelo_versao=versao)
+
+    alertas = []
+    degradado = False
+
+    if metricas_janela["total"] >= 5 and metricas_janela["accuracy"] < DEGRADATION_ACC_MIN * 100:
+        degradado = True
+        alertas.append(
+            f"⚠️ Accuracy dos últimos {DEGRADATION_WINDOW_DAYS} dias "
+            f"({metricas_janela['accuracy']:.1f}%) abaixo do mínimo "
+            f"({DEGRADATION_ACC_MIN*100:.0f}%). Considere retreinar."
+        )
+
+    if not alertas:
+        alertas.append("✅ Modelo operando dentro dos parâmetros normais na fase visível da banca.")
 
     return {
-        "total": total,
-        "acertos": acertos,
-        "accuracy": round(acertos / total * 100, 1) if total else 0,
-        "roi": round(lucro_total / total_com_odd * 100, 1) if total_com_odd else None,
-        "lucro_total": round(lucro_total, 2),
-        "total_com_odd": total_com_odd,
+        "degradado": degradado,
+        "pausado": False,
+        "alertas": alertas,
+        "metricas_janela": metricas_janela,
+        "metricas_geral": metricas_geral,
+        "slices_ruins": [],
     }
+
+
+def _override_metricas_live_janela(self, data_inicio: str) -> dict:
+    return self.db.metricas_live(data_inicio=data_inicio)
 
 
 def _override_relatorio_diario(self) -> str:
     treino = self.db.ultimo_treino()
     versao = treino["modelo_versao"] if treino else None
-    pre = self.db.metricas_modelo(modelo_versao=versao)
-    live = self.db.metricas_live()
+    inicio_visivel = _override_inicio_banca_visivel(self)
+    inicio_label = _override_inicio_banca_visivel_label(self)
+    pre = self.db.metricas_modelo(modelo_versao=versao, data_inicio=inicio_visivel)
+    live = self.db.metricas_live(data_inicio=inicio_visivel)
     resumo = self.db.resumo()
 
     lines = [
@@ -1001,6 +1029,13 @@ def _override_relatorio_diario(self) -> str:
         f"🗓 {datetime.now().strftime('%d/%m/%Y %H:%M')}",
         "━━━━━━━━━━━━━━━━━━━━━━━━━",
         "",
+    ]
+    if inicio_label:
+        lines.extend([
+            f"🧾 Base visível desde: <b>{inicio_label}</b>",
+            "",
+        ])
+    lines.extend([
         "<b>📈 PRE-LIVE</b>",
         f"  Apostas: {pre['total']} | Acertos: {pre['acertos']}",
         f"  Accuracy: <b>{pre['accuracy']}%</b>",
@@ -1012,7 +1047,7 @@ def _override_relatorio_diario(self) -> str:
         f"  Accuracy: <b>{live['accuracy']}%</b>",
         f"  ROI: <b>{self._roi_texto(live)}</b>",
         f"  Lucro conhecido: <b>{live['lucro_total']:+.2f}u</b>",
-    ]
+    ])
 
     if treino:
         try:
@@ -1036,16 +1071,26 @@ def _override_relatorio_diario(self) -> str:
 
 
 def _override_relatorio_saude(self) -> str:
-    check = self.verificar_degradacao()
+    inicio_visivel = _override_inicio_banca_visivel(self)
+    check = _override_verificar_degradacao_visivel(self) if inicio_visivel else self.verificar_degradacao()
     inicio_janela = (datetime.now() - timedelta(days=DEGRADATION_WINDOW_DAYS)).strftime("%Y-%m-%d")
-    live_janela = _override_metricas_live_janela(self, inicio_janela)
-    live_geral = self.db.metricas_live()
+    inicio_visivel_data = _override_inicio_banca_visivel_data(self)
+    inicio_label = _override_inicio_banca_visivel_label(self)
+    inicio_janela_visivel = max(inicio_janela, inicio_visivel_data) if inicio_visivel_data else inicio_janela
+    live_janela = _override_metricas_live_janela(self, inicio_janela_visivel)
+    live_geral = self.db.metricas_live(data_inicio=inicio_visivel)
+    mg_visivel = self.db.metricas_modelo(data_inicio=inicio_visivel)
 
     lines = [
         "📅 <b>Saúde do Modelo</b>",
         datetime.now().strftime("%d/%m/%Y"),
         "",
     ]
+    if inicio_label:
+        lines.extend([
+            f"🧾 Base visível desde: <b>{inicio_label}</b>",
+            "",
+        ])
 
     for alerta in check["alertas"]:
         lines.append(alerta)
@@ -1068,7 +1113,7 @@ def _override_relatorio_saude(self) -> str:
     lines.extend([
         "",
         "<b>Acumulado total</b>",
-        f"  Pre-live: {mg['total']} | Acertos: {mg['acertos']} | Accuracy: {mg['accuracy']}% | ROI: {mg['roi']:+.1f}% | Lucro: {mg['lucro_total']:+.2f}u" if mg["total"] else "  Pre-live: 0",
+        f"  Pre-live: {mg_visivel['total']} | Acertos: {mg_visivel['acertos']} | Accuracy: {mg_visivel['accuracy']}% | ROI: {mg_visivel['roi']:+.1f}% | Lucro: {mg_visivel['lucro_total']:+.2f}u" if mg_visivel["total"] else "  Pre-live: 0",
         (
             f"  Live: {live_geral['total']} | Acertos: {live_geral['acertos']} | "
             f"Accuracy: {live_geral['accuracy']:.1f}% | ROI: {_override_roi_texto(live_geral)} | "
@@ -1094,6 +1139,18 @@ def _override_relatorio_saude(self) -> str:
 def _override_relatorio_resultado_dia(self, data: str = None) -> str:
     if data is None:
         data = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    inicio_visivel_data = _override_inicio_banca_visivel_data(self)
+    inicio_label = _override_inicio_banca_visivel_label(self)
+    if inicio_visivel_data and data < inicio_visivel_data:
+        return "\n".join([
+            "━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "📒 <b>RESULTADOS DO DIA</b>",
+            f"🗓 {datetime.strptime(data, '%Y-%m-%d').strftime('%d/%m/%Y')}",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "",
+            f"Histórico visível reiniciado em <b>{inicio_label}</b>.",
+            "Esse dia ficou fora da nova fase mostrada ao usuário.",
+        ])
 
     conn = self.db._conn()
     raw_rows = conn.execute(

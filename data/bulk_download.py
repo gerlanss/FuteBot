@@ -21,13 +21,29 @@ Segurança:
   - Pode ser interrompido e retomado com --resume
 """
 
+import sys
 import time
 import argparse
 from datetime import datetime
 
 from config import LEAGUES, TRAIN_SEASONS
-from services.apifootball import raw_request, stats_partida, eventos_partida
+from services.apifootball import (
+    raw_request,
+    status_conta,
+    stats_partida,
+    eventos_partida,
+    escalacao_partida,
+    jogadores_partida,
+    lesoes_fixture,
+    stats_time,
+)
 from data.database import Database
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 # Limite de segurança: para em 7.000 req para não estourar 7.500
 LIMITE_SEGURANCA = 7000
@@ -241,22 +257,338 @@ def baixar_eventos(db: Database, resume: bool = False):
     return baixados
 
 
+def baixar_team_stats_contexto(db: Database, max_items: int = 0):
+    """
+    Baixa team_stats agregadas por team x league x season.
+    Alto valor para pre-live com custo bem menor que lineups historicos.
+    """
+    print("\n" + "=" * 60)
+    print("ETAPA 4: BAIXANDO TEAM STATS AGREGADAS")
+    print("=" * 60)
+
+    conn = db._conn()
+    rows = conn.execute("""
+        SELECT x.team_id, x.team_name, x.league_id, x.season
+        FROM (
+            SELECT DISTINCT home_id AS team_id, home_name AS team_name, league_id, season
+            FROM fixtures
+            WHERE season IN ({})
+            UNION
+            SELECT DISTINCT away_id AS team_id, away_name AS team_name, league_id, season
+            FROM fixtures
+            WHERE season IN ({})
+        ) x
+        LEFT JOIN team_stats ts
+          ON ts.team_id = x.team_id
+         AND ts.league_id = x.league_id
+         AND ts.season = x.season
+        WHERE ts.team_id IS NULL
+        ORDER BY x.season, x.league_id, x.team_id
+    """.format(",".join("?" for _ in TRAIN_SEASONS), ",".join("?" for _ in TRAIN_SEASONS)), TRAIN_SEASONS + TRAIN_SEASONS).fetchall()
+    conn.close()
+
+    if max_items > 0:
+        rows = rows[:max_items]
+
+    total = len(rows)
+    print(f"Combinações team/league/season para baixar: {total}")
+    salvos = 0
+    erros = 0
+
+    for i, row in enumerate(rows):
+        if i > 0 and i % 100 == 0:
+            usadas, pode = _check_limite()
+            print(f"  [checkpoint {i}/{total}] requests hoje: {usadas}")
+            if not pode:
+                print("⚠️ Limite de segurança atingido durante team_stats. Encerrando fase.")
+                break
+
+        payload = stats_time(int(row["team_id"]), int(row["league_id"]), int(row["season"]))
+        if payload:
+            db.salvar_team_stats(
+                int(row["team_id"]),
+                int(row["league_id"]),
+                int(row["season"]),
+                str(row["team_name"] or ""),
+                payload,
+            )
+            salvos += 1
+        else:
+            erros += 1
+
+        if (i + 1) % 100 == 0:
+            print(f"  [{i+1}/{total}] team_stats salvas: {salvos} | erros: {erros}")
+        _delay()
+
+    print(f"\n✅ Team stats salvas: {salvos} | Erros: {erros}")
+    return salvos
+
+
+def baixar_contexto_operacional_fixtures(db: Database, *, lookahead_days: int = 3, include_players: bool = False):
+    """
+    Baixa contexto barato para fixtures recentes/proximos:
+      - lineups
+      - injuries
+      - opcionalmente player stats da partida
+
+    Nao tenta baixar lineup historico de todo o universo porque isso seria
+    uma ideia de bosta em custo/beneficio.
+    """
+    print("\n" + "=" * 60)
+    print("ETAPA 5: BAIXANDO CONTEXTO OPERACIONAL DE FIXTURES")
+    print("=" * 60)
+
+    conn = db._conn()
+    rows = conn.execute(
+        """
+        SELECT fixture_id, home_name, away_name, date, status
+        FROM fixtures
+        WHERE datetime(date) >= datetime('now', '-1 day')
+          AND datetime(date) <= datetime('now', ?)
+        ORDER BY date
+        """,
+        (f"+{int(lookahead_days)} day",),
+    ).fetchall()
+    conn.close()
+
+    total = len(rows)
+    print(f"Fixtures no recorte operacional: {total}")
+    lineups_salvas = 0
+    injuries_salvas = 0
+    players_salvos = 0
+
+    conn = db._conn()
+    fixtures_com_lineups = {int(r["fixture_id"]) for r in conn.execute("SELECT DISTINCT fixture_id FROM fixture_lineups").fetchall()}
+    fixtures_com_injuries = {int(r["fixture_id"]) for r in conn.execute("SELECT DISTINCT fixture_id FROM fixture_injuries").fetchall()}
+    fixtures_com_players = {int(r["fixture_id"]) for r in conn.execute("SELECT DISTINCT fixture_id FROM fixture_player_stats").fetchall()}
+    conn.close()
+
+    for i, row in enumerate(rows):
+        if i > 0 and i % 25 == 0:
+            usadas, pode = _check_limite()
+            print(f"  [checkpoint {i}/{total}] requests hoje: {usadas}")
+            if not pode:
+                print("⚠️ Limite de segurança atingido durante contexto operacional. Encerrando fase.")
+                break
+
+        fixture_id = int(row["fixture_id"])
+
+        if fixture_id not in fixtures_com_lineups:
+            lineups = escalacao_partida(fixture_id)
+            if lineups:
+                db.salvar_lineups(fixture_id, lineups)
+                lineups_salvas += len(lineups)
+            _delay()
+
+        if fixture_id not in fixtures_com_injuries:
+            injuries = lesoes_fixture(fixture_id)
+            db.salvar_injuries(fixture_id, injuries or [])
+            injuries_salvas += len(injuries or [])
+            _delay()
+
+        if include_players and fixture_id not in fixtures_com_players:
+            players = jogadores_partida(fixture_id)
+            if players:
+                db.salvar_fixture_player_stats(fixture_id, players)
+                players_salvos += sum(len(team.get("players") or []) for team in players)
+            _delay()
+
+        if (i + 1) % 50 == 0:
+            print(
+                f"  [{i+1}/{total}] fixture contextos | lineups={lineups_salvas} "
+                f"| injuries={injuries_salvas} | players={players_salvos}"
+            )
+
+    print(
+        f"\n✅ Contexto operacional salvo: lineups={lineups_salvas} "
+        f"| injuries={injuries_salvas} | players={players_salvos}"
+    )
+    return {
+        "lineups_salvas": lineups_salvas,
+        "injuries_salvas": injuries_salvas,
+        "players_salvos": players_salvos,
+    }
+
+
+def baixar_contexto_treino(db: Database, *, lookahead_days: int = 3, include_players: bool = False):
+    """
+    Fase completa de contexto de treino:
+      - team stats agregadas (baratas e fortes para pre-live)
+      - lineups/injuries operacionais (baratos e úteis para o jogo do dia)
+    """
+    team_stats_salvas = baixar_team_stats_contexto(db)
+    contexto = baixar_contexto_operacional_fixtures(
+        db,
+        lookahead_days=lookahead_days,
+        include_players=include_players,
+    )
+    return {
+        "team_stats_salvas": team_stats_salvas,
+        **contexto,
+    }
+
+
+def baixar_eventos_live_treino(db: Database, max_items: int = 0):
+    """
+    Baixa eventos só dos fixtures que realmente entraram no fluxo live.
+    Muito mais inteligente do que tentar baixar 19 mil fixtures na tora.
+    """
+    print("\n" + "=" * 60)
+    print("ETAPA LIVE: BAIXANDO EVENTOS DOS FIXTURES DE TREINO")
+    print("=" * 60)
+
+    conn = db._conn()
+    rows = conn.execute(
+        """
+        SELECT DISTINCT lw.fixture_id, lw.home_name, lw.away_name
+        FROM live_watchlist lw
+        LEFT JOIN fixture_events fe ON fe.fixture_id = lw.fixture_id
+        WHERE lw.watch_type IN ('approved_prelive', 'live_opportunity')
+          AND fe.fixture_id IS NULL
+        ORDER BY lw.fixture_id
+        """
+    ).fetchall()
+    conn.close()
+
+    if max_items > 0:
+        rows = rows[:max_items]
+
+    total = len(rows)
+    print(f"Fixtures live sem eventos: {total}")
+    baixados = 0
+    erros = 0
+
+    for i, row in enumerate(rows):
+        if i > 0 and i % 25 == 0:
+            usadas, pode = _check_limite()
+            print(f"  [checkpoint {i}/{total}] requests hoje: {usadas}")
+            if not pode:
+                print("⚠️ Limite de segurança atingido durante eventos live. Encerrando fase.")
+                break
+
+        events = eventos_partida(int(row["fixture_id"]))
+        if events:
+            db.salvar_eventos(int(row["fixture_id"]), events)
+            baixados += len(events)
+        else:
+            erros += 1
+        _delay()
+
+    print(f"\n✅ Eventos live salvos: {baixados} | Fixtures sem retorno: {erros}")
+    return baixados
+
+
+def baixar_eventos_historicos_live(
+    db: Database,
+    max_items: int = 0,
+    league_ids: list[int] | None = None,
+    seasons: list[int] | None = None,
+    reserve: int = 150,
+):
+    """
+    Baixa eventos históricos para o treino live real.
+
+    Fonte:
+      - fixtures FT das seasons de treino
+      - ligas configuradas
+      - prioridade por fixtures mais recentes
+
+    Isso aqui é o que interessa para modelo live de verdade.
+    Watchlist do bot não manda porra nenhuma como fonte primária de treino.
+    """
+    print("\n" + "=" * 60)
+    print("ETAPA LIVE HISTÓRICA: BAIXANDO EVENTOS PARA TREINO REAL")
+    print("=" * 60)
+
+    seasons = list(seasons or TRAIN_SEASONS)
+    if not league_ids:
+        league_ids = [info["id"] for info in LEAGUES.values()]
+
+    season_placeholders = ",".join("?" for _ in seasons)
+    league_placeholders = ",".join("?" for _ in league_ids)
+
+    conn = db._conn()
+    rows = conn.execute(
+        f"""
+        SELECT f.fixture_id, f.home_name, f.away_name, f.league_id, f.season, f.date
+        FROM fixtures f
+        LEFT JOIN fixture_events fe ON fe.fixture_id = f.fixture_id
+        WHERE f.status = 'FT'
+          AND fe.fixture_id IS NULL
+          AND f.season IN ({season_placeholders})
+          AND f.league_id IN ({league_placeholders})
+        GROUP BY f.fixture_id
+        ORDER BY f.season DESC, f.date DESC
+        """,
+        tuple(seasons) + tuple(league_ids),
+    ).fetchall()
+    conn.close()
+
+    if max_items > 0:
+        rows = rows[:max_items]
+
+    total = len(rows)
+    print(f"Fixtures históricas sem eventos: {total}")
+    fixtures_salvos = 0
+    eventos_salvos = 0
+    erros = 0
+
+    for i, row in enumerate(rows):
+        if i > 0 and i % 25 == 0:
+            status = status_conta() or {}
+            req = status.get("requests", {})
+            usadas = int(req.get("current") or 0)
+            limite = int(req.get("limit_day") or 7500)
+            pode = usadas < max(limite - reserve, 0)
+            print(f"  [checkpoint {i}/{total}] requests hoje: {usadas}/{limite} | reserva: {reserve}")
+            if not pode:
+                print("⚠️ Orçamento real da API atingido durante eventos live históricos. Encerrando fase.")
+                break
+
+        events = eventos_partida(int(row["fixture_id"]))
+        if events:
+            db.salvar_eventos(int(row["fixture_id"]), events)
+            fixtures_salvos += 1
+            eventos_salvos += len(events)
+        else:
+            erros += 1
+        _delay()
+
+    print(
+        f"\n✅ Eventos históricos live salvos: fixtures={fixtures_salvos} "
+        f"| eventos={eventos_salvos} | fixtures sem retorno={erros}"
+    )
+    return {
+        "fixtures_salvos": fixtures_salvos,
+        "eventos_salvos": eventos_salvos,
+        "fixtures_sem_retorno": erros,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Bulk download de dados históricos")
     parser.add_argument("--stats", action="store_true", help="Só baixar stats (fixtures já baixados)")
     parser.add_argument("--eventos", action="store_true", help="Só baixar eventos")
+    parser.add_argument("--eventos-live", action="store_true", help="Baixar eventos apenas dos fixtures usados no treino live")
+    parser.add_argument("--eventos-historicos-live", action="store_true", help="Baixar eventos históricos para o treino live real")
+    parser.add_argument("--team-stats", action="store_true", help="Só baixar team stats agregadas")
+    parser.add_argument("--contexto", action="store_true", help="Baixar lineups/injuries para fixtures operacionais")
+    parser.add_argument("--contexto-operacional-only", action="store_true", help="Baixar só lineups/injuries para fixtures operacionais")
+    parser.add_argument("--players", action="store_true", help="Incluir player stats no modo --contexto")
+    parser.add_argument("--lookahead-days", type=int, default=3, help="Janela de dias para o modo --contexto")
+    parser.add_argument("--max-items", type=int, default=0, help="Limita itens processados em fases de backfill")
     parser.add_argument("--resume", action="store_true", help="Continuar de onde parou")
     args = parser.parse_args()
 
-    print("🤖 FuteBot — Bulk Download")
+    print("FuteBot - Bulk Download")
     print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
     # Verificar estado da conta
     usadas, pode = _check_limite()
-    print(f"📊 Requests hoje: {usadas}/7500 (limite segurança: {LIMITE_SEGURANCA})")
+    print(f"Requests hoje: {usadas}/7500 (limite seguranca: {LIMITE_SEGURANCA})")
 
     if not pode:
-        print("⚠️ Limite de segurança já atingido. Tente novamente amanhã.")
+        print("Limite de seguranca ja atingido. Tente novamente amanha.")
         return
 
     db = Database()
@@ -265,6 +597,24 @@ def main():
         baixar_stats(db, resume=args.resume)
     elif args.eventos:
         baixar_eventos(db, resume=args.resume)
+    elif args.eventos_live:
+        baixar_eventos_live_treino(db, max_items=args.max_items)
+    elif args.eventos_historicos_live:
+        baixar_eventos_historicos_live(db, max_items=args.max_items)
+    elif args.team_stats:
+        baixar_team_stats_contexto(db, max_items=args.max_items)
+    elif args.contexto_operacional_only:
+        baixar_contexto_operacional_fixtures(
+            db,
+            lookahead_days=args.lookahead_days,
+            include_players=args.players,
+        )
+    elif args.contexto:
+        baixar_contexto_treino(
+            db,
+            lookahead_days=args.lookahead_days,
+            include_players=args.players,
+        )
     else:
         # Pipeline completo
         baixar_fixtures(db)
@@ -279,8 +629,8 @@ def main():
         print(f"  {k}: {v:,}")
 
     usadas, _ = _check_limite()
-    print(f"\n📊 Requests usadas hoje: {usadas}/7500")
-    print("🏁 Download concluído!")
+    print(f"\nRequests usadas hoje: {usadas}/7500")
+    print("Download concluido!")
 
 
 if __name__ == "__main__":

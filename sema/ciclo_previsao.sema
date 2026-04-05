@@ -136,7 +136,7 @@ module futebot.previsao {
 
   task acompanhar_previsao_live {
     docs {
-      resumo: "Monitora a previsao aprovada ao vivo,emitindo sinal,cancelamento ou resolucao antecipada quando o contexto permitir,com piso operacional de confianca em 60%; leituras barradas no pre-live que ficaram em reavaliacao seguem watch interno,mas nao consomem OddsPapi live nem retornam ao publico como oportunidade ate existir entrada valida; apos uma liberacao live,ciclos seguintes so podem atualizar contexto interno,nao republicar o mesmo sinal sem transicao nova; quando o cenario passa mas a odd live ainda nao ficou executavel,o fluxo abre janela curta de observacao de preco antes da promocao; cada mercado precisa respeitar faixa temporal inteligente,com janelas diferentes para over,under,cantos e resultado,para evitar sinal cedo demais ou tarde demais."
+      resumo: "Monitora a previsao aprovada ao vivo,emitindo sinal,cancelamento ou resolucao antecipada quando o contexto permitir,com piso operacional de confianca em 60%; leituras barradas no pre-live que ficaram em reavaliacao seguem watch interno,mas nao consomem OddsPapi live nem retornam ao publico como oportunidade ate existir entrada valida; apos uma liberacao live,ciclos seguintes so podem atualizar contexto interno,nao republicar o mesmo sinal sem transicao nova; quando o cenario passa mas a odd live ainda nao ficou executavel,o fluxo abre janela curta de observacao de preco antes da promocao; cada mercado precisa respeitar faixa temporal inteligente,com janelas diferentes para over,under,cantos e resultado,para evitar sinal cedo demais ou tarde demais; o monitoramento tambem precisa persistir snapshot de leitura e metricas live para treino posterior sem depender de odds pagas,e precisa gravar esse snapshot tanto na watchlist quanto no resultado live do sinal para nao depender de payload mutavel; o treino live final precisa nascer por liga e por mercado,sem fallback global escondido."
     }
     input {
       data_operacao: Texto required
@@ -240,7 +240,7 @@ module futebot.previsao {
 
   task registrar_feedback_aprendizado {
     docs {
-      resumo: "Anexa feedback contextual da partida resolvida para ajudar learner,auditoria e saude do modelo."
+      resumo: "Anexa feedback contextual da partida resolvida para ajudar learner,auditoria e saude do modelo,guardando tambem contexto suficiente para treino pre-live; no live,o feedback operacional e apenas apoio secundario,porque o treino real deve nascer primeiro da base historica da API com fixtures,eventos e janelas oficiais por mercado,e depois ser fatiado por liga x mercado; para cantos,a trilha real depende dos snapshots persistidos pelo proprio bot. Em reinicio de banca,os relatorios visiveis ao usuario podem ser ancorados em um novo marco temporal sem apagar o historico interno que segue servindo para treino,auditoria e operacao."
     }
     input {
       fixture_id: Id required

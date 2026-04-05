@@ -1,15 +1,14 @@
 """
 Treinamento do modelo XGBoost para previsão de resultados.
 
-Treina 8 modelos independentes:
+Treina modelos independentes:
   1. resultado_1x2: classificação (home/draw/away) — FT
   2. over_under_15: binário (over/under 1.5 gols)
   3. over_under_25: binário (over/under 2.5 gols)
   4. over_under_35: binário (over/under 3.5 gols)
-  5. btts: binário (ambos marcam sim/não)
-  6. resultado_ht: classificação (home/draw/away) — 1º tempo
-  7. htft: classificação (9 classes) — combinado HT/FT
-  8. total_corners: regressão (prever total de escanteios — futuro)
+  5. resultado_ht: classificação (home/draw/away) — 1º tempo
+  6. htft: classificação (9 classes) — combinado HT/FT
+  7. gols por tempo e escanteios
 
 Split temporal: treina com seasons anteriores, testa na última.
 Salva modelos em data/models/ como arquivos .json do XGBoost.
@@ -50,7 +49,7 @@ class Trainer:
 
     CORE_MODEL_NAMES = [
         "resultado_1x2", "over_under_15", "over_under_25", "over_under_35",
-        "btts", "resultado_ht", "htft",
+        "resultado_ht", "htft",
     ]
 
     def __init__(self, db: Database):
@@ -73,7 +72,7 @@ class Trainer:
 
         Para cada liga em config.LEAGUES com >= MIN_JOGOS_LIGA fixtures FT:
           - Constrói dataset filtrado por league_id
-          - Treina os 14 modelos e salva em data/models/league_{id}/
+          - Treina os modelos ativos e salva em data/models/league_{id}/
 
         Ligas com poucos dados não geram modelos nem tips.
 
@@ -149,7 +148,7 @@ class Trainer:
                 test_season: int = None,
                 league_id: int = None) -> dict:
         """
-        Treina os 14 modelos com split temporal para uma liga específica.
+        Treina os modelos ativos com split temporal para uma liga específica.
 
         Parâmetros:
           train_seasons: seasons para treino
@@ -229,7 +228,6 @@ class Trainer:
             ("over_under_15",  "over15",        "binary:logistic", None),
             ("over_under_25",  "over25",        "binary:logistic", None),
             ("over_under_35",  "over35",        "binary:logistic", None),
-            ("btts",           "btts",          "binary:logistic", None),
             ("resultado_ht",   "resultado_ht",  "multi:softprob",  3),
             ("htft",           "htft",          "multi:softprob",  9),
             # ── Gols por tempo (1T e 2T) ──
@@ -448,8 +446,6 @@ class Trainer:
         y1_train = np.array([l["resultado"] for l in y_train])
         y1_test = np.array([l["resultado"] for l in y_test])
         y2_test = np.array([l["over25"] for l in y_test])
-        y3_test = np.array([l["btts"] for l in y_test])
-
         # ─── 1x2 ───
         contagem_1x2 = Counter(y1_train)
         classe_majority = contagem_1x2.most_common(1)[0][0]
@@ -469,12 +465,7 @@ class Trainer:
         majority_ou = Counter(y2_test).most_common(1)[0][0]
         majority_acc_ou = np.mean(y2_test == majority_ou)
 
-        # ─── BTTS ───
-        majority_btts = Counter(y3_test).most_common(1)[0][0]
-        majority_acc_btts = np.mean(y3_test == majority_btts)
-
         print(f"   O/U baselines → Majority({majority_ou}): {majority_acc_ou:.1%}")
-        print(f"   BTTS baselines → Majority({majority_btts}): {majority_acc_btts:.1%}")
 
         return {
             "1x2": {
@@ -487,11 +478,6 @@ class Trainer:
                 "random": 0.5,
                 "majority": round(float(majority_acc_ou), 4),
                 "majority_class": int(majority_ou),
-            },
-            "btts": {
-                "random": 0.5,
-                "majority": round(float(majority_acc_btts), 4),
-                "majority_class": int(majority_btts),
             },
         }
 
@@ -526,8 +512,8 @@ class Trainer:
             result["1x2"] = round(brier_1x2, 4)
             print(f"   Brier 1x2: {brier_1x2:.4f} (ref: random=0.667, bom<0.30)")
 
-        # ─── Over/Under e BTTS (Brier binário para todos) ───
-        for key in ["over_under_15", "over_under_25", "over_under_35", "btts",
+        # ─── Over/Under e outros mercados binários ───
+        for key in ["over_under_15", "over_under_25", "over_under_35",
                     "over_under_05_ht", "over_under_15_ht",
                     "over_under_05_2t", "over_under_15_2t",
                     "corners_over_85", "corners_over_95", "corners_over_105"]:
@@ -565,7 +551,7 @@ class Trainer:
         Critérios por tipo:
           - Multiclasse 1x2: accuracy > majority baseline E > MODEL_ACC_MIN_1X2
           - Multiclasse HT/HTFT: accuracy > 33% (melhor que random 3 classes)
-          - Binário (O/U, BTTS, corners, gols/tempo): accuracy > 55%
+          - Binário (O/U, corners, gols/tempo): accuracy > 55%
           - Calibração 1x2: Brier < MODEL_BRIER_MAX
 
         Modelo reprovado → revertido para backup (ou removido se sem backup).
@@ -628,7 +614,7 @@ class Trainer:
                     motivo = f"{nome}: {acc:.1%} ≥ 34%"
 
             else:
-                # Binário (O/U, BTTS, corners, gols/tempo): > 55%
+                # Binário (O/U, corners, gols/tempo): > 55%
                 if acc < LIMIAR_BINARIO:
                     passou = False
                     motivo = f"{nome}: {acc:.1%} < {LIMIAR_BINARIO:.0%}"

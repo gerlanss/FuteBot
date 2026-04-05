@@ -22,8 +22,10 @@ Uso:
 
 import asyncio
 import os
+import re
 import sys
 import subprocess
+import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -81,6 +83,7 @@ _PUBLIC_COMMANDS = [
 _ADMIN_COMMANDS = [
     BotCommand("start", "Abrir menu do bot"),
     BotCommand("scan", "Rodar radar do dia"),
+    BotCommand("times", "Buscar time do dia e monitorar live"),
     BotCommand("scan_final", "Liberar mercados T-30"),
     BotCommand("ao_vivo", "Status dos jogos previstos"),
     BotCommand("resultados", "Resultados recentes"),
@@ -94,6 +97,7 @@ _ADMIN_COMMANDS = [
 
 _DISCOVERY_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "run_market_discovery_training.py"
 _DISCOVERY_RUNS_DIR = Path(__file__).resolve().parents[1] / "data" / "discovery_runs"
+_MANUAL_LIVE_FIXTURE_MARKET = "__fixture_watch__"
 
 # Carregar chat_id salvo (se existir)
 if TELEGRAM_CHAT_ID:
@@ -230,6 +234,224 @@ async def _reply_text_safe(message, texto: str, parse_mode=None, reply_markup=No
     return None
 
 
+def _normalizar_texto_busca(valor: str) -> str:
+    texto = unicodedata.normalize("NFKD", valor or "")
+    texto = "".join(ch for ch in texto if not unicodedata.combining(ch))
+    texto = texto.casefold()
+    texto = re.sub(r"[^a-z0-9]+", " ", texto)
+    return re.sub(r"\s+", " ", texto).strip()
+
+
+def _extrair_consultas_times(texto: str) -> list[str]:
+    bruto = (texto or "").replace("\n", ",").replace(";", ",").replace("|", ",")
+    partes = [parte.strip() for parte in bruto.split(",")]
+    consultas = []
+    vistos = set()
+    for parte in partes:
+        if not parte:
+            continue
+        chave = _normalizar_texto_busca(parte)
+        if not chave or chave in vistos:
+            continue
+        vistos.add(chave)
+        consultas.append(parte)
+    return consultas
+
+
+def _sigla_time_busca(valor: str) -> str:
+    tokens = [token for token in _normalizar_texto_busca(valor).split(" ") if token]
+    if len(tokens) == 1:
+        return tokens[0]
+    ignorar = {"fc", "cf", "sc", "ac", "cd", "club", "de", "da", "do", "the"}
+    letras = [token[0] for token in tokens if token not in ignorar]
+    return "".join(letras)
+
+
+def _consulta_parece_sigla(valor: str) -> bool:
+    bruto = re.sub(r"[^A-Za-z0-9]+", "", valor or "")
+    return 2 <= len(bruto) <= 5 and " " not in (valor or "").strip()
+
+
+def _fixture_status_busca(fixture: dict) -> tuple[str, bool]:
+    status_info = (fixture.get("fixture") or {}).get("status") or {}
+    short = (status_info.get("short") or "NS").upper()
+    elapsed = status_info.get("elapsed")
+
+    if short in {"1H", "2H", "HT", "ET", "LIVE"}:
+        minuto = f"{int(elapsed)}'" if elapsed else "ao vivo"
+        return f"ao vivo ({minuto})", True
+    if short in {"NS", "TBD"}:
+        data_iso = (fixture.get("fixture") or {}).get("date")
+        try:
+            kickoff = datetime.fromisoformat(str(data_iso).replace("Z", "+00:00")).astimezone(ZoneInfo(TIMEZONE))
+            return f"joga hoje às {kickoff.strftime('%H:%M')}", True
+        except Exception:
+            return "joga hoje", True
+    if short in {"PST", "CANC", "ABD", "AWD", "WO"}:
+        return "nao joga hoje (adiado/cancelado)", False
+    if short in {"FT", "AET", "PEN"}:
+        return "ja encerrou hoje", False
+    return f"status {short}", True
+
+
+def _fixture_casa_com_consulta(fixture: dict, consulta: str) -> bool:
+    alvo = _normalizar_texto_busca(consulta)
+    if not alvo:
+        return False
+    home_nome = ((fixture.get("teams") or {}).get("home") or {}).get("name", "")
+    away_nome = ((fixture.get("teams") or {}).get("away") or {}).get("name", "")
+    home = _normalizar_texto_busca(home_nome)
+    away = _normalizar_texto_busca(away_nome)
+    usa_sigla = _consulta_parece_sigla(consulta)
+    alvo_sigla = _sigla_time_busca(consulta) if usa_sigla else ""
+    home_sigla = _sigla_time_busca(home_nome) if usa_sigla else ""
+    away_sigla = _sigla_time_busca(away_nome) if usa_sigla else ""
+    return (
+        alvo in home
+        or alvo in away
+        or (home and home in alvo)
+        or (away and away in alvo)
+        or (alvo_sigla and alvo_sigla == home_sigla)
+        or (alvo_sigla and alvo_sigla == away_sigla)
+    )
+
+
+def _coletar_fixtures_times_do_dia(data_operacao: str) -> list[dict]:
+    fixtures = []
+    vistos_fixture = set()
+    for params in (
+        {"date": data_operacao, "timezone": TIMEZONE},
+        {"live": "all", "timezone": TIMEZONE},
+    ):
+        resposta = raw_request("fixtures", params) or {}
+        for fixture in resposta.get("response", []) or []:
+            fixture_id = ((fixture.get("fixture") or {}).get("id"))
+            if fixture_id and fixture_id in vistos_fixture:
+                continue
+            if fixture_id:
+                vistos_fixture.add(fixture_id)
+            fixtures.append(fixture)
+    return fixtures
+
+
+def _registrar_fixture_manual_live(fixture: dict, consulta: str) -> int | None:
+    try:
+        _db.salvar_fixture(fixture)
+    except Exception:
+        pass
+
+    fixture_info = fixture.get("fixture") or {}
+    league = fixture.get("league") or {}
+    teams = fixture.get("teams") or {}
+    item = {
+        "fixture_id": fixture_info.get("id"),
+        "date": fixture_info.get("date"),
+        "fixture_date": fixture_info.get("date"),
+        "league_id": league.get("id"),
+        "home_name": ((teams.get("home") or {}).get("name") or "?"),
+        "away_name": ((teams.get("away") or {}).get("name") or "?"),
+        "mercado": _MANUAL_LIVE_FIXTURE_MARKET,
+        "descricao": "Acompanhamento manual por time",
+        "prob_modelo": None,
+        "watch_type": "manual_fixture",
+        "status": "active",
+        "note": f"Gancho manual por time: {consulta}",
+        "payload": {
+            "origin": "manual_team_lookup",
+            "manual_team_query": consulta,
+            "manual_anchor": True,
+        },
+    }
+    return _db.salvar_live_watch_item(datetime.now(ZoneInfo(TIMEZONE)).strftime("%Y-%m-%d"), item)
+
+
+def _monitorar_times_do_dia(consultas: list[str]) -> dict:
+    hoje = datetime.now(ZoneInfo(TIMEZONE)).strftime("%Y-%m-%d")
+    fixtures = _coletar_fixtures_times_do_dia(hoje)
+
+    encontrados = []
+    sem_jogo = []
+    vistos_fixture = set()
+
+    for consulta in consultas:
+        matches = [fixture for fixture in fixtures if _fixture_casa_com_consulta(fixture, consulta)]
+        if not matches:
+            sem_jogo.append(consulta)
+            continue
+
+        for fixture in matches:
+            fixture_id = ((fixture.get("fixture") or {}).get("id"))
+            status_texto, monitoravel = _fixture_status_busca(fixture)
+            teams = fixture.get("teams") or {}
+            home_name = ((teams.get("home") or {}).get("name") or "?")
+            away_name = ((teams.get("away") or {}).get("name") or "?")
+            item = {
+                "consulta": consulta,
+                "fixture_id": fixture_id,
+                "home_name": home_name,
+                "away_name": away_name,
+                "status_texto": status_texto,
+                "monitoravel": monitoravel,
+                "league_name": ((fixture.get("league") or {}).get("name") or ""),
+            }
+            if monitoravel and fixture_id not in vistos_fixture:
+                item["watch_id"] = _registrar_fixture_manual_live(fixture, consulta)
+                vistos_fixture.add(fixture_id)
+            encontrados.append(item)
+
+    return {
+        "data": hoje,
+        "consultas": consultas,
+        "fixtures": encontrados,
+        "sem_jogo": sem_jogo,
+    }
+
+
+def _formatar_monitoramento_times_html(resultado: dict) -> str:
+    fixtures = resultado.get("fixtures") or []
+    sem_jogo = resultado.get("sem_jogo") or []
+    data_br = datetime.strptime(resultado["data"], "%Y-%m-%d").strftime("%d/%m")
+    monitoraveis = [item for item in fixtures if item.get("monitoravel")]
+    encerrados = [item for item in fixtures if not item.get("monitoravel")]
+
+    linhas = [f"<b>Busca de times no dia | {data_br}</b>"]
+    if monitoraveis:
+        linhas.append("")
+        linhas.append("<b>Entraram no radar live</b>")
+        for item in monitoraveis:
+            linhas.append(
+                f"• <code>{item.get('home_name', '?')}</code> <b>x</b> <code>{item.get('away_name', '?')}</code>"
+            )
+            detalhe = item.get("status_texto", "sem status")
+            if item.get("league_name"):
+                detalhe += f" | {item['league_name']}"
+            if item.get("consulta"):
+                detalhe += f" | busca: {item['consulta']}"
+            linhas.append(f"  <i>{detalhe} — entrou no radar live</i>")
+    if encerrados:
+        linhas.append("")
+        linhas.append("<b>Jogaram hoje, mas nao entram no radar</b>")
+        for item in encerrados:
+            linhas.append(
+                f"• <code>{item.get('home_name', '?')}</code> <b>x</b> <code>{item.get('away_name', '?')}</code>"
+            )
+            detalhe = item.get("status_texto", "sem status")
+            if item.get("league_name"):
+                detalhe += f" | {item['league_name']}"
+            if item.get("consulta"):
+                detalhe += f" | busca: {item['consulta']}"
+            linhas.append(f"  <i>{detalhe}</i>")
+    if sem_jogo:
+        linhas.append("")
+        linhas.append("<b>Sem jogo hoje</b>")
+        for consulta in sem_jogo:
+            linhas.append(f"• <code>{consulta}</code>")
+    if not fixtures and not sem_jogo:
+        linhas.append("")
+        linhas.append("Nenhum jogo encontrado para hoje.")
+    return "\n".join(linhas)
+
+
 def _formatar_modelo_html(treino: dict | None) -> str:
     if treino:
         try:
@@ -349,6 +571,7 @@ def _formatar_ajuda_html() -> str:
         "<b>Comandos do FuteBot</b>\n\n"
         "<b>Operacao</b>\n"
         "- <code>/scan</code> - radar do dia, sem revelar mercados\n"
+        "- <code>/times PSG, Fortaleza</code> - acha jogos do dia por time e ancora no radar live\n"
         "- <code>/scan_final</code> - liberar mercados da janela T-30\n"
         "- <code>/ao_vivo</code> - acompanhar jogos previstos\n"
         "- <code>/resultados</code> - ver resultados recentes\n\n"
@@ -684,6 +907,38 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _garantir_admin_message(update.message):
         return
     await _reply_html(update.message, _formatar_status_html(), reply_markup=_botao_voltar())
+
+
+async def cmd_times(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Busca um ou mais times nos jogos de hoje e ancora o fixture no radar live."""
+    _registrar_update(update)
+    if not await _garantir_admin_message(update.message):
+        return
+
+    consultas = _extrair_consultas_times(" ".join(context.args))
+    if not consultas:
+        await _reply_html(
+            update.message,
+            "<b>Uso</b>\n<code>/times PSG, Fortaleza, San Lorenzo</code>\n\n"
+            "Pode mandar um time ou varios separados por virgula.",
+            reply_markup=_botao_voltar(),
+        )
+        return
+
+    await _reply_text_safe(update.message, "🔎 Procurando os times de hoje e amarrando no radar live...")
+    try:
+        resultado = _monitorar_times_do_dia(consultas)
+        await _reply_html(
+            update.message,
+            _formatar_monitoramento_times_html(resultado),
+            reply_markup=_botao_voltar(),
+        )
+    except Exception as e:
+        await _reply_text_safe(
+            update.message,
+            f"❌ Erro ao buscar os times do dia:\n{e}",
+            reply_markup=_botao_voltar(),
+        )
 
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1372,6 +1627,7 @@ def criar_bot() -> Application:
     # Registrar handlers
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("times", cmd_times))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("scan_final", cmd_scan_final))
     app.add_handler(CommandHandler("ao_vivo", cmd_ao_vivo))

@@ -107,10 +107,6 @@ MODELO_MERCADOS = [
         ("over35", "prob_over35"),
         ("under35", "prob_under35"),
     ]),
-    ("btts", "binary:logistic", None, [
-        ("btts_yes", "prob_btts_yes"),
-        ("btts_no", "prob_btts_no"),
-    ]),
     ("resultado_ht", "multi:softprob", 3, [
         ("ht_home", "prob_ht_home"),
         ("ht_draw", "prob_ht_draw"),
@@ -158,7 +154,6 @@ LABEL_KEY = {
     "over_under_15": "over15",
     "over_under_25": "over25",
     "over_under_35": "over35",
-    "btts":          "btts",
     "resultado_ht":  "resultado_ht",
     "htft":          "htft",
     # Modelos de 1T, 2T e escanteios

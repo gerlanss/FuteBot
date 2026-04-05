@@ -1,6 +1,6 @@
 module futebot.quarentena {
   docs {
-    resumo: "Contrato semantico para deteccao de slices degradados, quarentena seletiva e retreino focal automatico no FuteBot."
+    resumo: "Contrato semantico para deteccao de slices degradados,quarentena seletiva e retreino focal automatico no FuteBot."
   }
 
   state slice_quarentena {
@@ -24,7 +24,7 @@ module futebot.quarentena {
 
   task avaliar_degradacao_modelo {
     docs {
-      resumo: "Analisa a janela recente do modelo ativo, detecta slices ruins e monta os alertas operacionais."
+      resumo: "Analisa a janela recente do modelo ativo,detecta slices ruins e monta os alertas operacionais."
     }
     input {
       modelo_versao: Texto required
@@ -69,7 +69,7 @@ module futebot.quarentena {
 
   task aplicar_quarentena_seletiva {
     docs {
-      resumo: "Desativa apenas slices degradados da versao ativa, sem pausar o bot inteiro."
+      resumo: "Desativa apenas slices degradados da versao ativa,sem pausar o bot inteiro."
     }
     input {
       modelo_versao: Texto required
@@ -152,7 +152,7 @@ module futebot.quarentena {
 
   task executar_retreino_focal_quarentena {
     docs {
-      resumo: "Roda o AutoTuner apenas nas ligas em quarentena, com custo baixo e trials reduzidos."
+      resumo: "Roda o AutoTuner apenas nas ligas em quarentena,com custo baixo e trials reduzidos,e serve de base para um reforco pre-live mais adaptativo em cima do XGBoost+Optuna; no live,o retreino serio deve usar a base historica da API por mercado e por janela oficial,em vez de depender primariamente de watchlist operacional,e precisa gerar slices por liga x mercado sem fallback global; mercados sem timeline historica confiavel,como cantos sem snapshots por minuto,pedem trilha propria antes de virar modelo."
     }
     input {
       modelo_versao: Texto required
@@ -204,6 +204,7 @@ module futebot.quarentena {
     effects {
       auditoria manutencao_quarentena criticidade = alta
       persistencia estado_modelo criticidade = alta
+      persistencia artefatos_treino criticidade = media
     }
   }
 }

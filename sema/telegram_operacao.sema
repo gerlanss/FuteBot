@@ -66,7 +66,7 @@ module futebot.telegram {
 
   task executar_comando_operacional {
     docs {
-      resumo: "Executa um comando do Telegram,respeitando as restricoes de acesso e roteando para scanner,saude,treino ou status,com retry curto quando o transporte do Telegram oscila."
+      resumo: "Executa um comando do Telegram,respeitando as restricoes de acesso e roteando para scanner,saude,treino,status ou busca manual por time; quando o operador informa um ou mais times,o bot precisa descobrir se eles jogam hoje,informar se estao ao vivo ou o horario do jogo e,quando o fixture ainda for monitoravel no dia,ancorar automaticamente esse fixture no radar live; a busca manual por time deve cruzar fixtures do dia com live=all para nao perder jogo em andamento por fuso ou atraso da fonte,e deve aceitar nome longo/apelido de clube sem confundir sigla curta com nome composto nao relacionado."
     }
     input {
       chat_id: Id required
@@ -101,6 +101,7 @@ module futebot.telegram {
     error {
       acesso_restrito: "O comando exige perfil de administrador."
       comando_desconhecido: "O callback ou comando informado nao existe no mapa do bot."
+      time_sem_jogo: "O time consultado nao joga hoje e nao deve ser ancorado no radar live."
       falha_operacional: "A execucao do comando falhou e retornou mensagem de erro."
     }
     tests {
@@ -186,7 +187,7 @@ module futebot.telegram {
 
   task publicar_mensagem_automatica {
     docs {
-      resumo: "Entrega mensagens automaticas ja geradas para os destinos do Telegram,com parse adequado e fallback seguro; barradas no T-30 devem avisar continuidade do watch live,mas reavaliacoes internas sem entrada operacional nao devem ser tratadas como oportunidade publica; sempre que houver odd final valida,o texto publico ou operacional deve exibir odd,EV e bookmaker de forma explicita; quando o live abrir janela curta de observacao de preco,isso deve ser comunicado como watch de preco e nao como entrada liberada."
+      resumo: "Entrega mensagens automaticas ja geradas para os destinos do Telegram,com parse adequado e fallback seguro; barradas no T-30 devem avisar continuidade do watch live,mas reavaliacoes internas sem entrada operacional nao devem ser tratadas como oportunidade publica; sempre que houver odd final valida,o texto publico ou operacional deve exibir odd,EV e bookmaker de forma explicita; quando o live abrir janela curta de observacao de preco,isso deve ser comunicado como watch de preco e nao como entrada liberada; em reinicio operacional de banca,o historico de envio do Telegram precisa poder ser resetado sem apagar chats registrados nem historico esportivo,limpando apenas a memoria de dedupe e os flags de envio presos na watchlist; adicionalmente,o historico de performance mostrado ao usuario pode ser reiniciado a partir de um marco visivel da banca sem deletar o passado usado pelo bot."
     }
     input {
       texto: Texto required

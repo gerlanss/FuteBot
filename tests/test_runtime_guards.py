@@ -1,8 +1,10 @@
 import asyncio
 import importlib
+import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime
@@ -42,6 +44,60 @@ class ConfigTests(unittest.TestCase):
                 else:
                     os.environ[key] = value
             importlib.reload(config)
+
+
+class SchedulerPriceWatchReasonTests(unittest.TestCase):
+    def test_motivo_nao_executavel_live_distingue_odd_ev_e_indisponibilidade(self):
+        from pipeline.scheduler import Scheduler
+
+        self.assertIn(
+            "odd esta indisponivel",
+            Scheduler._motivo_nao_executavel_live({"odd_usada": None, "ev_percent": 8.5}),
+        )
+        self.assertIn(
+            "EV esta indisponivel",
+            Scheduler._motivo_nao_executavel_live({"odd_usada": 1.81, "ev_percent": None}),
+        )
+        self.assertIn(
+            "odd ficou abaixo",
+            Scheduler._motivo_nao_executavel_live({"odd_usada": 1.33, "ev_percent": 14.2}),
+        )
+        self.assertIn(
+            "EV ficou abaixo",
+            Scheduler._motivo_nao_executavel_live({"odd_usada": 1.81, "ev_percent": 1.3}),
+        )
+
+    def test_ev_live_permite_observacao_so_a_partir_de_dois_por_cento(self):
+        from pipeline.scheduler import Scheduler
+
+        ok, motivo = Scheduler._ev_live_permite_observacao({"odd_usada": 1.81, "ev_percent": 3.2})
+        self.assertTrue(ok)
+        self.assertIsNone(motivo)
+
+        ok, motivo = Scheduler._ev_live_permite_observacao({"odd_usada": 1.81, "ev_percent": 1.3})
+        self.assertFalse(ok)
+        self.assertIn("faixa minima de observacao", motivo)
+
+    def test_formatar_alerta_preco_live_usa_motivo_real_em_vez_de_texto_generico(self):
+        from pipeline.scheduler import Scheduler
+
+        bloco = Scheduler._formatar_alerta_preco_live(
+            {
+                "home_name": "Stuttgart",
+                "away_name": "Dortmund",
+                "descricao": "Under 1.5",
+                "elapsed": 58,
+                "payload": {
+                    "last_live_message": "O jogo segue mais controlado.",
+                    "price_watch_reason": "Cenario passou, mas o EV ficou abaixo do minimo operacional (1.2% < 5.0%).",
+                },
+            },
+            titulo="Janela",
+            contexto="Cenário passou, mas a odd ainda não ficou boa; vou rechecando por até 15 minutos.",
+        )
+
+        self.assertIn("EV ficou abaixo do minimo operacional", bloco)
+        self.assertNotIn("odd ainda nao ficou boa", bloco.lower())
 
 
 class TrainerModelDiscoveryTests(unittest.TestCase):
@@ -112,6 +168,31 @@ class PredictorMemoryTests(unittest.TestCase):
 
 
 class SchedulerTests(unittest.TestCase):
+    def test_live_opportunity_probability_never_none(self):
+        from pipeline.scheduler import Scheduler
+
+        scheduler = Scheduler.__new__(Scheduler)
+        leitura = {
+            "veredito": "sinal_live",
+            "elapsed": 63,
+            "mercado": "h2h_home",
+            "metricas": {
+                "shots_total": 14.0,
+                "shots_on": 6.0,
+                "corners": 7.0,
+                "xg": 1.42,
+                "teams": [
+                    {"shots_total": 9.0, "shots_on": 4.0, "xg": 0.96},
+                    {"shots_total": 5.0, "shots_on": 2.0, "xg": 0.46},
+                ],
+            },
+        }
+
+        prob = scheduler._inferir_prob_modelo_live("h2h_home", leitura)
+
+        self.assertIsNotNone(prob)
+        self.assertGreaterEqual(prob, 0.60)
+
     def test_job_relatorio_runs_without_timedelta_name_error(self):
         from pipeline.scheduler import Scheduler
 
@@ -330,6 +411,124 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(payload["price_watch_final_state"], "expired")
         self.assertIn("tarde demais", motivo)
 
+    def test_acionar_janela_preco_live_descarta_ev_abaixo_de_dois_sem_observacao(self):
+        from pipeline.scheduler import Scheduler
+        from zoneinfo import ZoneInfo
+
+        scheduler = Scheduler.__new__(Scheduler)
+        now = datetime(2026, 4, 3, 20, 0, tzinfo=ZoneInfo("America/Manaus"))
+        payload = {"odd_usada": 1.81, "ev_percent": 1.3}
+        item = {"mercado": "under15_2t"}
+
+        acao, motivo = scheduler._acionar_janela_preco_live_inteligente(payload, item, 70, now)
+
+        self.assertEqual(acao, "expired")
+        self.assertFalse(payload["price_watch_active"])
+        self.assertEqual(payload["price_watch_final_state"], "expired")
+        self.assertIn("faixa minima de observacao", motivo)
+
+    def test_job_check_ao_vivo_ignora_analise_direta_do_fixture_manual(self):
+        from pipeline.scheduler import Scheduler
+
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.db = MagicMock()
+        scheduler._entrar_secao_critica = MagicMock(return_value=True)
+        scheduler._sair_secao_critica = MagicMock()
+        scheduler._refresh_live_odds_context = MagicMock()
+        scheduler._detectar_oportunidades_live_fixture = MagicMock(return_value=([], []))
+        scheduler._enviar_telegram = MagicMock()
+        scheduler._enviar_telegram_publico = MagicMock()
+        scheduler._notification_sent = MagicMock(return_value=True)
+        scheduler._save_notification_sent = MagicMock()
+        scheduler._notificar_progresso_combos_live = MagicMock(return_value="")
+        scheduler.db.live_watch_items.return_value = [{
+            "id": 1,
+            "scan_date": "2026-04-03",
+            "fixture_id": 101,
+            "fixture_date": "2026-04-03T19:00:00+00:00",
+            "league_id": 71,
+            "home_name": "Fortaleza",
+            "away_name": "Bogota",
+            "mercado": "__fixture_watch__",
+            "watch_type": "manual_fixture",
+            "status": "active",
+            "payload": {"manual_anchor": True},
+            "note": "Gancho manual por time: Fortaleza",
+        }]
+        scheduler.db.predictions_pendentes.return_value = []
+
+        fake_live = MagicMock()
+
+        with patch("pipeline.scheduler.raw_request", return_value={
+            "response": [{
+                "fixture": {"id": 101, "status": {"short": "1H", "elapsed": 27}},
+                "goals": {"home": 0, "away": 0},
+            }]
+        }), patch("pipeline.scheduler.stats_partida", return_value=[]), \
+             patch("pipeline.scheduler.LiveIntelligence", return_value=fake_live):
+            scheduler._job_check_ao_vivo()
+
+        fake_live.analisar.assert_not_called()
+        scheduler._detectar_oportunidades_live_fixture.assert_called_once()
+        scheduler.db.atualizar_live_watch_item.assert_called()
+
+    def test_job_check_ao_vivo_resolve_leitura_quando_janela_preco_ja_expirou(self):
+        from pipeline.scheduler import Scheduler
+
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.db = MagicMock()
+        scheduler._entrar_secao_critica = MagicMock(return_value=True)
+        scheduler._sair_secao_critica = MagicMock()
+        scheduler._refresh_live_odds_context = MagicMock()
+        scheduler._detectar_oportunidades_live_fixture = MagicMock(return_value=([], []))
+        scheduler._enviar_telegram = MagicMock()
+        scheduler._enviar_telegram_publico = MagicMock()
+        scheduler._notification_sent = MagicMock(return_value=True)
+        scheduler._save_notification_sent = MagicMock()
+        scheduler._notificar_progresso_combos_live = MagicMock(return_value="")
+        scheduler.db.live_watch_items.return_value = [{
+            "id": 7,
+            "scan_date": "2026-04-03",
+            "fixture_id": 202,
+            "fixture_date": "2026-04-03T19:00:00+00:00",
+            "league_id": 71,
+            "home_name": "Puebla",
+            "away_name": "Juarez",
+            "mercado": "h2h_home",
+            "descricao": "Casa",
+            "watch_type": "approved_prelive",
+            "status": "active",
+            "payload": {
+                "price_watch_active": False,
+                "price_watch_final_state": "expired",
+                "price_watch_reason": "Janela de preco expirou sem odd executavel.",
+            },
+            "note": "Segue observando.",
+        }]
+        scheduler.db.predictions_pendentes.return_value = []
+
+        fake_live = MagicMock()
+        fake_live.analisar.return_value = {
+            "veredito": "sinal_live",
+            "elapsed": 70,
+            "mensagem": "O mandante segue melhor no jogo.",
+        }
+
+        with patch("pipeline.scheduler.raw_request", return_value={
+            "response": [{
+                "fixture": {"id": 202, "status": {"short": "2H", "elapsed": 70}},
+                "goals": {"home": 1, "away": 0},
+            }]
+        }), patch("pipeline.scheduler.stats_partida", return_value=[]), \
+             patch("pipeline.scheduler.LiveIntelligence", return_value=fake_live):
+            scheduler._job_check_ao_vivo()
+
+        update_calls = scheduler.db.atualizar_live_watch_item.call_args_list
+        self.assertTrue(any(call.kwargs.get("status") == "resolved" for call in update_calls))
+        self.assertTrue(any("Janela de preco expirou" in (call.kwargs.get("note") or "") for call in update_calls))
+        scheduler._enviar_telegram.assert_called()
+        self.assertIn("Leitura cancelada", scheduler._enviar_telegram.call_args.args[0])
+
     def test_odd_live_so_consulta_quando_watch_esta_vencido_para_recheck(self):
         from pipeline.scheduler import Scheduler
         from zoneinfo import ZoneInfo
@@ -432,6 +631,84 @@ class TelegramBotMessagingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "Destino de Telegram nao suportado"):
             asyncio.run(telegram_bot._send_to_chats("Mensagem", destino="geral", parse_mode="HTML"))
+
+    def test_extrair_consultas_times_deduplica_e_preserva_nomes_compostos(self):
+        import services.telegram_bot as telegram_bot
+
+        consultas = telegram_bot._extrair_consultas_times("PSG, San Lorenzo, PSG, O Higgins")
+
+        self.assertEqual(consultas, ["PSG", "San Lorenzo", "O Higgins"])
+
+    def test_fixture_casa_com_consulta_aceita_nome_longo_para_time_curto_oficial(self):
+        import services.telegram_bot as telegram_bot
+
+        fixture = {
+            "teams": {"home": {"name": "Junior"}, "away": {"name": "Deportivo Cali"}},
+        }
+
+        self.assertTrue(telegram_bot._fixture_casa_com_consulta(fixture, "Junior de Barranquilla"))
+
+    def test_fixture_casa_com_consulta_nao_confunde_nome_composto_com_sigla_ambigua(self):
+        import services.telegram_bot as telegram_bot
+
+        fixture = {
+            "teams": {"home": {"name": "MB Rouisset"}, "away": {"name": "Olympique Akbou"}},
+        }
+
+        self.assertFalse(telegram_bot._fixture_casa_com_consulta(fixture, "Miramar Rangers"))
+
+    def test_monitorar_times_do_dia_ancora_fixture_monitoravel(self):
+        import services.telegram_bot as telegram_bot
+
+        fixture_ns = {
+            "fixture": {"id": 501, "date": "2026-04-03T23:30:00+00:00", "status": {"short": "NS", "elapsed": None}},
+            "league": {"id": 71, "name": "Liga Teste"},
+            "teams": {"home": {"name": "Paris Saint-Germain"}, "away": {"name": "Toulouse"}},
+        }
+        fixture_ft = {
+            "fixture": {"id": 502, "date": "2026-04-03T19:00:00+00:00", "status": {"short": "FT", "elapsed": 90}},
+            "league": {"id": 72, "name": "Liga Encerrada"},
+            "teams": {"home": {"name": "Fortaleza FC"}, "away": {"name": "Internacional de Bogota"}},
+        }
+
+        with patch.object(telegram_bot, "raw_request", return_value={"response": [fixture_ns, fixture_ft]}), \
+             patch.object(telegram_bot._db, "salvar_fixture"), \
+             patch.object(telegram_bot._db, "salvar_live_watch_item", return_value=91) as save_watch:
+            resultado = telegram_bot._monitorar_times_do_dia(["PSG", "Fortaleza", "Chelsea"])
+
+        self.assertEqual(len(resultado["fixtures"]), 2)
+        self.assertEqual(resultado["sem_jogo"], ["Chelsea"])
+        self.assertEqual(save_watch.call_count, 1)
+        item_salvo = save_watch.call_args.args[1]
+        self.assertEqual(item_salvo["mercado"], "__fixture_watch__")
+        self.assertEqual(item_salvo["watch_type"], "manual_fixture")
+
+    def test_monitorar_times_do_dia_mescla_live_all_para_nao_perder_jogo_ao_vivo(self):
+        import services.telegram_bot as telegram_bot
+
+        fixture_live = {
+            "fixture": {"id": 701, "date": "2026-04-03T23:00:00+00:00", "status": {"short": "2H", "elapsed": 62}},
+            "league": {"id": 39, "name": "Primera A"},
+            "teams": {"home": {"name": "Junior"}, "away": {"name": "Deportivo Cali"}},
+        }
+
+        def fake_raw_request(endpoint, params):
+            if params.get("date") == "2026-04-03":
+                return {"response": []}
+            if params.get("live") == "all":
+                return {"response": [fixture_live]}
+            return {"response": []}
+
+        with patch.object(telegram_bot, "raw_request", side_effect=fake_raw_request), \
+             patch.object(telegram_bot._db, "salvar_fixture"), \
+             patch.object(telegram_bot._db, "salvar_live_watch_item", return_value=191) as save_watch:
+            resultado = telegram_bot._monitorar_times_do_dia(["Junior de Barranquilla"])
+
+        self.assertEqual(len(resultado["fixtures"]), 1)
+        self.assertEqual(resultado["sem_jogo"], [])
+        self.assertTrue(resultado["fixtures"][0]["monitoravel"])
+        self.assertEqual(resultado["fixtures"][0]["fixture_id"], 701)
+        self.assertEqual(save_watch.call_count, 1)
 
     def test_broadcast_scan_publico_delegates_to_send_to_chats(self):
         import services.telegram_bot as telegram_bot
@@ -713,6 +990,96 @@ class LearnerConfidenceTests(unittest.TestCase):
             self.assertIn("Time 32A vs Time 32B", relatorio)
             self.assertIn("Tips: 1 | Acertos: 1/1", relatorio)
 
+    def test_relatorio_diario_respeita_inicio_banca_visivel(self):
+        from data.database import Database
+        from models.learner import Learner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, "test.db"))
+            conn = db._conn()
+            conn.execute("""
+                INSERT INTO fixtures (
+                    fixture_id, league_id, league_name, season, round, date, status,
+                    home_id, home_name, away_id, away_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (1, 71, "Liga Teste", 2026, "Round 1", "2026-04-03 19:00:00", "FT", 11, "Casa", 12, "Fora"))
+            conn.execute("""
+                INSERT INTO fixtures (
+                    fixture_id, league_id, league_name, season, round, date, status,
+                    home_id, home_name, away_id, away_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (2, 71, "Liga Teste", 2026, "Round 1", "2026-04-04 19:00:00", "FT", 21, "Casa 2", 22, "Fora 2"))
+            conn.execute("""
+                INSERT INTO predictions (
+                    fixture_id, date, league_id, home_name, away_name,
+                    mercado, acertou, lucro, modelo_versao
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (1, "2026-04-03 19:00:00", 71, "Casa", "Fora", "over25", 1, 0.8, "v1"))
+            conn.execute("""
+                INSERT INTO predictions (
+                    fixture_id, date, league_id, home_name, away_name,
+                    mercado, acertou, lucro, modelo_versao
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (2, "2026-04-04 19:00:00", 71, "Casa 2", "Fora 2", "over25", 0, -1.0, "v1"))
+            conn.execute("""
+                INSERT INTO train_log (
+                    date, modelo_versao, n_samples, n_features, accuracy_train, accuracy_test
+                ) VALUES (?, ?, ?, ?, ?, ?)
+            """, ("2026-04-04", "v1", 42, 12, 0.71, 0.62))
+            conn.commit()
+            conn.close()
+            db.definir_inicio_banca_visivel("2026-04-04T00:00:00-04:00")
+
+            relatorio = Learner(db).relatorio_diario()
+
+            self.assertIn("Base visível desde", relatorio)
+            self.assertIn("Apostas: 1 | Acertos: 0", relatorio)
+
+    def test_relatorio_resultado_dia_oculta_periodo_antes_do_reset_visivel(self):
+        from data.database import Database
+        from models.learner import Learner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, "test.db"))
+            db.definir_inicio_banca_visivel("2026-04-04T00:00:00-04:00")
+
+            relatorio = Learner(db).relatorio_resultado_dia("2026-04-03")
+
+            self.assertIn("Histórico visível reiniciado", relatorio)
+            self.assertIn("fora da nova fase", relatorio)
+
+
+    def test_relatorio_saude_respeita_inicio_banca_visivel(self):
+        from data.database import Database
+        from models.learner import Learner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, "test.db"))
+            self._insert_fixture(db, 1, "2026-04-03")
+            self._insert_fixture(db, 2, "2026-04-04")
+            conn = db._conn()
+            conn.execute("""
+                INSERT INTO predictions (
+                    fixture_id, date, league_id, home_name, away_name,
+                    mercado, acertou, lucro, modelo_versao
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (1, "2026-04-03 19:00:00", 71, "Casa", "Fora", "over25", 1, 0.8, "v1"))
+            conn.execute("""
+                INSERT INTO predictions (
+                    fixture_id, date, league_id, home_name, away_name,
+                    mercado, acertou, lucro, modelo_versao
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (2, "2026-04-04 19:00:00", 71, "Casa 2", "Fora 2", "over25", 0, -1.0, "v1"))
+            conn.commit()
+            conn.close()
+            db.definir_inicio_banca_visivel("2026-04-04T00:00:00-04:00")
+
+            relatorio = Learner(db).relatorio_saude()
+
+            self.assertIn("Base vis", relatorio)
+            self.assertIn("Acumulado total", relatorio)
+            self.assertIn("Pre-live: 1 | Acertos: 0", relatorio)
+
 
 class StrategySliceTests(unittest.TestCase):
     @staticmethod
@@ -951,6 +1318,112 @@ class TelegramChatPersistenceTests(unittest.TestCase):
 
             self.assertEqual(db.telegram_chat_ids(), [123, 999])
             self.assertEqual(db.telegram_chat_ids(apenas_admin=True), [999])
+
+    def test_resetar_historico_envio_telegram_limpa_dedupe_sem_apagar_chats(self):
+        from data.database import Database
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, "test.db"))
+            db.salvar_telegram_chat(123, is_admin=True, username="admin", first_name="Admin")
+            db.save_notification_sent("2026-04-04", "daily_report")
+            db.salvar_live_market_notification("2026-04-04", 501, "over25", "sinal_live")
+            conn = db._conn()
+            conn.execute(
+                "INSERT INTO combos (id, date, combo_type, prob_composta) VALUES (?, ?, ?, ?)",
+                (77, "2026-04-04", "dupla", 0.62),
+            )
+            conn.commit()
+            conn.close()
+            db.salvar_combo_live_notification(77, "locked_1")
+            item_id = db.salvar_live_watch_item("2026-04-04", {
+                "fixture_id": 501,
+                "date": "2026-04-04T19:00:00+00:00",
+                "league_id": 71,
+                "home_name": "Casa",
+                "away_name": "Fora",
+                "mercado": "over25",
+                "descricao": "Over 2.5 gols",
+                "watch_type": "live_opportunity",
+                "status": "active",
+                "payload": {
+                    "foo": "bar",
+                    "live_signal_notified": True,
+                    "live_hit_notified": True,
+                    "live_loss_notified": True,
+                    "sent_live_combo_keys": ["live:1-2"],
+                },
+            })
+
+            resumo = db.resetar_historico_envio_telegram()
+
+            self.assertEqual(resumo["notification_log_removidos"], 1)
+            self.assertEqual(resumo["live_market_notifications_removidos"], 1)
+            self.assertEqual(resumo["combo_live_notifications_removidos"], 1)
+            self.assertEqual(resumo["live_watchlist_payloads_limpos"], 1)
+            self.assertEqual(db.telegram_chat_ids(apenas_admin=True), [123])
+            self.assertFalse(db.notification_sent("2026-04-04", "daily_report"))
+            self.assertFalse(db.live_market_notification_exists("2026-04-04", 501, "over25", "sinal_live"))
+            self.assertFalse(db.combo_live_notification_exists(77, "locked_1"))
+
+            payload = next(item for item in db.live_watch_items(["2026-04-04"]) if item["id"] == item_id)["payload"]
+            self.assertEqual(payload.get("foo"), "bar")
+            self.assertNotIn("live_signal_notified", payload)
+            self.assertNotIn("live_hit_notified", payload)
+            self.assertNotIn("live_loss_notified", payload)
+            self.assertNotIn("sent_live_combo_keys", payload)
+
+    def test_inicio_banca_visivel_filtra_metricas_sem_apagar_historico(self):
+        from data.database import Database
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, "test.db"))
+            conn = db._conn()
+            conn.execute("""
+                INSERT INTO fixtures (
+                    fixture_id, league_id, league_name, season, round, date, status,
+                    home_id, home_name, away_id, away_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (1, 71, "Liga Teste", 2026, "Round 1", "2026-04-03 19:00:00", "FT", 11, "Casa", 12, "Fora"))
+            conn.execute("""
+                INSERT INTO fixtures (
+                    fixture_id, league_id, league_name, season, round, date, status,
+                    home_id, home_name, away_id, away_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (2, 71, "Liga Teste", 2026, "Round 1", "2026-04-04 19:00:00", "FT", 21, "Casa 2", 22, "Fora 2"))
+            conn.execute("""
+                INSERT INTO predictions (
+                    fixture_id, date, league_id, home_name, away_name,
+                    mercado, acertou, lucro, modelo_versao
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (1, "2026-04-03 19:00:00", 71, "Casa", "Fora", "over25", 1, 0.8, "v1"))
+            conn.execute("""
+                INSERT INTO predictions (
+                    fixture_id, date, league_id, home_name, away_name,
+                    mercado, acertou, lucro, modelo_versao
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (2, "2026-04-04 19:00:00", 71, "Casa 2", "Fora 2", "over25", 0, -1.0, "v1"))
+            conn.execute("""
+                INSERT INTO live_results (
+                    live_watch_id, scan_date, fixture_id, league_id, home_name, away_name,
+                    mercado, watch_type, acertou, lucro
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (11, "2026-04-03", 101, 71, "Casa", "Fora", "h2h_home", "live_opportunity", 1, 0.9))
+            conn.execute("""
+                INSERT INTO live_results (
+                    live_watch_id, scan_date, fixture_id, league_id, home_name, away_name,
+                    mercado, watch_type, acertou, lucro
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (12, "2026-04-04", 102, 71, "Casa 2", "Fora 2", "h2h_home", "live_opportunity", 0, -1.0))
+            conn.commit()
+            conn.close()
+
+            db.definir_inicio_banca_visivel("2026-04-04T00:00:00-04:00")
+
+            self.assertEqual(db.obter_inicio_banca_visivel(), "2026-04-04T00:00:00-04:00")
+            self.assertEqual(db.metricas_modelo()["total"], 2)
+            self.assertEqual(db.metricas_live()["total"], 2)
+            self.assertEqual(db.metricas_modelo(data_inicio="2026-04-04T00:00:00-04:00")["total"], 1)
+            self.assertEqual(db.metricas_live(data_inicio="2026-04-04T00:00:00-04:00")["total"], 1)
 
     def test_predictions_por_data_returns_saved_scan_batch(self):
         from data.database import Database
@@ -1713,6 +2186,61 @@ class LiveIntelligenceTests(unittest.TestCase):
         self.assertIn("Estado: travado.", leitura["mensagem"])
 
 
+class OddsPapiMappingTests(unittest.TestCase):
+    def test_all_operational_markets_are_mapped_in_oddspapi(self):
+        from pipeline.scanner import MERCADOS
+        from pipeline.scheduler import Scheduler
+        from services.oddspapi import _TIP_TO_SELECTION
+
+        scanner_markets = {market_id for market_id, _, _ in MERCADOS}
+        live_markets = set(Scheduler._mercados_live_expandiveis())
+        missing = sorted((scanner_markets | live_markets) - set(_TIP_TO_SELECTION))
+
+        self.assertEqual(missing, [])
+
+    def test_extract_price_supports_corners_over_85(self):
+        from services.oddspapi import OddsPapiClient
+
+        client = OddsPapiClient(
+            api_key="teste",
+            base_url="https://api.oddspapi.io/v4",
+            bookmaker_slug="1xbet",
+        )
+        payload = {
+            "bookmakerOdds": {
+                "1xbet": {
+                    "markets": {
+                        "10799": {
+                            "handicap": 8.5,
+                            "outcomes": {
+                                "10799": {
+                                    "outcomeName": "Over",
+                                    "players": {
+                                        "0": [
+                                            {
+                                                "price": 1.91,
+                                                "active": True,
+                                                "changedAt": "2026-04-03T22:30:00Z",
+                                            }
+                                        ]
+                                    },
+                                }
+                            },
+                        }
+                    }
+                }
+            }
+        }
+
+        detalhe = client.extract_price(payload, "corners_over_85")
+
+        self.assertIsNotNone(detalhe)
+        self.assertEqual(detalhe["market_id"], 10799)
+        self.assertEqual(detalhe["outcome_id"], 10799)
+        self.assertEqual(detalhe["point_line"], 8.5)
+        self.assertEqual(detalhe["odd"], 1.91)
+
+
 class SchedulerLivePublicFormattingTests(unittest.TestCase):
     def test_formatar_sinais_live_publicos_ignora_item_sem_odd_ev(self):
         from pipeline.scheduler import Scheduler
@@ -1828,6 +2356,325 @@ class SchedulerLivePublicFormattingTests(unittest.TestCase):
             sinais.append(sinal)
 
         self.assertEqual(sinais, [])
+
+
+class LiveTrainerBootstrapTests(unittest.TestCase):
+    def test_live_trainer_resolve_linha_sem_confundir_sufixo_2t(self):
+        from models.live_trainer import LiveTrainer
+
+        self.assertEqual(LiveTrainer._line_value("over05_2t"), 0.5)
+        self.assertEqual(LiveTrainer._line_value("under15_2t"), 1.5)
+
+    def test_live_trainer_bloqueia_treino_sem_eventos_historicos_suficientes(self):
+        from data.database import Database
+        from models.live_trainer import LiveTrainer
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, "test.db"))
+            trainer = LiveTrainer(db)
+            summary = trainer.treinar(min_amostras_mercado=2)
+
+            self.assertEqual(summary.get("status"), "blocked")
+            self.assertEqual(summary.get("reason"), "base_live_insuficiente")
+            self.assertFalse(summary.get("readiness", {}).get("pronto"))
+
+    def test_live_trainer_filtra_sinal_fora_da_janela_oficial(self):
+        from data.database import Database
+        from models.live_trainer import LiveTrainer
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, "test.db"))
+            conn = db._conn()
+            historical_fixtures = [
+                (1, 11, 2, 1, 0, "2026-03-01T20:00:00-04:00"),
+                (2, 1, 12, 2, 1, "2026-03-05T20:00:00-04:00"),
+                (3, 13, 1, 0, 0, "2026-03-10T20:00:00-04:00"),
+                (11, 21, 1, 1, 2, "2026-03-16T20:00:00-04:00"),
+                (7, 17, 2, 0, 1, "2026-03-14T20:00:00-04:00"),
+                (8, 2, 18, 1, 1, "2026-03-18T20:00:00-04:00"),
+                (4, 14, 3, 1, 1, "2026-03-01T20:00:00-04:00"),
+                (5, 4, 15, 2, 0, "2026-03-05T20:00:00-04:00"),
+                (6, 16, 4, 1, 2, "2026-03-10T20:00:00-04:00"),
+                (12, 22, 3, 0, 1, "2026-03-16T20:00:00-04:00"),
+                (9, 19, 3, 0, 1, "2026-03-14T20:00:00-04:00"),
+                (10, 4, 20, 2, 1, "2026-03-18T20:00:00-04:00"),
+            ]
+            for fixture_id, home_id, away_id, goals_home, goals_away, date in historical_fixtures:
+                conn.execute(
+                    """
+                    INSERT INTO fixtures (
+                        fixture_id, league_id, league_name, season, round, date, timestamp,
+                        venue, status, home_id, home_name, away_id, away_name,
+                        goals_home, goals_away, score_ht_h, score_ht_a, referee, raw_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        fixture_id,
+                        71,
+                        "Brasileirão Série A",
+                        2026,
+                        "Round 0",
+                        date,
+                        0,
+                        "Estádio",
+                        "FT",
+                        home_id,
+                        f"Time{home_id}",
+                        away_id,
+                        f"Time{away_id}",
+                        goals_home,
+                        goals_away,
+                        0,
+                        0,
+                        "Árbitro",
+                        "{}",
+                    ),
+                )
+            conn.execute(
+                """
+                INSERT INTO fixtures (
+                    fixture_id, league_id, league_name, season, round, date, timestamp,
+                    venue, status, home_id, home_name, away_id, away_name,
+                    goals_home, goals_away, score_ht_h, score_ht_a, referee, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    101,
+                    71,
+                    "Brasileirão Série A",
+                    2026,
+                    "Round 1",
+                    "2026-04-03T20:00:00-04:00",
+                    0,
+                    "Estádio",
+                    "FT",
+                    1,
+                    "Casa",
+                    2,
+                    "Fora",
+                    1,
+                    0,
+                    0,
+                    0,
+                    "Árbitro",
+                    "{}",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO fixture_events (
+                    fixture_id, team_id, player_name, event_type,
+                    event_detail, minute, extra_minute, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    101,
+                    1,
+                    "Atacante",
+                    "Goal",
+                    "Normal Goal",
+                    60,
+                    0,
+                    "{}",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO fixtures (
+                    fixture_id, league_id, league_name, season, round, date, timestamp,
+                    venue, status, home_id, home_name, away_id, away_name,
+                    goals_home, goals_away, score_ht_h, score_ht_a, referee, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    102,
+                    71,
+                    "Brasileirão Série A",
+                    2026,
+                    "Round 1",
+                    "2026-04-04T20:00:00-04:00",
+                    0,
+                    "Estádio",
+                    "FT",
+                    3,
+                    "Casa2",
+                    4,
+                    "Fora2",
+                    2,
+                    0,
+                    1,
+                    0,
+                    "Árbitro",
+                    "{}",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO fixture_events (
+                    fixture_id, team_id, player_name, event_type,
+                    event_detail, minute, extra_minute, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    102,
+                    12,
+                    "Atacante",
+                    "Goal",
+                    "Normal Goal",
+                    35,
+                    0,
+                    "{}",
+                ),
+            )
+            conn.commit()
+            conn.close()
+
+            trainer = LiveTrainer(db)
+            samples = trainer._load_samples()
+
+            under25_samples = [sample for sample in samples if sample.fixture_id == 101 and sample.market == "under25"]
+            over05_ht_samples = [sample for sample in samples if sample.fixture_id == 102 and sample.market == "over05_ht"]
+
+            self.assertTrue(any(sample.signal_minute == 59 for sample in under25_samples))
+            self.assertFalse(any(sample.signal_minute == 12 for sample in over05_ht_samples))
+
+    def test_live_trainer_carrega_cantos_de_snapshot_real(self):
+        from data.database import Database
+        from models.live_trainer import LiveTrainer
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, "test.db"))
+            conn = db._conn()
+            payload = {
+                "season": 2026,
+                "features": {"home_form_5": 0.8, "away_form_5": 0.4},
+            }
+            snapshot = {
+                "elapsed": 64,
+                "corners": 7,
+                "shots_total": 18,
+                "shots_on": 6,
+                "xg": 1.42,
+                "yellow_cards": 3,
+                "red_cards": 0,
+                "teams": [
+                    {"corners": 5, "shots_total": 11, "shots_on": 4, "xg": 0.97},
+                    {"corners": 2, "shots_total": 7, "shots_on": 2, "xg": 0.45},
+                ],
+            }
+            conn.execute(
+                """
+                INSERT INTO live_watchlist (
+                    scan_date, fixture_id, fixture_date, league_id,
+                    home_name, away_name, mercado, descricao,
+                    prob_modelo, watch_type, status, note, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "2026-04-04",
+                    9991,
+                    "2026-04-04T20:00:00-04:00",
+                    71,
+                    "Casa",
+                    "Fora",
+                    "corners_over_85",
+                    "Escanteios Over 8.5",
+                    0.66,
+                    "live_opportunity",
+                    "resolved",
+                    "snapshot",
+                    json.dumps(payload, ensure_ascii=False),
+                ),
+            )
+            live_watch_id = conn.execute("SELECT id FROM live_watchlist").fetchone()["id"]
+            conn.execute(
+                """
+                INSERT INTO live_results (
+                    live_watch_id, scan_date, fixture_id, league_id, home_name, away_name,
+                    mercado, watch_type, odd_usada, signal_minute, signal_note,
+                    snapshot_json, resultado, gols_home, gols_away, acertou, lucro
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    live_watch_id,
+                    "2026-04-04",
+                    9991,
+                    71,
+                    "Casa",
+                    "Fora",
+                    "corners_over_85",
+                    "live_opportunity",
+                    1.85,
+                    64,
+                    "snapshot",
+                    json.dumps(snapshot, ensure_ascii=False),
+                    "home",
+                    2,
+                    1,
+                    1,
+                    0.85,
+                ),
+            )
+            conn.commit()
+            conn.close()
+
+            trainer = LiveTrainer(db)
+            samples = trainer._load_corner_snapshot_samples()
+
+            self.assertEqual(len(samples), 1)
+            sample = samples[0]
+            self.assertEqual(sample.market, "corners_over_85")
+            self.assertEqual(sample.league_id, 71)
+            self.assertEqual(sample.signal_minute, 64)
+            self.assertEqual(sample.label, 1)
+            self.assertEqual(sample.source, "bot_snapshot")
+            self.assertEqual(sample.features["corners_before_signal"], 7.0)
+            self.assertEqual(sample.features["shots_before_signal"], 18.0)
+
+    def test_live_trainer_treina_por_slice_sem_modelo_global(self):
+        from data.database import Database
+        import models.live_trainer as live_trainer_module
+        from models.live_trainer import LiveSample, LiveTrainer
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, "test.db"))
+            trainer = LiveTrainer(db)
+            samples = []
+            for league_id in (71, 128):
+                for fixture_idx in range(1, 31):
+                    samples.append(
+                        LiveSample(
+                            fixture_id=(league_id * 1000) + fixture_idx,
+                            fixture_date=f"2026-03-{fixture_idx:02d}T20:00:00-04:00",
+                            league_id=league_id,
+                            market="under25",
+                            signal_minute=62,
+                            label=1 if fixture_idx % 2 == 0 else 0,
+                            source="api_historical",
+                            features={
+                                "league_id_numeric": float(league_id),
+                                "signal_minute": 62.0,
+                                "xg_before_signal": 0.8 if fixture_idx % 2 == 0 else 2.2,
+                                "shots_before_signal": 9.0 if fixture_idx % 2 == 0 else 17.0,
+                            },
+                        )
+                    )
+
+            with patch.object(live_trainer_module, "MODELS_DIR", Path(tmpdir) / "live_models"):
+                live_trainer_module.MODELS_DIR.mkdir(parents=True, exist_ok=True)
+                trainer = LiveTrainer(db)
+                trainer.readiness = MagicMock(return_value={"pronto": True})
+                trainer._load_samples = MagicMock(return_value=samples)
+                trainer.MIN_SAMPLES_TOTAL = 10
+                summary = trainer.treinar(min_amostras_mercado=10)
+
+            self.assertEqual(summary["layout"], "league_market_only")
+            self.assertIn("71:under25", summary["slices"])
+            self.assertIn("128:under25", summary["slices"])
+            self.assertNotIn("under25", summary["slices"])
+            self.assertTrue((Path(tmpdir) / "live_models" / "league_71" / "under25.json").exists())
+            self.assertTrue((Path(tmpdir) / "live_models" / "league_128" / "under25.json").exists())
+            self.assertFalse((Path(tmpdir) / "live_models" / "under25.json").exists())
 
 
 if __name__ == "__main__":

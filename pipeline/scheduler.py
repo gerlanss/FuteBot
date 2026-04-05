@@ -44,11 +44,16 @@ from config import (
     DISCOVERY_OPTUNA_TRIALS, DISCOVERY_CUP_LEAGUE_IDS, LEAGUES, LIBERACAO_T30_INTERVALO_MIN,
     LIVE_CHECK_INTERVALO_MIN, LIVE_PRICE_WATCH_RECHECK_MIN, LIVE_PRICE_WATCH_WINDOW_MIN,
     MODEL_CONFIDENCE_MIN, ODDSPAPI_SIMPLE_MIN_EV_PERCENT, ODDSPAPI_SIMPLE_MIN_ODD,
+    ODDSPAPI_SIMPLE_WATCH_MIN_EV_PERCENT,
     ODDSPAPI_USE_LIVE, SCAN_INTERVALO_HORAS, SCAN_LOOKAHEAD_HORAS,
 )
 
 from services.apifootball import raw_request, stats_partida
 from services.live_intelligence import LiveIntelligence
+from services.live_market_windows import (
+    janela_operacional_live,
+    status_janela_operacional_live,
+)
 from services.oddspapi import enriquecer_tips_com_odds_oddspapi
 
 _LIVE_CONFLITOS_EXPLICITOS = {
@@ -56,6 +61,7 @@ _LIVE_CONFLITOS_EXPLICITOS = {
     "ht_home": {"under05_ht"},
     "ht_away": {"under05_ht"},
 }
+_MANUAL_LIVE_FIXTURE_MARKET = "__fixture_watch__"
 
 
 class Scheduler:
@@ -385,6 +391,130 @@ class Scheduler:
         return payload
 
     @staticmethod
+    def _clamp_live_probability(value: float) -> float:
+        return max(MODEL_CONFIDENCE_MIN, min(0.89, round(float(value), 3)))
+
+    @staticmethod
+    def _snapshot_leitura_live(leitura: dict) -> dict:
+        metricas = leitura.get("metricas") or {}
+        teams = metricas.get("teams") or []
+        return {
+            "elapsed": leitura.get("elapsed"),
+            "veredito": leitura.get("veredito"),
+            "mensagem": leitura.get("mensagem"),
+            "estado_partida": leitura.get("estado_partida"),
+            "metricas": {
+                "shots_total": float(metricas.get("shots_total") or 0.0),
+                "shots_on": float(metricas.get("shots_on") or 0.0),
+                "corners": float(metricas.get("corners") or 0.0),
+                "xg": float(metricas.get("xg") or 0.0),
+                "red_cards": float(metricas.get("red_cards") or 0.0),
+                "yellow_cards": float(metricas.get("yellow_cards") or 0.0),
+                "teams": [
+                    {
+                        "shots_total": float(team.get("shots_total") or 0.0),
+                        "shots_on": float(team.get("shots_on") or 0.0),
+                        "corners": float(team.get("corners") or 0.0),
+                        "xg": float(team.get("xg") or 0.0),
+                        "red_cards": float(team.get("red_cards") or 0.0),
+                        "yellow_cards": float(team.get("yellow_cards") or 0.0),
+                    }
+                    for team in teams[:2]
+                ],
+            },
+        }
+
+    @staticmethod
+    def _linha_live_mercado(mercado: str, default: float = 0.5) -> float:
+        if "105" in (mercado or ""):
+            return 10.5
+        if "95" in (mercado or ""):
+            return 9.5
+        if "85" in (mercado or ""):
+            return 8.5
+        if "35" in (mercado or ""):
+            return 3.5
+        if "25" in (mercado or ""):
+            return 2.5
+        if "15" in (mercado or ""):
+            return 1.5
+        return default
+
+    def _inferir_prob_modelo_live(self, mercado: str, leitura: dict) -> float:
+        metricas = leitura.get("metricas") or {}
+        corners = float(metricas.get("corners") or 0.0)
+        shots_total = float(metricas.get("shots_total") or 0.0)
+        shots_on = float(metricas.get("shots_on") or 0.0)
+        xg = float(metricas.get("xg") or 0.0)
+        teams = metricas.get("teams") or []
+        home_team = teams[0] if len(teams) > 0 else {}
+        away_team = teams[1] if len(teams) > 1 else {}
+        home_on = float(home_team.get("shots_on") or 0.0)
+        away_on = float(away_team.get("shots_on") or 0.0)
+        home_xg = float(home_team.get("xg") or 0.0)
+        away_xg = float(away_team.get("xg") or 0.0)
+        home_shots = float(home_team.get("shots_total") or 0.0)
+        away_shots = float(away_team.get("shots_total") or 0.0)
+        elapsed = int(leitura.get("elapsed") or 0)
+        estado = str(leitura.get("estado_partida") or "").lower()
+        base = max(MODEL_CONFIDENCE_MIN, 0.60)
+
+        if mercado.startswith("h2h") or mercado.startswith("ht_"):
+            if mercado.endswith("home"):
+                edge = max(0.0, (home_on - away_on) * 0.028) + max(0.0, (home_xg - away_xg) * 0.18)
+                edge += max(0.0, (home_shots - away_shots) * 0.008)
+                return self._clamp_live_probability(base + 0.05 + edge)
+            if mercado.endswith("away"):
+                edge = max(0.0, (away_on - home_on) * 0.028) + max(0.0, (away_xg - home_xg) * 0.18)
+                edge += max(0.0, (away_shots - home_shots) * 0.008)
+                return self._clamp_live_probability(base + 0.05 + edge)
+            equilibrio = max(0.0, 1.0 - min(abs(home_on - away_on), 3.0) / 3.0)
+            equilibrio += max(0.0, 1.0 - min(abs(home_xg - away_xg), 0.30) / 0.30)
+            return self._clamp_live_probability(base + 0.03 + (equilibrio * 0.035))
+
+        if "corners" in mercado:
+            linha = self._linha_live_mercado(mercado, default=8.5)
+            if "over" in mercado:
+                progress = max(0.0, corners - max(4.0, linha - 5.0))
+                pressure = max(0.0, shots_total - 11.0) * 0.004
+                pressure += max(0.0, shots_on - 4.0) * 0.01
+                pressure += max(0.0, xg - 0.95) * 0.045
+                if elapsed >= 70:
+                    pressure += 0.015
+                return self._clamp_live_probability(base + 0.03 + (progress * 0.02) + pressure)
+            cushion = max(0.0, max(4.0, linha - 4.0) - corners)
+            control = max(0.0, 12.0 - shots_total) * 0.004
+            control += max(0.0, 4.0 - shots_on) * 0.01
+            control += max(0.0, 1.0 - xg) * 0.04
+            if elapsed >= 65:
+                control += 0.02
+            return self._clamp_live_probability(base + 0.04 + (cushion * 0.02) + control)
+
+        linha = self._linha_live_mercado(mercado, default=0.5)
+        if "over" in mercado:
+            pressure = max(0.0, shots_total - 11.0) * 0.004
+            pressure += max(0.0, shots_on - 4.0) * 0.012
+            pressure += max(0.0, xg - 0.95) * 0.05
+            if estado == "quente":
+                pressure += 0.04
+            elif estado == "caotico":
+                pressure += 0.03
+            if elapsed >= 70 and linha <= 1.5:
+                pressure += 0.015
+            return self._clamp_live_probability(base + 0.03 + pressure)
+
+        control = max(0.0, 13.0 - shots_total) * 0.004
+        control += max(0.0, 5.0 - shots_on) * 0.012
+        control += max(0.0, 1.0 - xg) * 0.05
+        if estado == "frio":
+            control += 0.04
+        elif estado == "travado":
+            control += 0.03
+        if elapsed >= 70 and linha >= 1.5:
+            control += 0.02
+        return self._clamp_live_probability(base + 0.03 + control)
+
+    @staticmethod
     def _odd_ev_live_aprovados(payload: dict) -> bool:
         odd = payload.get("odd_usada")
         ev = payload.get("ev_percent")
@@ -394,6 +524,66 @@ class Scheduler:
         except (TypeError, ValueError):
             return False
         return odd_val >= ODDSPAPI_SIMPLE_MIN_ODD and ev_val >= ODDSPAPI_SIMPLE_MIN_EV_PERCENT
+
+    @staticmethod
+    def _motivo_nao_executavel_live(payload: dict) -> str:
+        odd = payload.get("odd_usada")
+        ev = payload.get("ev_percent")
+        try:
+            odd_val = float(odd)
+        except (TypeError, ValueError):
+            odd_val = None
+        try:
+            ev_val = float(ev)
+        except (TypeError, ValueError):
+            ev_val = None
+
+        if odd_val is None:
+            return "a odd esta indisponivel na 1xBet para este mercado"
+        if ev_val is None:
+            return "o EV esta indisponivel para validar a entrada neste momento"
+        if odd_val < ODDSPAPI_SIMPLE_MIN_ODD:
+            return (
+                "a odd ficou abaixo do minimo operacional "
+                f"({odd_val:.2f} < {ODDSPAPI_SIMPLE_MIN_ODD:.2f})"
+            )
+        if ev_val < ODDSPAPI_SIMPLE_MIN_EV_PERCENT:
+            return (
+                "o EV ficou abaixo do minimo operacional "
+                f"({ev_val:.1f}% < {ODDSPAPI_SIMPLE_MIN_EV_PERCENT:.1f}%)"
+            )
+        return "odd e EV ainda nao ficaram executaveis ao mesmo tempo"
+
+    @staticmethod
+    def _ev_live_permite_observacao(payload: dict) -> tuple[bool, str | None]:
+        ev = payload.get("ev_percent")
+        try:
+            ev_val = float(ev)
+        except (TypeError, ValueError):
+            return True, None
+        if ev_val < ODDSPAPI_SIMPLE_WATCH_MIN_EV_PERCENT:
+            return (
+                False,
+                "o EV ficou abaixo da faixa minima de observacao "
+                f"({ev_val:.1f}% < {ODDSPAPI_SIMPLE_WATCH_MIN_EV_PERCENT:.1f}%)",
+            )
+        return True, None
+
+    def _normalizar_motivo_preco_live(self, payload: dict, motivo_preco: str | None) -> str:
+        motivo = (motivo_preco or "").strip()
+        motivo_real = self._motivo_nao_executavel_live(payload)
+        motivo_lower = motivo.lower()
+
+        if "vou rechecando" in motivo_lower:
+            return (
+                f"Cenario passou, mas {motivo_real}; "
+                f"vou rechecando o preco por ate {LIVE_PRICE_WATCH_WINDOW_MIN} minutos."
+            )
+        if motivo_lower.startswith("cenario segue bom"):
+            return f"Cenario segue bom, mas {motivo_real}."
+        if "odd ainda" in motivo_lower or "odd e ev ainda" in motivo_lower:
+            return f"Cenario passou, mas {motivo_real}."
+        return motivo or motivo_real
 
     def _acionar_janela_preco_live(self, payload: dict, now: datetime) -> tuple[str, str]:
         if not payload.get("price_watch_active") and payload.get("price_watch_final_state") == "expired":
@@ -406,6 +596,15 @@ class Scheduler:
             payload["price_watch_reason"] = "Janela de preço expirou sem odd executável."
             payload.pop("price_watch_next_check_at", None)
             return "expired", payload["price_watch_reason"]
+
+        ev_observavel, motivo_ev = self._ev_live_permite_observacao(payload)
+        if not ev_observavel:
+            payload["price_watch_active"] = False
+            payload["price_watch_final_state"] = "expired"
+            payload["price_watch_closed_at"] = now.isoformat()
+            payload["price_watch_reason"] = motivo_ev
+            payload.pop("price_watch_next_check_at", None)
+            return "expired", motivo_ev
 
         checks = int(payload.get("price_watch_checks") or 0)
         if not payload.get("price_watch_active"):
@@ -474,6 +673,15 @@ class Scheduler:
             payload.pop("price_watch_next_check_at", None)
             return "expired", payload["price_watch_reason"]
 
+        ev_observavel, motivo_ev = self._ev_live_permite_observacao(payload)
+        if not ev_observavel:
+            payload["price_watch_active"] = False
+            payload["price_watch_final_state"] = "expired"
+            payload["price_watch_closed_at"] = now.isoformat()
+            payload["price_watch_reason"] = motivo_ev
+            payload.pop("price_watch_next_check_at", None)
+            return "expired", motivo_ev
+
         janela_efetiva = min(LIVE_PRICE_WATCH_WINDOW_MIN, minutos_restantes)
         checks = int(payload.get("price_watch_checks") or 0)
         proximo_check = min(LIVE_PRICE_WATCH_RECHECK_MIN, janela_efetiva)
@@ -485,14 +693,14 @@ class Scheduler:
             payload["price_watch_next_check_at"] = (now + timedelta(minutes=proximo_check)).isoformat()
             payload["price_watch_final_state"] = "watching"
             return "started", (
-                "CenÃ¡rio passou, mas a odd ainda nÃ£o ficou executÃ¡vel; "
+                f"CenÃ¡rio passou, mas {self._motivo_nao_executavel_live(payload)}; "
                 f"vou rechecando o preÃ§o por atÃ© {janela_efetiva} minutos."
             )
 
         payload["price_watch_checks"] = checks + 1
         payload["price_watch_next_check_at"] = (now + timedelta(minutes=proximo_check)).isoformat()
         payload["price_watch_final_state"] = "watching"
-        return "watching", "CenÃ¡rio segue bom, mas a odd ainda nÃ£o ficou executÃ¡vel."
+        return "watching", f"CenÃ¡rio segue bom, mas {self._motivo_nao_executavel_live(payload)}."
 
     @classmethod
     def _formatar_alerta_preco_live(cls, item: dict, *, titulo: str, contexto: str) -> str:
@@ -502,6 +710,12 @@ class Scheduler:
         payload = item.get("payload") or {}
         minuto = item.get("elapsed") or payload.get("last_live_minute") or "?"
         mensagem = payload.get("last_live_message") or item.get("note") or "Sem leitura adicional."
+        contexto_bruto = (contexto or "").strip()
+        contexto_lower = contexto_bruto.lower()
+        if payload.get("price_watch_reason") and "odd ainda" in contexto_lower:
+            contexto = payload.get("price_watch_reason")
+        else:
+            contexto = contexto_bruto
         meta = cls._meta_live_contexto(item)
         return "\n".join([
             titulo,
@@ -1132,6 +1346,16 @@ class Scheduler:
                         alertas_admin.extend(extras_alertas)
                         sinais_live.extend(extras_sinais)
                         fixture_extras_processados.add(fixture_id)
+                    if item.get("watch_type") == "manual_fixture" or item.get("mercado") == _MANUAL_LIVE_FIXTURE_MARKET:
+                        payload["last_live_verdict"] = "fixture_anchor"
+                        payload["last_live_minute"] = ((game.get("fixture") or {}).get("status") or {}).get("elapsed") or "?"
+                        self.db.atualizar_live_watch_item(
+                            item_id,
+                            note=item.get("note") or "Gancho manual do fixture mantido para exploracao live.",
+                            payload=payload,
+                        )
+                        itens_tocados.append(item_id)
+                        continue
                     if item.get("watch_type") in {"approved_prelive", "live_opportunity"} and (
                         payload.get("live_hit_notified") or payload.get("live_loss_notified")
                     ):
@@ -1214,6 +1438,9 @@ class Scheduler:
                             continue
 
                     leitura = live.analisar(item, game, stats)
+                    payload["live_reading"] = self._snapshot_leitura_live(leitura)
+                    payload["metricas_live"] = payload["live_reading"].get("metricas")
+                    payload["estado_partida"] = leitura.get("estado_partida")
                     veredito = leitura.get("veredito", "monitorar")
                     elapsed = leitura.get("elapsed") or "?"
                     last_verdict = payload.get("last_live_verdict")
@@ -1238,7 +1465,8 @@ class Scheduler:
                     if veredito == "sinal_live" and item.get("watch_type") in {"approved_prelive", "live_opportunity"}:
                         now_local = datetime.now(ZoneInfo(TIMEZONE))
                         if payload.get("price_watch_final_state") == "expired" and not payload.get("price_watch_active"):
-                            veredito = "monitorar"
+                            veredito = "cancelar"
+                            leitura["mensagem"] = payload.get("price_watch_reason") or "Janela de preco encerrada sem odd executavel."
                         elif payload.get("price_watch_active") and not self._deve_consultar_odd_live_item(item, payload, now_local):
                             veredito = "monitorar"
                         else:
@@ -1253,6 +1481,7 @@ class Scheduler:
                                 elapsed,
                                 now_local,
                             )
+                            motivo_preco = self._normalizar_motivo_preco_live(payload, motivo_preco)
                             payload["last_live_verdict"] = "price_watch"
                             payload["last_live_minute"] = elapsed
                             payload["last_live_message"] = leitura.get("mensagem", item.get("note"))
@@ -1264,26 +1493,25 @@ class Scheduler:
                             )
                             item["note"] = motivo_preco
                             item["payload"] = payload
-                            if acao_preco in {"started", "expired"}:
+                            if acao_preco == "started":
                                 bloco_preco = self._formatar_alerta_preco_live(
                                     {
                                         **item,
                                         "payload": payload,
                                         "elapsed": elapsed,
                                     },
-                                    titulo="🟡 <b>Janela de preço em observação</b>" if acao_preco == "started" else "🔴 <b>Janela de preço encerrada</b>",
-                                    contexto=(
-                                        f"Cenário passou, mas a odd ainda não ficou boa; vou rechecando por até {LIVE_PRICE_WATCH_WINDOW_MIN} minutos."
-                                        if acao_preco == "started"
-                                        else motivo_preco
-                                    ),
+                                    titulo="🟡 <b>Janela de preço em observação</b>",
+                                    contexto=f"Cenário passou, mas a odd ainda não ficou boa; vou rechecando por até {LIVE_PRICE_WATCH_WINDOW_MIN} minutos.",
                                 )
                                 alertas_admin.append(
                                     bloco_preco
                                 )
-                                if acao_preco == "started":
-                                    alertas_preco_publicos.append(bloco_preco)
-                            veredito = "monitorar"
+                                alertas_preco_publicos.append(bloco_preco)
+                            if acao_preco == "expired":
+                                veredito = "cancelar"
+                                leitura["mensagem"] = motivo_preco
+                            else:
+                                veredito = "monitorar"
 
                     emitir_sinal_publico = False
                     if veredito in {"sinal_live", "cancelar"}:
@@ -1319,6 +1547,7 @@ class Scheduler:
                             elif veredito == "sinal_live":
                                 emitir_sinal_publico = True
                                 payload["live_signal_notified"] = True
+                                payload["training_snapshot"] = self._snapshot_leitura_live(leitura)
                                 try:
                                     signal_minute = int(leitura.get("elapsed") or 0) or None
                                 except Exception:
@@ -1348,6 +1577,12 @@ class Scheduler:
                         sinal["payload"] = payload
                         sinal["elapsed"] = elapsed
                         sinais_live.append(sinal)
+                    elif veredito == "monitorar":
+                        self.db.atualizar_live_watch_item(
+                            item_id,
+                            note=leitura.get("mensagem", item.get("note")),
+                            payload=payload,
+                        )
                     itens_tocados.append(item_id)
                     print(
                         f"   👀 {home_name} vs {away_name} | {mercado_label} | "
@@ -1356,6 +1591,13 @@ class Scheduler:
                     continue
 
                 if status != "FT":
+                    if item.get("watch_type") == "manual_fixture" or item.get("mercado") == _MANUAL_LIVE_FIXTURE_MARKET:
+                        payload["last_live_verdict"] = "fixture_anchor_waiting"
+                        self.db.atualizar_live_watch_item(
+                            item_id,
+                            note=item.get("note") or "Fixture manual aguardando kickoff/live.",
+                            payload=payload,
+                        )
                     itens_tocados.append(item_id)
                     continue
 
@@ -1595,58 +1837,7 @@ class Scheduler:
 
     @staticmethod
     def _janela_operacional_live(item: dict) -> tuple[int, int]:
-        mercado = (item.get("mercado") or "").lower()
-        ht_market = mercado.endswith("_ht") or mercado.startswith("ht_")
-        second_half_market = mercado.endswith("_2t")
-        is_corners = "corners" in mercado
-        is_resultado = mercado.startswith("h2h_")
-        is_over = "over" in mercado
-        is_under = "under" in mercado
-        is_draw = mercado.endswith("draw")
-
-        if ht_market:
-            if is_corners and is_over:
-                return 20, 37
-            if is_corners and is_under:
-                return 24, 41
-            if is_resultado and is_draw:
-                return 26, 40
-            if is_resultado:
-                return 22, 38
-            if is_over:
-                return 18, 38
-            if is_under:
-                return 24, 41
-            return 20, 39
-
-        if second_half_market:
-            if is_corners and is_over:
-                return 52, 78
-            if is_corners and is_under:
-                return 60, 84
-            if is_resultado and is_draw:
-                return 58, 80
-            if is_resultado:
-                return 52, 78
-            if is_over:
-                return 52, 78
-            if is_under:
-                return 60, 84
-            return 54, 80
-
-        if is_corners and is_over:
-            return 50, 78
-        if is_corners and is_under:
-            return 58, 82
-        if is_resultado and is_draw:
-            return 58, 80
-        if is_resultado:
-            return 52, 78
-        if is_over:
-            return 50, 78
-        if is_under:
-            return 58, 84
-        return 50, 80
+        return janela_operacional_live(item.get("mercado") or "")
 
     @classmethod
     def _status_janela_operacional_live(
@@ -1654,16 +1845,7 @@ class Scheduler:
         item: dict,
         elapsed: int | str | None,
     ) -> tuple[str, str]:
-        try:
-            minuto = int(elapsed or 0)
-        except Exception:
-            return "ok", ""
-        minimo, maximo = cls._janela_operacional_live(item)
-        if minuto < minimo:
-            return "cedo", f"A leitura ainda apareceu cedo demais para este mercado (janela útil a partir de {minimo}')."
-        if minuto >= maximo:
-            return "tarde", f"A leitura apareceu tarde demais para este mercado (janela útil até {maximo}')."
-        return "ok", ""
+        return status_janela_operacional_live(item.get("mercado") or "", elapsed)
 
     @classmethod
     def _deve_bloquear_sinal_tardio(cls, item: dict, elapsed: int | str | None) -> bool:
@@ -1916,9 +2098,12 @@ class Scheduler:
             payload["last_live_minute"] = leitura.get("elapsed")
             payload["last_live_message"] = leitura.get("mensagem")
             payload["origin"] = "fixture_live_scan"
+            payload["live_reading"] = self._snapshot_leitura_live(leitura)
+            payload["metricas_live"] = payload["live_reading"].get("metricas")
+            payload["estado_partida"] = leitura.get("estado_partida")
             item_salvo = {
                 **item_virtual,
-                "prob_modelo": None,
+                "prob_modelo": self._inferir_prob_modelo_live(mercado, leitura),
                 "status": "active",
                 "note": leitura.get("mensagem"),
                 "payload": payload,
@@ -1930,6 +2115,7 @@ class Scheduler:
 
             if self._odd_ev_live_aprovados(payload):
                 self._encerrar_janela_preco_live(payload, now_local)
+                payload["training_snapshot"] = self._snapshot_leitura_live(leitura)
                 self.db.atualizar_live_watch_item(item_id, payload=payload)
                 try:
                     signal_minute = int(leitura.get("elapsed") or 0) or None
@@ -1963,25 +2149,42 @@ class Scheduler:
                     "elapsed": leitura.get("elapsed") or "?",
                 })
             else:
-                _, motivo_preco = self._acionar_janela_preco_live_inteligente(
+                acao_preco, motivo_preco = self._acionar_janela_preco_live_inteligente(
                     payload,
                     item_salvo,
                     leitura.get("elapsed"),
                     now_local,
                 )
-                self.db.atualizar_live_watch_item(item_id, note=motivo_preco, payload=payload)
-                bloco_preco = self._formatar_alerta_preco_live(
-                    {
-                        **item_salvo,
-                        "id": item_id,
-                        "payload": payload,
-                        "elapsed": leitura.get("elapsed") or "?",
-                        "note": motivo_preco,
-                    },
-                    titulo="🟡 <b>Janela de preço em observação</b>",
-                    contexto=f"Cenário passou, mas a odd ainda não ficou boa; vou rechecando por até {LIVE_PRICE_WATCH_WINDOW_MIN} minutos.",
-                )
-                alertas.append(bloco_preco)
+                motivo_preco = self._normalizar_motivo_preco_live(payload, motivo_preco)
+                novo_status = "resolved" if acao_preco == "expired" else None
+                self.db.atualizar_live_watch_item(item_id, status=novo_status, note=motivo_preco, payload=payload)
+                if acao_preco == "started":
+                    bloco_preco = self._formatar_alerta_preco_live(
+                        {
+                            **item_salvo,
+                            "id": item_id,
+                            "payload": payload,
+                            "elapsed": leitura.get("elapsed") or "?",
+                            "note": motivo_preco,
+                        },
+                        titulo="🟡 <b>Janela de preço em observação</b>",
+                        contexto=f"Cenário passou, mas a odd ainda não ficou boa; vou rechecando por até {LIVE_PRICE_WATCH_WINDOW_MIN} minutos.",
+                    )
+                    alertas.append(bloco_preco)
+                elif acao_preco == "expired":
+                    alertas.append(
+                        f"🔴 <b>Leitura cancelada</b>\n"
+                        f"<code>{home_name}</code> <b>x</b> <code>{away_name}</code>\n"
+                        f"• {nomes_mercado.get(mercado, mercado)}"
+                        + (
+                            f" | {self._meta_live_contexto({'payload': payload, **item_salvo})}"
+                            if self._meta_live_contexto({'payload': payload, **item_salvo})
+                            else ""
+                        )
+                        + "\n"
+                        f"• Minuto {leitura.get('elapsed') or '?'}\n"
+                        f"• {motivo_preco}"
+                    )
             categorias_existentes.add(categoria)
 
         return alertas, sinais

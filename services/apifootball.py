@@ -170,6 +170,14 @@ def escalacao_partida(fixture_id: int) -> list[dict]:
     return _get("fixtures/lineups", {"fixture": fixture_id})
 
 
+def jogadores_partida(fixture_id: int) -> list[dict]:
+    """
+    Retorna estatisticas por jogador em uma partida.
+    Cada item: {team, players:[{player, statistics:[...]}]}.
+    """
+    return _get("fixtures/players", {"fixture": fixture_id})
+
+
 # ══════════════════════════════════════════════
 #  CLASSIFICAÇÃO (STANDINGS)
 # ══════════════════════════════════════════════

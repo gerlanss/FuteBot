@@ -124,6 +124,63 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_events_fixture
                 ON fixture_events(fixture_id);
 
+            -- Contexto operacional por fixture (lineups, injuries, players)
+            CREATE TABLE IF NOT EXISTS fixture_lineups (
+                fixture_id    INTEGER NOT NULL,
+                team_id       INTEGER NOT NULL,
+                team_name     TEXT,
+                coach_id      INTEGER,
+                coach_name    TEXT,
+                formation     TEXT,
+                startxi_json  TEXT NOT NULL,
+                substitutes_json TEXT NOT NULL,
+                raw_json      TEXT NOT NULL,
+                created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (fixture_id, team_id),
+                FOREIGN KEY (fixture_id) REFERENCES fixtures(fixture_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_fixture_lineups_fixture
+                ON fixture_lineups(fixture_id);
+
+            CREATE TABLE IF NOT EXISTS fixture_injuries (
+                fixture_id    INTEGER NOT NULL,
+                team_id       INTEGER,
+                player_id     INTEGER,
+                player_name   TEXT,
+                injury_type   TEXT,
+                reason        TEXT,
+                raw_json      TEXT NOT NULL,
+                created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (fixture_id, team_id, player_id),
+                FOREIGN KEY (fixture_id) REFERENCES fixtures(fixture_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_fixture_injuries_fixture
+                ON fixture_injuries(fixture_id);
+
+            CREATE TABLE IF NOT EXISTS fixture_player_stats (
+                fixture_id      INTEGER NOT NULL,
+                team_id         INTEGER NOT NULL,
+                player_id       INTEGER NOT NULL,
+                player_name     TEXT,
+                minutes_played  INTEGER,
+                rating          REAL,
+                position        TEXT,
+                is_substitute   INTEGER DEFAULT 0,
+                stats_json      TEXT NOT NULL,
+                raw_json        TEXT NOT NULL,
+                created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (fixture_id, team_id, player_id),
+                FOREIGN KEY (fixture_id) REFERENCES fixtures(fixture_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_fixture_player_stats_fixture
+                ON fixture_player_stats(fixture_id);
+
             -- Estatísticas agregadas do time (por liga/season)
             CREATE TABLE IF NOT EXISTS team_stats (
                 team_id      INTEGER NOT NULL,
@@ -427,6 +484,7 @@ class Database:
                 odd_usada        REAL,
                 signal_minute    INTEGER,
                 signal_note      TEXT,
+                snapshot_json    TEXT,
                 resultado        TEXT,
                 gols_home        INTEGER,
                 gols_away        INTEGER,
@@ -451,6 +509,19 @@ class Database:
         }
         if "prob_modelo" not in cols:
             conn.execute("ALTER TABLE predictions ADD COLUMN prob_modelo REAL")
+        live_result_cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(live_results)").fetchall()
+        }
+        if "snapshot_json" not in live_result_cols:
+            conn.execute("ALTER TABLE live_results ADD COLUMN snapshot_json TEXT")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS app_state (
+                key          TEXT PRIMARY KEY,
+                value        TEXT,
+                updated_at   TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS telegram_chats (
                 chat_id        INTEGER PRIMARY KEY,
@@ -583,6 +654,7 @@ class Database:
                 odd_usada        REAL,
                 signal_minute    INTEGER,
                 signal_note      TEXT,
+                snapshot_json    TEXT,
                 resultado        TEXT,
                 gols_home        INTEGER,
                 gols_away        INTEGER,
@@ -839,6 +911,139 @@ class Database:
                 (ev.get("time") or {}).get("extra"),
                 json.dumps(ev, ensure_ascii=False),
             ))
+        conn.commit()
+        conn.close()
+
+    def fixture_events_count(self) -> int:
+        """Retorna quantidade total de eventos persistidos."""
+        conn = self._conn()
+        row = conn.execute("SELECT COUNT(*) AS n FROM fixture_events").fetchone()
+        conn.close()
+        return int(row["n"] or 0)
+
+    def fixtures_com_eventos_count(self) -> int:
+        """Retorna quantidade de fixtures com ao menos um evento salvo."""
+        conn = self._conn()
+        row = conn.execute("SELECT COUNT(DISTINCT fixture_id) AS n FROM fixture_events").fetchone()
+        conn.close()
+        return int(row["n"] or 0)
+
+    def salvar_lineups(self, fixture_id: int, lineups: list[dict]):
+        """Salva lineups por fixture e time."""
+        conn = self._conn()
+        conn.execute("DELETE FROM fixture_lineups WHERE fixture_id=?", (fixture_id,))
+        for item in lineups:
+            team = item.get("team") or {}
+            coach = item.get("coach") or {}
+            conn.execute(
+                """
+                INSERT INTO fixture_lineups (
+                    fixture_id, team_id, team_name, coach_id, coach_name,
+                    formation, startxi_json, substitutes_json, raw_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(fixture_id, team_id) DO UPDATE SET
+                    team_name=excluded.team_name,
+                    coach_id=excluded.coach_id,
+                    coach_name=excluded.coach_name,
+                    formation=excluded.formation,
+                    startxi_json=excluded.startxi_json,
+                    substitutes_json=excluded.substitutes_json,
+                    raw_json=excluded.raw_json,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (
+                    fixture_id,
+                    team.get("id"),
+                    team.get("name"),
+                    coach.get("id"),
+                    coach.get("name"),
+                    item.get("formation"),
+                    json.dumps(item.get("startXI") or [], ensure_ascii=False),
+                    json.dumps(item.get("substitutes") or [], ensure_ascii=False),
+                    json.dumps(item, ensure_ascii=False),
+                ),
+            )
+        conn.commit()
+        conn.close()
+
+    def salvar_injuries(self, fixture_id: int, injuries: list[dict]):
+        """Salva lesoes/desfalques por fixture."""
+        conn = self._conn()
+        conn.execute("DELETE FROM fixture_injuries WHERE fixture_id=?", (fixture_id,))
+        for item in injuries:
+            team = item.get("team") or {}
+            player = item.get("player") or {}
+            conn.execute(
+                """
+                INSERT INTO fixture_injuries (
+                    fixture_id, team_id, player_id, player_name, injury_type,
+                    reason, raw_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(fixture_id, team_id, player_id) DO UPDATE SET
+                    player_name=excluded.player_name,
+                    injury_type=excluded.injury_type,
+                    reason=excluded.reason,
+                    raw_json=excluded.raw_json,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (
+                    fixture_id,
+                    team.get("id"),
+                    player.get("id"),
+                    player.get("name"),
+                    player.get("type"),
+                    player.get("reason"),
+                    json.dumps(item, ensure_ascii=False),
+                ),
+            )
+        conn.commit()
+        conn.close()
+
+    def salvar_fixture_player_stats(self, fixture_id: int, players_payload: list[dict]):
+        """Salva estatisticas por jogador da partida."""
+        conn = self._conn()
+        conn.execute("DELETE FROM fixture_player_stats WHERE fixture_id=?", (fixture_id,))
+        for team_block in players_payload:
+            team = team_block.get("team") or {}
+            for player_block in team_block.get("players") or []:
+                player = player_block.get("player") or {}
+                stats_list = player_block.get("statistics") or []
+                stat0 = stats_list[0] if stats_list else {}
+                games = stat0.get("games") or {}
+                raw_rating = games.get("rating")
+                try:
+                    rating = float(raw_rating) if raw_rating not in (None, "") else None
+                except Exception:
+                    rating = None
+                conn.execute(
+                    """
+                    INSERT INTO fixture_player_stats (
+                        fixture_id, team_id, player_id, player_name, minutes_played,
+                        rating, position, is_substitute, stats_json, raw_json, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(fixture_id, team_id, player_id) DO UPDATE SET
+                        player_name=excluded.player_name,
+                        minutes_played=excluded.minutes_played,
+                        rating=excluded.rating,
+                        position=excluded.position,
+                        is_substitute=excluded.is_substitute,
+                        stats_json=excluded.stats_json,
+                        raw_json=excluded.raw_json,
+                        updated_at=CURRENT_TIMESTAMP
+                    """,
+                    (
+                        fixture_id,
+                        team.get("id"),
+                        player.get("id"),
+                        player.get("name"),
+                        games.get("minutes"),
+                        rating,
+                        games.get("position"),
+                        1 if games.get("substitute") else 0,
+                        json.dumps(stat0, ensure_ascii=False),
+                        json.dumps(player_block, ensure_ascii=False),
+                    ),
+                )
         conn.commit()
         conn.close()
 
@@ -1291,6 +1496,21 @@ class Database:
                 return float(value)
         return None
 
+    @staticmethod
+    def _snapshot_live_item(item: dict | None) -> dict | None:
+        if not item:
+            return None
+        payload = item.get("payload") or {}
+        for candidate in (
+            payload.get("training_snapshot"),
+            payload.get("live_reading"),
+            item.get("training_snapshot"),
+            item.get("live_reading"),
+        ):
+            if isinstance(candidate, dict) and candidate:
+                return candidate
+        return None
+
     def salvar_live_result_signal(
         self,
         item: dict,
@@ -1304,18 +1524,20 @@ class Database:
             return
 
         odd = self._odd_live_item(item)
+        snapshot = self._snapshot_live_item(item)
         conn = self._conn()
         conn.execute(
             """
             INSERT INTO live_results (
                 live_watch_id, scan_date, fixture_id, league_id,
                 home_name, away_name, mercado, watch_type,
-                odd_usada, signal_minute, signal_note
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                odd_usada, signal_minute, signal_note, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(live_watch_id) DO UPDATE SET
                 odd_usada = COALESCE(live_results.odd_usada, excluded.odd_usada),
                 signal_minute = COALESCE(live_results.signal_minute, excluded.signal_minute),
-                signal_note = COALESCE(excluded.signal_note, live_results.signal_note)
+                signal_note = COALESCE(excluded.signal_note, live_results.signal_note),
+                snapshot_json = COALESCE(live_results.snapshot_json, excluded.snapshot_json)
             """,
             (
                 live_watch_id,
@@ -1329,6 +1551,7 @@ class Database:
                 odd,
                 signal_minute,
                 signal_note,
+                json.dumps(snapshot, ensure_ascii=False) if snapshot else None,
             ),
         )
         conn.commit()
@@ -1393,12 +1616,16 @@ class Database:
         conn.close()
         return [dict(r) for r in rows]
 
-    def metricas_live(self, data: str | None = None) -> dict:
+    def metricas_live(self, data: str | None = None, data_inicio: str | None = None) -> dict:
         sql = "SELECT * FROM live_results WHERE acertou IS NOT NULL"
         params = []
         if data:
             sql += " AND scan_date = ?"
             params.append(data)
+        data_inicio_norm = self._normalizar_data_filtro(data_inicio)
+        if data_inicio_norm:
+            sql += " AND scan_date >= ?"
+            params.append(data_inicio_norm)
 
         conn = self._conn()
         rows = conn.execute(sql, params).fetchall()
@@ -1723,6 +1950,111 @@ class Database:
         conn.commit()
         conn.close()
 
+    @staticmethod
+    def _limpar_flags_envio_payload(payload: dict | None) -> tuple[dict, bool]:
+        if not isinstance(payload, dict):
+            return {}, False
+        limpo = dict(payload)
+        alterado = False
+        for chave in (
+            "live_signal_notified",
+            "live_hit_notified",
+            "live_loss_notified",
+            "sent_live_combo_keys",
+        ):
+            if chave in limpo:
+                limpo.pop(chave, None)
+                alterado = True
+        return limpo, alterado
+
+    def resetar_historico_envio_telegram(self) -> dict:
+        """
+        Limpa apenas a memoria operacional de envio/dedupe do Telegram.
+
+        Preserva:
+          - chats registrados
+          - predictions, resultados e historico esportivo
+
+        Remove:
+          - notification_log
+          - live_market_notifications
+          - combo_live_notifications
+          - flags de envio presos em payload_json da live_watchlist
+        """
+        conn = self._conn()
+
+        notif_log = int(conn.execute("SELECT COUNT(*) AS n FROM notification_log").fetchone()["n"])
+        live_market = int(conn.execute("SELECT COUNT(*) AS n FROM live_market_notifications").fetchone()["n"])
+        combo_live = int(conn.execute("SELECT COUNT(*) AS n FROM combo_live_notifications").fetchone()["n"])
+
+        rows = conn.execute("SELECT id, payload_json FROM live_watchlist").fetchall()
+        payloads_limpos = 0
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            payload_limpo, alterado = self._limpar_flags_envio_payload(payload)
+            if not alterado:
+                continue
+            conn.execute(
+                "UPDATE live_watchlist SET payload_json = ? WHERE id = ?",
+                (json.dumps(payload_limpo, ensure_ascii=False), row["id"]),
+            )
+            payloads_limpos += 1
+
+        conn.execute("DELETE FROM notification_log")
+        conn.execute("DELETE FROM live_market_notifications")
+        conn.execute("DELETE FROM combo_live_notifications")
+        conn.commit()
+        conn.close()
+
+        return {
+            "notification_log_removidos": notif_log,
+            "live_market_notifications_removidos": live_market,
+            "combo_live_notifications_removidos": combo_live,
+            "live_watchlist_payloads_limpos": payloads_limpos,
+        }
+
+    def definir_inicio_banca_visivel(self, inicio_iso: str | None = None) -> str:
+        """
+        Define o marco inicial do historico visivel ao usuario sem apagar o
+        historico interno do bot.
+        """
+        inicio = (inicio_iso or datetime.now().isoformat()).strip()
+        conn = self._conn()
+        conn.execute(
+            """
+            INSERT INTO app_state (key, value, updated_at)
+            VALUES ('visible_bankroll_start', ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (inicio,),
+        )
+        conn.commit()
+        conn.close()
+        return inicio
+
+    def obter_inicio_banca_visivel(self) -> str | None:
+        """Retorna o marco inicial do historico visivel ao usuario, se houver."""
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT value FROM app_state WHERE key = 'visible_bankroll_start'"
+        ).fetchone()
+        conn.close()
+        return row["value"] if row and row["value"] else None
+
+    @staticmethod
+    def _normalizar_data_filtro(data_inicio: str | None) -> str | None:
+        if not data_inicio:
+            return None
+        valor = str(data_inicio).strip()
+        if not valor:
+            return None
+        return valor[:10]
+
     def atualizar_odd_manual(self, fixture_id: int, mercado: str,
                              odd: float, ev_percent: float,
                              bookmaker: str = "manual"):
@@ -1831,7 +2163,7 @@ class Database:
         return [dict(r) for r in rows]
 
     def metricas_modelo(self, league_id: int = None, mercado: str = None,
-                         modelo_versao: str = None) -> dict:
+                         modelo_versao: str = None, data_inicio: str | None = None) -> dict:
         """
         Calcula métricas de performance do modelo.
 
@@ -1852,6 +2184,10 @@ class Database:
         if mercado:
             sql += " AND mercado=?"
             params.append(mercado)
+        data_inicio_norm = self._normalizar_data_filtro(data_inicio)
+        if data_inicio_norm:
+            sql += " AND substr(date, 1, 10) >= ?"
+            params.append(data_inicio_norm)
 
         conn = self._conn()
         rows = conn.execute(sql, params).fetchall()
@@ -2014,6 +2350,7 @@ class Database:
         conn = self._conn()
         r = {}
         for tabela in ["fixtures", "fixture_stats", "fixture_events",
+                       "fixture_lineups", "fixture_injuries", "fixture_player_stats",
                        "team_stats", "predictions", "odds_cache", "train_log",
                        "telegram_chats"]:
             row = conn.execute(f"SELECT COUNT(*) as n FROM {tabela}").fetchone()
@@ -2024,6 +2361,14 @@ class Database:
         # Fixtures com stats
         row = conn.execute("SELECT COUNT(DISTINCT fixture_id) as n FROM fixture_stats").fetchone()
         r["fixtures_com_stats"] = row["n"]
+        row = conn.execute("SELECT COUNT(DISTINCT fixture_id) as n FROM fixture_events").fetchone()
+        r["fixtures_com_eventos"] = row["n"]
+        row = conn.execute("SELECT COUNT(DISTINCT fixture_id) as n FROM fixture_lineups").fetchone()
+        r["fixtures_com_lineups"] = row["n"]
+        row = conn.execute("SELECT COUNT(DISTINCT fixture_id) as n FROM fixture_injuries").fetchone()
+        r["fixtures_com_injuries"] = row["n"]
+        row = conn.execute("SELECT COUNT(DISTINCT fixture_id) as n FROM fixture_player_stats").fetchone()
+        r["fixtures_com_player_stats"] = row["n"]
         # Estratégias ativas
         try:
             row = conn.execute("SELECT COUNT(*) as n FROM strategies WHERE ativo=1").fetchone()

@@ -66,6 +66,12 @@ _TIP_TO_SELECTION: dict[str, OddsSelection] = {
     "under05_2t": OddsSelection(10270, 10271, "2T Under 0.5"),
     "over15_2t": OddsSelection(10272, 10272, "2T Over 1.5"),
     "under15_2t": OddsSelection(10272, 10273, "2T Under 1.5"),
+    "corners_over_85": OddsSelection(10799, 10799, "Escanteios Over 8.5"),
+    "corners_under_85": OddsSelection(10799, 10800, "Escanteios Under 8.5"),
+    "corners_over_95": OddsSelection(10803, 10803, "Escanteios Over 9.5"),
+    "corners_under_95": OddsSelection(10803, 10804, "Escanteios Under 9.5"),
+    "corners_over_105": OddsSelection(10807, 10807, "Escanteios Over 10.5"),
+    "corners_under_105": OddsSelection(10807, 10808, "Escanteios Under 10.5"),
 }
 
 
@@ -230,6 +236,10 @@ class OddsPapiClient:
             "changed_at": changed_at,
             "active": bool(active) if active is not None else None,
             "selection_label": selection.label,
+            "market_id": selection.market_id,
+            "outcome_id": selection.outcome_id,
+            "outcome_name": outcome_payload.get("outcomeName"),
+            "point_line": market_payload.get("handicap"),
             "fixture_path": bookmaker_data.get("fixturePath"),
             "bookmaker_fixture_id": bookmaker_data.get("bookmakerFixtureId"),
         }
@@ -324,9 +334,17 @@ def enriquecer_tips_com_odds_oddspapi(
         tip["bookmaker"] = ODDSPAPI_BOOKMAKER_LABEL
         tip["odd_captured_at"] = detalhe.get("changed_at")
         tip["odd_selection_label"] = detalhe.get("selection_label")
+        tip["market_id"] = detalhe.get("market_id")
+        tip["outcome_id"] = detalhe.get("outcome_id")
+        tip["outcome_name"] = detalhe.get("outcome_name")
+        tip["point_line"] = detalhe.get("point_line")
         tip["odd_fixture_path"] = detalhe.get("fixture_path")
         tip["odd_bookmaker_fixture_id"] = detalhe.get("bookmaker_fixture_id")
-        prob = float(tip.get("prob_modelo") or 0)
-        tip["ev_percent"] = round((prob * odd - 1) * 100, 1)
+        prob_raw = tip.get("prob_modelo")
+        try:
+            prob = float(prob_raw) if prob_raw is not None else None
+        except (TypeError, ValueError):
+            prob = None
+        tip["ev_percent"] = round((prob * odd - 1) * 100, 1) if prob is not None else None
 
     return tips

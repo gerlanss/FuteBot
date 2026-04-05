@@ -1,6 +1,6 @@
 module futebot.integracoes {
   docs {
-    resumo: "Contrato semantico das integracoes externas do FuteBot,cobrindo API-Football,OddsPapi/1xBet e bulk download historico."
+    resumo: "Contrato semantico das integracoes externas do FuteBot,cobrindo API-Football,OddsPapi/1xBet e bulk download historico; para treino serio,nao basta fixture+stats final,tambem e necessario popular eventos,lineups,injuries e agregados por time para fortalecer live e pre-live sem depender de odds pagas; no live final,o recorte precisa ser liga x mercado,sem misturar tudo num caldo global."
   }
 
   state requisicao_externa {
@@ -153,7 +153,7 @@ module futebot.integracoes {
 
   task baixar_stats_historicos {
     docs {
-      resumo: "Baixa stats de partidas finalizadas,respeitando limite de seguranca e modo resume."
+      resumo: "Baixa stats de partidas finalizadas,respeitando limite de seguranca e modo resume; essas stats sao snapshot final da partida e ajudam o treino,mas nao substituem eventos por minuto."
     }
     input {
       season: Texto required
@@ -193,9 +193,85 @@ module futebot.integracoes {
     }
   }
 
+  task baixar_eventos_historicos {
+    docs {
+      resumo: "Baixa eventos historicos por fixture para registrar minutos de gol,cartao e substituicao,destravando labels temporais e treino live real a partir da base historica da API; watchlist do bot nao pode ser tratada como fonte primaria de treino live,mas os snapshots persistidos pelo bot continuam necessarios para mercados como cantos."
+    }
+    input {
+      season: Texto required
+      origem: Texto required
+    }
+    output {
+      eventos_baixados: Inteiro
+      fixture_events_populada: Booleano
+    }
+    rules {
+      season existe
+      origem existe
+    }
+    effects {
+      consulta api_football criticidade = alta
+      persistencia fixture_events criticidade = alta
+      auditoria bulk_eventos criticidade = media
+    }
+    impl {
+      py: data.bulk_download.baixar_eventos
+    }
+    guarantees {
+      eventos_baixados existe
+      fixture_events_populada existe
+    }
+    tests {
+      caso "bulk de eventos pode seguir mesmo com fixture sem eventos" {
+        given {
+          season: 2025
+          origem: "bootstrap"
+        }
+
+        expect {
+          sucesso: verdadeiro
+        }
+      }
+    }
+  }
+
+  task enriquecer_contexto_historico_treino {
+    docs {
+      resumo: "Baixa e persiste lineups,injuries e agregados por time para reforcar o pre-live e dar base contextual reutilizavel para IA e modelos."
+    }
+    input {
+      season: Texto required
+      origem: Texto required
+    }
+    output {
+      lineups_salvas: Inteiro
+      team_stats_salvas: Inteiro
+      injuries_salvas: Inteiro
+    }
+    rules {
+      season existe
+      origem existe
+    }
+    effects {
+      consulta api_football criticidade = alta
+      persistencia fixture_lineups criticidade = alta
+      persistencia fixture_injuries criticidade = media
+      persistencia team_stats criticidade = alta
+      auditoria contexto_historico_treino criticidade = media
+    }
+    impl {
+      py: data.bulk_download.baixar_contexto_treino
+    }
+    guarantees {
+      lineups_salvas existe
+      team_stats_salvas existe
+      injuries_salvas existe
+    }
+  }
+
   task enriquecer_odds_oddspapi_final {
     docs {
-      resumo: "Consulta a OddsPapi v4 com bookmaker 1xbet para a shortlist final do scanner,enriquecendo apenas os fixtures candidatos com odd,EV e contexto operacional."
+      resumo: "Consulta a OddsPapi v4 com bookmaker 1xbet para a shortlist final do scanner,enriquecendo apenas os fixtures candidatos com odd,EV e contexto operacional; mercados de escanteio 8.5,9.5 e 10.5 precisam estar mapeados explicitamente,e EV nunca pode ser fabricado a partir de prob_modelo nulo."
     }
     input {
       fixture_ids: Texto required
@@ -251,8 +327,10 @@ module futebot.integracoes {
     etapa status usa consultar_status_api_football com endpoint = endpoint, data_referencia = season em_sucesso payload em_erro odds
     etapa payload usa normalizar_payload_api_football com endpoint = endpoint, payload_tipo = dict depende_de status em_sucesso fixtures em_erro fixtures
     etapa fixtures usa baixar_fixtures_historicos com season = season, origem = bulk depende_de payload em_sucesso stats em_erro odds
-    etapa stats usa baixar_stats_historicos com season = season, origem = bulk depende_de fixtures em_sucesso odds em_erro odds
-    etapa odds usa enriquecer_odds_oddspapi_final com fixture_ids = fixture_ids, fase_operacional = fase_operacional depende_de stats
+    etapa stats usa baixar_stats_historicos com season = season, origem = bulk depende_de fixtures em_sucesso eventos em_erro odds
+    etapa eventos usa baixar_eventos_historicos com season = season, origem = bulk depende_de stats em_sucesso contexto em_erro odds
+    etapa contexto usa enriquecer_contexto_historico_treino com season = season, origem = bulk depende_de eventos em_sucesso odds em_erro odds
+    etapa odds usa enriquecer_odds_oddspapi_final com fixture_ids = fixture_ids, fase_operacional = fase_operacional depende_de contexto
     effects {
       auditoria ciclo_integracoes criticidade = alta
       persistencia estado_integracoes criticidade = alta
