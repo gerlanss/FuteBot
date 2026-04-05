@@ -87,6 +87,11 @@ class LiveIntelligence:
             "shots_on": 0.0,
             "corners": 0.0,
             "xg": 0.0,
+            "possession": 0.0,
+            "passes_total": 0.0,
+            "passes_accuracy": 0.0,
+            "attacks": 0.0,
+            "dangerous_attacks": 0.0,
             "red_cards": 0.0,
             "yellow_cards": 0.0,
         }
@@ -97,6 +102,11 @@ class LiveIntelligence:
                 "shots_on": 0.0,
                 "corners": 0.0,
                 "xg": 0.0,
+                "possession": 0.0,
+                "passes_total": 0.0,
+                "passes_accuracy": 0.0,
+                "attacks": 0.0,
+                "dangerous_attacks": 0.0,
                 "red_cards": 0.0,
                 "yellow_cards": 0.0,
             }
@@ -112,6 +122,16 @@ class LiveIntelligence:
                     parsed["corners"] = parsed_value
                 elif name == "expected_goals":
                     parsed["xg"] = parsed_value
+                elif name == "Ball Possession":
+                    parsed["possession"] = parsed_value
+                elif name == "Total passes":
+                    parsed["passes_total"] = parsed_value
+                elif name == "Passes %":
+                    parsed["passes_accuracy"] = parsed_value
+                elif name == "Attacks":
+                    parsed["attacks"] = parsed_value
+                elif name == "Dangerous Attacks":
+                    parsed["dangerous_attacks"] = parsed_value
                 elif name == "Red Cards":
                     parsed["red_cards"] = parsed_value
                 elif name == "Yellow Cards":
@@ -161,6 +181,78 @@ class LiveIntelligence:
     @staticmethod
     def _cancel_text(watch_type: str, approved_text: str, recheck_text: str) -> str:
         return approved_text if watch_type in {"approved_prelive", "live_opportunity"} else recheck_text
+
+    @staticmethod
+    def _metric_available(home_value: float, away_value: float) -> bool:
+        return abs(float(home_value or 0.0)) > 0.0 or abs(float(away_value or 0.0)) > 0.0
+
+    def _draw_balance_snapshot(self, metricas: dict[str, float]) -> dict[str, bool | float]:
+        home_on = self._team_metric(metricas, 0, "shots_on")
+        away_on = self._team_metric(metricas, 1, "shots_on")
+        home_xg = self._team_metric(metricas, 0, "xg")
+        away_xg = self._team_metric(metricas, 1, "xg")
+        home_shots = self._team_metric(metricas, 0, "shots_total")
+        away_shots = self._team_metric(metricas, 1, "shots_total")
+        home_possession = self._team_metric(metricas, 0, "possession")
+        away_possession = self._team_metric(metricas, 1, "possession")
+        home_pass_acc = self._team_metric(metricas, 0, "passes_accuracy")
+        away_pass_acc = self._team_metric(metricas, 1, "passes_accuracy")
+        home_attacks = self._team_metric(metricas, 0, "attacks")
+        away_attacks = self._team_metric(metricas, 1, "attacks")
+        home_danger = self._team_metric(metricas, 0, "dangerous_attacks")
+        away_danger = self._team_metric(metricas, 1, "dangerous_attacks")
+
+        on_diff = abs(home_on - away_on)
+        xg_diff = abs(home_xg - away_xg)
+        shots_diff = abs(home_shots - away_shots)
+        possession_diff = abs(home_possession - away_possession)
+        pass_acc_diff = abs(home_pass_acc - away_pass_acc)
+        attacks_diff = abs(home_attacks - away_attacks)
+        danger_diff = abs(home_danger - away_danger)
+
+        xg_available = self._metric_available(home_xg, away_xg)
+        possession_available = self._metric_available(home_possession, away_possession)
+        pass_acc_available = self._metric_available(home_pass_acc, away_pass_acc)
+        attacks_available = self._metric_available(home_attacks, away_attacks)
+        danger_available = self._metric_available(home_danger, away_danger)
+
+        dominance_clear = (
+            on_diff >= 2
+            or shots_diff >= 4
+            or (xg_available and xg_diff >= 0.25)
+            or (possession_available and possession_diff >= 24)
+            or (pass_acc_available and pass_acc_diff >= 14)
+            or (attacks_available and attacks_diff >= 12)
+            or (danger_available and danger_diff >= 6)
+        )
+
+        balanced = (
+            on_diff <= 1
+            and shots_diff <= 2
+            and (not xg_available or xg_diff <= 0.14)
+            and (not possession_available or possession_diff <= 18)
+            and (not pass_acc_available or pass_acc_diff <= 12)
+            and (not attacks_available or attacks_diff <= 10)
+            and (not danger_available or danger_diff <= 5)
+            and not dominance_clear
+        )
+
+        return {
+            "balanced": balanced,
+            "dominance_clear": dominance_clear,
+            "on_diff": on_diff,
+            "xg_diff": xg_diff,
+            "shots_diff": shots_diff,
+            "possession_diff": possession_diff,
+            "pass_acc_diff": pass_acc_diff,
+            "attacks_diff": attacks_diff,
+            "danger_diff": danger_diff,
+            "xg_available": xg_available,
+            "possession_available": possession_available,
+            "pass_acc_available": pass_acc_available,
+            "attacks_available": attacks_available,
+            "danger_available": danger_available,
+        }
 
     @staticmethod
     def _state_label(state: str | None) -> str | None:
@@ -607,6 +699,13 @@ class LiveIntelligence:
         ht_market = self._is_first_half_market(mercado)
 
         if "over" in mercado:
+            # Bloqueia over quando cantos estão perto demais da linha considerando o tempo.
+            # Mais tempo restante = mercado quase certo = odd irrisória.
+            # Menos tempo = odd tem valor real mesmo perto da linha.
+            tempo_restante = max(1, 90 - elapsed)
+            margem_over = max(0.5, tempo_restante / 20)
+            if corners >= linha - margem_over:
+                return {}
             if ht_market:
                 if 24 <= elapsed <= 36 and corners >= 3 and shots_total >= 9 and (shots_on >= 4 or xg >= 0.70):
                     return {
@@ -654,6 +753,14 @@ class LiveIntelligence:
                         "A pressao lateral ja passou do ponto para esse under de cantos.",
                     ),
                 }
+            return {}
+
+        # Bloqueia under quando o mercado já está praticamente garantido (cantos muito abaixo da
+        # linha dado o tempo restante). Tarde + poucos cantos = odd irrisória, sem valor.
+        tempo_restante = max(1, 90 - elapsed)
+        margem_under = max(0.5, tempo_restante / 20)
+        cantos_esperados_restantes = tempo_restante * 0.1  # ~9 cantos/jogo em média
+        if corners + cantos_esperados_restantes <= linha - margem_under:
             return {}
 
         if elapsed >= 55 and corners <= max(4, linha - 4) and shots_total <= 12 and shots_on <= 4 and xg <= 1.00:
@@ -716,6 +823,7 @@ class LiveIntelligence:
         away_on = self._team_metric(metricas, 1, "shots_on")
         home_xg = self._team_metric(metricas, 0, "xg")
         away_xg = self._team_metric(metricas, 1, "xg")
+        draw_balance = self._draw_balance_snapshot(metricas)
         home_shots = self._team_metric(metricas, 0, "shots_total")
         away_shots = self._team_metric(metricas, 1, "shots_total")
 
@@ -753,12 +861,16 @@ class LiveIntelligence:
                 }
             return {}
 
-        if 28 <= elapsed <= 36 and gols_home == gols_away and abs(home_on - away_on) <= 1 and abs(home_xg - away_xg) <= 0.14 and abs(home_shots - away_shots) <= 2:
+        if 28 <= elapsed <= 36 and gols_home == gols_away and bool(draw_balance["balanced"]):
             return {
                 "veredito": "sinal_live",
                 "mensagem": "O 1T segue equilibrado de verdade e o empate continua bem defendido.",
             }
-        if 10 <= elapsed <= 30 and (gols_home != gols_away or abs(home_xg - away_xg) >= 0.30 or abs(home_on - away_on) >= 2):
+        if 10 <= elapsed <= 30 and (
+            gols_home != gols_away
+            or bool(draw_balance["dominance_clear"])
+            or (bool(draw_balance["xg_available"]) and float(draw_balance["xg_diff"]) >= 0.30)
+        ):
             return {
                 "veredito": "cancelar",
                 "mensagem": self._cancel_text(
@@ -783,6 +895,7 @@ class LiveIntelligence:
         away_on = self._team_metric(metricas, 1, "shots_on")
         home_xg = self._team_metric(metricas, 0, "xg")
         away_xg = self._team_metric(metricas, 1, "xg")
+        draw_balance = self._draw_balance_snapshot(metricas)
         home_shots = self._team_metric(metricas, 0, "shots_total")
         away_shots = self._team_metric(metricas, 1, "shots_total")
 
@@ -820,12 +933,16 @@ class LiveIntelligence:
                 }
             return {}
 
-        if elapsed >= 58 and gols_home == gols_away and abs(home_on - away_on) <= 1 and abs(home_xg - away_xg) <= 0.20 and abs(home_shots - away_shots) <= 2:
+        if elapsed >= 58 and gols_home == gols_away and bool(draw_balance["balanced"]):
             return {
                 "veredito": "sinal_live",
                 "mensagem": "O jogo segue equilibrado de verdade e o empate continua bem sustentado.",
             }
-        if elapsed >= 65 and (gols_home != gols_away or abs(home_xg - away_xg) >= 0.30 or abs(home_on - away_on) >= 2):
+        if elapsed >= 58 and (
+            gols_home != gols_away
+            or bool(draw_balance["dominance_clear"])
+            or (bool(draw_balance["xg_available"]) and float(draw_balance["xg_diff"]) >= 0.30)
+        ):
             return {
                 "veredito": "cancelar",
                 "mensagem": self._cancel_text(

@@ -78,7 +78,7 @@ module futebot.operacao {
 
   task liberar_mercados_t30 {
     docs {
-      resumo: "Reavalia o radar do dia na janela T-30 e decide o que continua de pe,o que e barrado e o que pode ser publicado,aplicando gate final de OddsPapi/1xBet,odd minima simples de 1.40,EV minimo e combos apenas para selecoes ja aprovadas; quando uma entrada e barrada,o publico deve ser avisado e o fixture segue elegivel para observacao live."
+      resumo: "Reavalia o radar do dia na janela T-30 e decide o que continua de pe,o que e barrado e o que pode ser publicado,consultando OddsPapi/1xBet apenas como contexto final de exibicao; odd e EV nao podem mais vetar a liberacao da tip,servindo apenas para mostrar o preco encontrado quando existir; quando a 1xBet nao devolver odd valida,o mercado continua elegivel para publicacao e para observacao live,sem virar bloqueio operacional."
     }
     input {
       data_operacao: Texto required
@@ -88,6 +88,7 @@ module futebot.operacao {
       entradas_liberadas: Inteiro
       entradas_barradas: Inteiro
       entradas_barradas_sem_odd: Inteiro
+      entradas_em_observacao_sem_odd: Inteiro
       combos_gerados: Inteiro
     }
     rules {
@@ -109,12 +110,13 @@ module futebot.operacao {
       entradas_liberadas existe
       entradas_barradas existe
       entradas_barradas_sem_odd existe
+      entradas_em_observacao_sem_odd existe
       combos_gerados existe
     }
     error {
-      fixture_sem_odd: "Entrada finalista sem odd valida da OddsPapi/1xBet deve ser barrada."
-      odd_minima_nao_atendida: "Entrada simples abaixo da odd minima operacional nao pode ser liberada."
-      combo_sem_gate_final: "Combo nao pode ser montado com selecoes reprovadas no gate final de odd e EV."
+      fixture_sem_odd: "A 1xBet nao devolveu odd valida para o mercado finalista,entao a tip segue sem preco exibivel naquele instante."
+      odd_minima_nao_atendida: "Odd abaixo de faixa desejada passa a ser apenas contexto visual e nao barra a tip."
+      combo_sem_gate_final: "Combo nao pode depender de gate final de odd e EV para existir; a selecao deve nascer do modelo e do filtro operacional."
     }
     tests {
       caso "liberacao sem candidatos nao quebra o fluxo" {
@@ -132,7 +134,7 @@ module futebot.operacao {
 
   task monitorar_ao_vivo {
     docs {
-      resumo: "Acompanha jogos ativos,resolve entradas e emite atualizacoes relevantes no Telegram,usando piso operacional de confianca do modelo em 60% para pre-live e live; live opportunities novas nao podem nascer com prob_modelo nulo,porque odd e EV dependem de confianca sintetica valida antes do gate final; itens barrados no pre-live com reavaliacao pendente continuam apenas como observacao interna,sem consumir OddsPapi live nem virar oportunidade publica ate existir entrada operacional; uma mesma entrada live nao deve ser republicada em ciclos seguintes sem mudanca real de estado; alertas publicos e operacionais com odd valida devem mostrar odd,EV e bookmaker; no live,o preco so passa a contar depois do primeiro cenario aprovado e entra em janela curta de observacao antes de virar entrada,com EV >= 5% liberando a entrada,EV entre 2% e 5% mantendo observacao e EV abaixo de 2% cancelando sem abrir janela inutil; quando a janela de preco expira sem odd executavel,a leitura live associada tambem deve ser encerrada e resolvida,sem permanecer zumbi em monitoramento; mensagens de janela de preco nao podem usar texto generico mentiroso e precisam deixar claro se o bloqueio veio de odd abaixo do minimo,EV abaixo do minimo,odd indisponivel ou EV indisponivel; cada familia de mercado precisa respeitar janela operacional inteligente de tempo,com minimo e maximo diferentes para over,under,cantos e resultado,para bloquear tanto sinais cedo demais quanto sinais tarde demais; fixtures ancorados manualmente por comando de time precisam sobreviver na watchlist do dia como gancho silencioso,sem virar pseudo-sinal por conta propria,mas habilitando a expansao de mercados quando o jogo entrar ao vivo; sinais live de cantos e dos demais mercados precisam persistir snapshot operacional suficiente no momento do sinal para alimentar treino futuro sem depender de reconstruir payload mutavel; quando houver reset operacional de banca,o estado de dedupe do Telegram e os flags de envio presos no payload live precisam poder ser limpos sem apagar chats registrados nem resultados esportivos."
+      resumo: "Acompanha jogos ativos,resolve entradas e emite atualizacoes relevantes no Telegram,usando piso operacional de confianca do modelo em 60% para pre-live e live; live opportunities novas nao podem nascer com prob_modelo nulo; quando existir slice treinado por liga x mercado,o runtime live deve preferir o modelo treinado e cair para heuristica apenas como fallback explicito,sem fallback global escondido; itens barrados no pre-live com reavaliacao pendente continuam apenas como observacao interna,sem virar oportunidade publica ate existir entrada operacional; uma mesma entrada live nao deve ser republicada em ciclos seguintes sem mudanca real de estado; odd e EV deixam de ser gate operacional no live e passam a servir apenas como contexto exibivel quando a 1xBet devolver preco naquele instante,sem janela de preco,recheck de odd ou cancelamento por ausencia de preco; leituras de empate no HT e no FT so podem chamar equilibrio real quando shots,posse,passes e controle territorial nao mostrarem dominancia clara de um lado; cada familia de mercado precisa respeitar janela operacional inteligente de tempo,com minimo e maximo diferentes para over,under,cantos e resultado,para bloquear tanto sinais cedo demais quanto sinais tarde demais; mercados de over de cantos nao podem gerar sinal quando a contagem atual de cantos ja atingiu ou ultrapassou linha menos um,pois o mercado nao existe mais ou tem odd irrisoria sem valor operacional; fixtures ancorados manualmente por comando de time precisam sobreviver na watchlist do dia como gancho silencioso,sem virar pseudo-sinal por conta propria,mas habilitando a expansao de mercados quando o jogo entrar ao vivo; sinais live de cantos e dos demais mercados precisam persistir snapshot operacional suficiente no momento do sinal para alimentar treino futuro sem depender de reconstruir payload mutavel; quando houver reset operacional de banca,o estado de dedupe do Telegram e os flags de envio presos no payload live precisam poder ser limpos sem apagar chats registrados nem resultados esportivos."
     }
     input {
       data_operacao: Texto required
