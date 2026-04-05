@@ -673,7 +673,9 @@ def _resolver_destinos_envio(destino) -> list[int]:
         return sorted(_ADMIN_CHAT_IDS)
 
     if destino == "registrados":
-        return sorted(set(_db.telegram_chat_ids()) - _ADMIN_CHAT_IDS)
+        todos = set(_db.telegram_chat_ids())
+        admins_db = set(_db.telegram_chat_ids(apenas_admin=True))
+        return sorted(todos - admins_db)
 
     texto_destino = str(destino).strip()
     if texto_destino.lstrip("-").isdigit():

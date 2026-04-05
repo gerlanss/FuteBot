@@ -899,6 +899,20 @@ class LiveIntelligence:
         home_shots = self._team_metric(metricas, 0, "shots_total")
         away_shots = self._team_metric(metricas, 1, "shots_total")
 
+        diff_gols = gols_home - gols_away
+        # Jogo já decidido: diferença >= 3 gols após min 45 ou >= 2 gols após min 70.
+        # Nesses casos o mercado de resultado tem odd irrisória, sem valor operacional.
+        if mercado.endswith("home") and (
+            (elapsed >= 45 and diff_gols >= 3)
+            or (elapsed >= 70 and diff_gols >= 2)
+        ):
+            return {}
+        if mercado.endswith("away") and (
+            (elapsed >= 45 and diff_gols <= -3)
+            or (elapsed >= 70 and diff_gols <= -2)
+        ):
+            return {}
+
         if mercado.endswith("home"):
             if elapsed >= 55 and gols_home >= gols_away and home_on >= away_on + 3 and home_xg >= away_xg + 0.35:
                 return {
