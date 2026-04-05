@@ -600,8 +600,8 @@ def _formatar_ajuda_html() -> str:
         "So passa se aquela combinacao liga + mercado + faixa de confianca tiver historico validado.\n\n"
         "4. <b>Anti-conflito</b>\n"
         "O bot nao manda mercados contraditorios no mesmo jogo. Ex.: Over 1.5 e Under 3.5 nao coexistem.\n\n"
-        "5. <b>Odds e EV</b>\n"
-        "Quando existe linha exata de odd, o bot calcula EV. Se a odd exata nao existir, ele nao inventa preco.\n\n"
+        "5. <b>Odd contextual</b>\n"
+        "Quando existe linha exata na 1xBet, o bot mostra a odd atual. Se nao existir, ele nao inventa preco e segue pela leitura/modelo.\n\n"
         "6. <b>DeepSeek</b>\n"
         "A IA revisa contexto, forma, tabela, lesoes e coerencia da tip.\n\n"
         "7. <b>Selecao final</b>\n"
@@ -673,7 +673,7 @@ def _resolver_destinos_envio(destino) -> list[int]:
         return sorted(_ADMIN_CHAT_IDS)
 
     if destino == "registrados":
-        return sorted(set(_db.telegram_chat_ids()))
+        return sorted(set(_db.telegram_chat_ids()) - _ADMIN_CHAT_IDS)
 
     texto_destino = str(destino).strip()
     if texto_destino.lstrip("-").isdigit():
@@ -849,11 +849,8 @@ def _formatar_scan_publico_html(data: str = None) -> list[str]:
             for tip in fix_tips:
                 detalhes = [f"Conf {(tip.get('prob_modelo') or 0):.0%}"]
                 odd = tip.get("odd_usada")
-                ev = tip.get("ev_percent")
                 if odd and odd > 1:
                     detalhes.append(f"Odd {odd:.2f}")
-                if ev is not None:
-                    detalhes.append(f"EV {ev:+.1f}%")
                 if tip.get("bookmaker"):
                     detalhes.append(tip["bookmaker"])
                 linhas.append(f"• <b>{tip.get('mercado')}</b>")
@@ -974,6 +971,7 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             release.get("tips_enviadas_llm"),
             release.get("tips_aprovadas"),
             release.get("tips_rejeitadas_llm"),
+            release.get("tips_observadas_sem_odd"),
             release.get("combos"),
         ]):
             await _reply_text_safe(update.message, "🚨 Encontrei jogo(s) já na janela T-30. Rodando revisão final agora.")
@@ -1488,6 +1486,7 @@ async def _executar_via_callback(query, handler_fn, context):
                 release.get("tips_enviadas_llm"),
                 release.get("tips_aprovadas"),
                 release.get("tips_rejeitadas_llm"),
+                release.get("tips_observadas_sem_odd"),
                 release.get("combos"),
             ]):
                 await query.message.reply_text("🚨 Encontrei jogo(s) já na janela T-30. Rodando revisão final agora.")

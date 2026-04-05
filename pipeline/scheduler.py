@@ -3,7 +3,7 @@ Scheduler — agendamento automático do pipeline.
 
 Executa automaticamente:
   - 06:00  → Collector (resultados de ontem + resolver previsões)
-  - 07:00  → Scanner (análise do dia + buscar odds + EV)
+  - 07:00  → Scanner (análise do dia + odd contextual quando existir)
   - 22:00  → Relatório do dia (resultados das previsões de hoje)
   - 1º domingo do mês 14:00 → Treino per-league (~13h, termina antes do scanner de segunda)
 
@@ -34,6 +34,7 @@ from models.trainer import Trainer
 from models.autotuner import AutoTuner
 from models.market_discovery import MarketDiscoveryTrainer, MARKET_SPECS
 from models.learner import Learner
+from models.live_predictor import LivePredictor
 from config import (
     SCAN_HORA, RESULTADOS_HORA, RETREINO_DIA, RETREINO_HORA, BULK_HORA,
     MIN_FIXTURES_TREINO, TIMEZONE, AUTO_RETREINO_HORA_INICIO, AUTO_RETREINO_HORA_FIM,
@@ -75,6 +76,7 @@ class Scheduler:
         """
         self.db = db or Database()
         self.telegram_callback = telegram_callback
+        self.live_predictor = LivePredictor(self.db)
         self._pipeline_lock = threading.Lock()
         self._pipeline_job = None
         self.scheduler = BackgroundScheduler(
@@ -306,47 +308,10 @@ class Scheduler:
 
     def _refresh_live_odds_context(self, itens: list[dict]):
         """
-        Atualiza contexto de odds apenas para fixtures já monitorados.
-        Não abre varredura ampla nova no live.
+        Odds live deixaram de ser gate e nao entram mais em polling recorrente.
+        O refresh amplo fica desligado para nao torrar API atoa.
         """
-        if not ODDSPAPI_USE_LIVE or not itens:
-            return
-        now = datetime.now(ZoneInfo(TIMEZONE))
-        payloads = []
-        id_map: dict[tuple[int, str], tuple[int, dict, dict]] = {}
-        for item in itens:
-            if item.get("watch_type") not in {"approved_prelive", "live_opportunity"}:
-                continue
-            payload = dict(item.get("payload") or {})
-            if not self._deve_consultar_odd_live_item(item, payload, now):
-                continue
-            payload.setdefault("fixture_id", item.get("fixture_id"))
-            payload.setdefault("date", item.get("fixture_date") or item.get("date"))
-            payload.setdefault("league_id", item.get("league_id"))
-            payload.setdefault("home_name", item.get("home_name"))
-            payload.setdefault("away_name", item.get("away_name"))
-            payload.setdefault("mercado", item.get("mercado"))
-            payloads.append(payload)
-            id_map[(item.get("fixture_id"), item.get("mercado"))] = (item.get("id"), payload, item)
-
-        try:
-            enriquecer_tips_com_odds_oddspapi(payloads, phase_operacional="live_monitor")
-        except Exception as exc:
-            print(f"[Scheduler] ⚠️ Falha ao atualizar odds live OddsPapi: {exc}")
-            return
-
-        for payload in payloads:
-            key = (payload.get("fixture_id"), payload.get("mercado"))
-            item_ref = id_map.get(key)
-            if not item_ref:
-                continue
-            item_id, original_payload, item = item_ref
-            original_payload.update(payload)
-            item["payload"] = original_payload
-            try:
-                self.db.atualizar_live_watch_item(item_id, payload=original_payload)
-            except Exception:
-                continue
+        return
 
     @staticmethod
     def _parse_payload_datetime(value: str | None) -> datetime | None:
@@ -383,6 +348,8 @@ class Scheduler:
         probe.setdefault("home_name", item.get("home_name"))
         probe.setdefault("away_name", item.get("away_name"))
         probe.setdefault("mercado", item.get("mercado"))
+        if probe.get("prob_modelo") is None and item.get("prob_modelo") is not None:
+            probe["prob_modelo"] = item.get("prob_modelo")
         try:
             enriquecer_tips_com_odds_oddspapi([probe], phase_operacional="live_monitor")
         except Exception as exc:
@@ -408,6 +375,11 @@ class Scheduler:
                 "shots_on": float(metricas.get("shots_on") or 0.0),
                 "corners": float(metricas.get("corners") or 0.0),
                 "xg": float(metricas.get("xg") or 0.0),
+                "possession": float(metricas.get("possession") or 0.0),
+                "passes_total": float(metricas.get("passes_total") or 0.0),
+                "passes_accuracy": float(metricas.get("passes_accuracy") or 0.0),
+                "attacks": float(metricas.get("attacks") or 0.0),
+                "dangerous_attacks": float(metricas.get("dangerous_attacks") or 0.0),
                 "red_cards": float(metricas.get("red_cards") or 0.0),
                 "yellow_cards": float(metricas.get("yellow_cards") or 0.0),
                 "teams": [
@@ -416,6 +388,11 @@ class Scheduler:
                         "shots_on": float(team.get("shots_on") or 0.0),
                         "corners": float(team.get("corners") or 0.0),
                         "xg": float(team.get("xg") or 0.0),
+                        "possession": float(team.get("possession") or 0.0),
+                        "passes_total": float(team.get("passes_total") or 0.0),
+                        "passes_accuracy": float(team.get("passes_accuracy") or 0.0),
+                        "attacks": float(team.get("attacks") or 0.0),
+                        "dangerous_attacks": float(team.get("dangerous_attacks") or 0.0),
                         "red_cards": float(team.get("red_cards") or 0.0),
                         "yellow_cards": float(team.get("yellow_cards") or 0.0),
                     }
@@ -423,6 +400,40 @@ class Scheduler:
                 ],
             },
         }
+
+    def _resolver_prob_modelo_live(
+        self,
+        item: dict,
+        fixture: dict,
+        leitura: dict,
+        payload: dict | None = None,
+    ) -> float:
+        payload_dict = payload if isinstance(payload, dict) else {}
+        predictor = getattr(self, "live_predictor", None)
+        if predictor is not None:
+            try:
+                resultado = predictor.prever_probabilidade(
+                    item=item,
+                    fixture=fixture,
+                    leitura=leitura,
+                    payload=payload_dict,
+                )
+            except Exception as exc:
+                print(f"[Scheduler] ⚠️ Falha ao prever live com modelo treinado: {exc}")
+                resultado = None
+            if resultado:
+                prob = float(resultado.get("prob_modelo") or 0.0)
+                payload_dict["prob_modelo"] = prob
+                payload_dict["live_prob_source"] = resultado.get("source") or "trained_league_model"
+                payload_dict["live_model_key"] = resultado.get("model_key")
+                payload_dict["live_model_feature_count"] = resultado.get("feature_count")
+                return prob
+
+        prob = self._inferir_prob_modelo_live(item.get("mercado", ""), leitura)
+        payload_dict["prob_modelo"] = prob
+        payload_dict.setdefault("live_prob_source", "heuristic_fallback")
+        payload_dict.setdefault("live_model_key", None)
+        return prob
 
     @staticmethod
     def _linha_live_mercado(mercado: str, default: float = 0.5) -> float:
@@ -455,6 +466,14 @@ class Scheduler:
         away_xg = float(away_team.get("xg") or 0.0)
         home_shots = float(home_team.get("shots_total") or 0.0)
         away_shots = float(away_team.get("shots_total") or 0.0)
+        home_possession = float(home_team.get("possession") or 0.0)
+        away_possession = float(away_team.get("possession") or 0.0)
+        home_pass_acc = float(home_team.get("passes_accuracy") or 0.0)
+        away_pass_acc = float(away_team.get("passes_accuracy") or 0.0)
+        home_attacks = float(home_team.get("attacks") or 0.0)
+        away_attacks = float(away_team.get("attacks") or 0.0)
+        home_danger = float(home_team.get("dangerous_attacks") or 0.0)
+        away_danger = float(away_team.get("dangerous_attacks") or 0.0)
         elapsed = int(leitura.get("elapsed") or 0)
         estado = str(leitura.get("estado_partida") or "").lower()
         base = max(MODEL_CONFIDENCE_MIN, 0.60)
@@ -469,8 +488,42 @@ class Scheduler:
                 edge += max(0.0, (away_shots - home_shots) * 0.008)
                 return self._clamp_live_probability(base + 0.05 + edge)
             equilibrio = max(0.0, 1.0 - min(abs(home_on - away_on), 3.0) / 3.0)
-            equilibrio += max(0.0, 1.0 - min(abs(home_xg - away_xg), 0.30) / 0.30)
-            return self._clamp_live_probability(base + 0.03 + (equilibrio * 0.035))
+            componentes = 1
+            if abs(home_xg) > 0.0 or abs(away_xg) > 0.0:
+                equilibrio += max(0.0, 1.0 - min(abs(home_xg - away_xg), 0.30) / 0.30)
+                componentes += 1
+            if abs(home_possession) > 0.0 or abs(away_possession) > 0.0:
+                equilibrio += max(0.0, 1.0 - min(abs(home_possession - away_possession), 30.0) / 30.0)
+                componentes += 1
+            if abs(home_pass_acc) > 0.0 or abs(away_pass_acc) > 0.0:
+                equilibrio += max(0.0, 1.0 - min(abs(home_pass_acc - away_pass_acc), 20.0) / 20.0)
+                componentes += 1
+            if abs(home_attacks) > 0.0 or abs(away_attacks) > 0.0:
+                equilibrio += max(0.0, 1.0 - min(abs(home_attacks - away_attacks), 14.0) / 14.0)
+                componentes += 1
+            if abs(home_danger) > 0.0 or abs(away_danger) > 0.0:
+                equilibrio += max(0.0, 1.0 - min(abs(home_danger - away_danger), 8.0) / 8.0)
+                componentes += 1
+            dominance_penalty = 0.0
+            if abs(home_on - away_on) >= 2:
+                dominance_penalty += 0.05
+            if abs(home_xg) > 0.0 or abs(away_xg) > 0.0:
+                if abs(home_xg - away_xg) >= 0.25:
+                    dominance_penalty += 0.08
+            if abs(home_possession) > 0.0 or abs(away_possession) > 0.0:
+                if abs(home_possession - away_possession) >= 24:
+                    dominance_penalty += 0.08
+            if abs(home_pass_acc) > 0.0 or abs(away_pass_acc) > 0.0:
+                if abs(home_pass_acc - away_pass_acc) >= 14:
+                    dominance_penalty += 0.04
+            if abs(home_attacks) > 0.0 or abs(away_attacks) > 0.0:
+                if abs(home_attacks - away_attacks) >= 12:
+                    dominance_penalty += 0.04
+            if abs(home_danger) > 0.0 or abs(away_danger) > 0.0:
+                if abs(home_danger - away_danger) >= 6:
+                    dominance_penalty += 0.05
+            equilibrio = equilibrio / max(componentes, 1)
+            return self._clamp_live_probability(base + 0.015 + (equilibrio * 0.07) - dominance_penalty)
 
         if "corners" in mercado:
             linha = self._linha_live_mercado(mercado, default=8.5)
@@ -631,6 +684,20 @@ class Scheduler:
         payload["price_watch_final_state"] = "released"
         payload.pop("price_watch_next_check_at", None)
 
+    @staticmethod
+    def _limpar_estado_preco_live(payload: dict):
+        for key in (
+            "price_watch_active",
+            "price_watch_started_at",
+            "price_watch_expires_at",
+            "price_watch_checks",
+            "price_watch_next_check_at",
+            "price_watch_final_state",
+            "price_watch_reason",
+            "price_watch_closed_at",
+        ):
+            payload.pop(key, None)
+
     def _acionar_janela_preco_live_inteligente(
         self,
         payload: dict,
@@ -717,14 +784,64 @@ class Scheduler:
         else:
             contexto = contexto_bruto
         meta = cls._meta_live_contexto(item)
-        return "\n".join([
+        return cls._sanitizar_texto_telegram("\n".join([
             titulo,
             f"<code>{home_name}</code> <b>x</b> <code>{away_name}</code>",
             f"• {mercado_label}" + (f" | {meta}" if meta else ""),
             f"• Minuto {minuto}",
             f"• {mensagem}",
             f"<i>{contexto}</i>",
-        ]).rstrip()
+        ])).rstrip()
+
+    @staticmethod
+    def _sanitizar_texto_telegram(texto: str) -> str:
+        if not isinstance(texto, str) or not texto:
+            return texto
+        sanitizado = texto
+        replacements = {
+            "ÃƒÂ§": "c",
+            "ÃƒÂ¡": "a",
+            "ÃƒÂ ": "a",
+            "ÃƒÂ£": "a",
+            "ÃƒÂ¢": "a",
+            "ÃƒÂ©": "e",
+            "ÃƒÂª": "e",
+            "ÃƒÂ­": "i",
+            "ÃƒÂ³": "o",
+            "ÃƒÂ´": "o",
+            "ÃƒÂµ": "o",
+            "ÃƒÂº": "u",
+            "Ã§": "c",
+            "Ã¡": "a",
+            "Ã ": "a",
+            "Ã£": "a",
+            "Ã¢": "a",
+            "Ã©": "e",
+            "Ãª": "e",
+            "Ã­": "i",
+            "Ã³": "o",
+            "Ã´": "o",
+            "Ãµ": "o",
+            "Ãº": "u",
+            "Ã‰": "E",
+            "Ã‡": "C",
+            "Ãš": "U",
+            "Âº": "o",
+            "Âª": "a",
+            "Â": "",
+            "â€¢": "•",
+            "â€“": "-",
+            "â€”": "-",
+            "â€œ": "\"",
+            "â€": "\"",
+            "â€˜": "'",
+            "â€™": "'",
+            "ï¸": "",
+            "�": "",
+        }
+        for bad, good in replacements.items():
+            sanitizado = sanitizado.replace(bad, good)
+        return sanitizado
 
     def _garantir_radar_do_dia(self, data: str = None) -> bool:
         """Reconstrói silenciosamente o radar do dia se o scheduler subiu depois do scan."""
@@ -1117,6 +1234,7 @@ class Scheduler:
                 resultado.get("tips_enviadas_llm"),
                 resultado.get("tips_aprovadas"),
                 resultado.get("tips_rejeitadas_llm"),
+                resultado.get("tips_observadas_sem_odd"),
                 resultado.get("combos"),
             ]):
                 print("   ✅ Nenhum candidato elegível nesta janela")
@@ -1353,6 +1471,7 @@ class Scheduler:
                             item_id,
                             note=item.get("note") or "Gancho manual do fixture mantido para exploracao live.",
                             payload=payload,
+                            prob_modelo=item.get("prob_modelo"),
                         )
                         itens_tocados.append(item_id)
                         continue
@@ -1364,6 +1483,7 @@ class Scheduler:
                             status="resolved",
                             note=item.get("note"),
                             payload=payload,
+                            prob_modelo=item.get("prob_modelo"),
                         )
                         itens_tocados.append(item_id)
                         itens_resolvidos.append(item_id)
@@ -1400,6 +1520,7 @@ class Scheduler:
                                 status="resolved",
                                 note=item.get("note"),
                                 payload=payload,
+                                prob_modelo=item.get("prob_modelo"),
                             )
                             itens_tocados.append(item_id)
                             itens_resolvidos.append(item_id)
@@ -1432,6 +1553,7 @@ class Scheduler:
                                 status="resolved",
                                 note=item.get("note"),
                                 payload=payload,
+                                prob_modelo=item.get("prob_modelo"),
                             )
                             itens_tocados.append(item_id)
                             itens_resolvidos.append(item_id)
@@ -1441,6 +1563,7 @@ class Scheduler:
                     payload["live_reading"] = self._snapshot_leitura_live(leitura)
                     payload["metricas_live"] = payload["live_reading"].get("metricas")
                     payload["estado_partida"] = leitura.get("estado_partida")
+                    item["prob_modelo"] = self._resolver_prob_modelo_live(item, game, leitura, payload)
                     veredito = leitura.get("veredito", "monitorar")
                     elapsed = leitura.get("elapsed") or "?"
                     last_verdict = payload.get("last_live_verdict")
@@ -1463,55 +1586,10 @@ class Scheduler:
                         veredito = "monitorar"
 
                     if veredito == "sinal_live" and item.get("watch_type") in {"approved_prelive", "live_opportunity"}:
-                        now_local = datetime.now(ZoneInfo(TIMEZONE))
-                        if payload.get("price_watch_final_state") == "expired" and not payload.get("price_watch_active"):
-                            veredito = "cancelar"
-                            leitura["mensagem"] = payload.get("price_watch_reason") or "Janela de preco encerrada sem odd executavel."
-                        elif payload.get("price_watch_active") and not self._deve_consultar_odd_live_item(item, payload, now_local):
-                            veredito = "monitorar"
-                        else:
+                        if ODDSPAPI_USE_LIVE:
                             payload = self._consultar_odd_live_agora(item, payload)
                             item["payload"] = payload
-                        if veredito == "sinal_live" and self._odd_ev_live_aprovados(payload):
-                            self._encerrar_janela_preco_live(payload, now_local)
-                        elif veredito == "sinal_live":
-                            acao_preco, motivo_preco = self._acionar_janela_preco_live_inteligente(
-                                payload,
-                                item,
-                                elapsed,
-                                now_local,
-                            )
-                            motivo_preco = self._normalizar_motivo_preco_live(payload, motivo_preco)
-                            payload["last_live_verdict"] = "price_watch"
-                            payload["last_live_minute"] = elapsed
-                            payload["last_live_message"] = leitura.get("mensagem", item.get("note"))
-                            payload["price_watch_reason"] = motivo_preco
-                            self.db.atualizar_live_watch_item(
-                                item_id,
-                                note=motivo_preco,
-                                payload=payload,
-                            )
-                            item["note"] = motivo_preco
-                            item["payload"] = payload
-                            if acao_preco == "started":
-                                bloco_preco = self._formatar_alerta_preco_live(
-                                    {
-                                        **item,
-                                        "payload": payload,
-                                        "elapsed": elapsed,
-                                    },
-                                    titulo="🟡 <b>Janela de preço em observação</b>",
-                                    contexto=f"Cenário passou, mas a odd ainda não ficou boa; vou rechecando por até {LIVE_PRICE_WATCH_WINDOW_MIN} minutos.",
-                                )
-                                alertas_admin.append(
-                                    bloco_preco
-                                )
-                                alertas_preco_publicos.append(bloco_preco)
-                            if acao_preco == "expired":
-                                veredito = "cancelar"
-                                leitura["mensagem"] = motivo_preco
-                            else:
-                                veredito = "monitorar"
+                        self._limpar_estado_preco_live(payload)
 
                     emitir_sinal_publico = False
                     if veredito in {"sinal_live", "cancelar"}:
@@ -1567,6 +1645,7 @@ class Scheduler:
                                 status=novo_status,
                                 note=note,
                                 payload=payload,
+                                prob_modelo=item.get("prob_modelo"),
                             )
                     if (
                         veredito == "sinal_live"
@@ -1582,6 +1661,7 @@ class Scheduler:
                             item_id,
                             note=leitura.get("mensagem", item.get("note")),
                             payload=payload,
+                            prob_modelo=item.get("prob_modelo"),
                         )
                     itens_tocados.append(item_id)
                     print(
@@ -1597,6 +1677,7 @@ class Scheduler:
                             item_id,
                             note=item.get("note") or "Fixture manual aguardando kickoff/live.",
                             payload=payload,
+                            prob_modelo=item.get("prob_modelo"),
                         )
                     itens_tocados.append(item_id)
                     continue
@@ -2101,90 +2182,52 @@ class Scheduler:
             payload["live_reading"] = self._snapshot_leitura_live(leitura)
             payload["metricas_live"] = payload["live_reading"].get("metricas")
             payload["estado_partida"] = leitura.get("estado_partida")
+            prob_modelo = self._resolver_prob_modelo_live(item_virtual, fixture, leitura, payload)
             item_salvo = {
                 **item_virtual,
-                "prob_modelo": self._inferir_prob_modelo_live(mercado, leitura),
+                "prob_modelo": prob_modelo,
                 "status": "active",
                 "note": leitura.get("mensagem"),
                 "payload": payload,
             }
-            payload = self._consultar_odd_live_agora(item_salvo, payload)
+            if ODDSPAPI_USE_LIVE:
+                payload = self._consultar_odd_live_agora(item_salvo, payload)
             item_salvo["payload"] = payload
             item_id = self.db.salvar_live_watch_item(scan_date, item_salvo)
-            now_local = datetime.now(ZoneInfo(TIMEZONE))
-
-            if self._odd_ev_live_aprovados(payload):
-                self._encerrar_janela_preco_live(payload, now_local)
-                payload["training_snapshot"] = self._snapshot_leitura_live(leitura)
-                self.db.atualizar_live_watch_item(item_id, payload=payload)
-                try:
-                    signal_minute = int(leitura.get("elapsed") or 0) or None
-                except Exception:
-                    signal_minute = None
-                self.db.salvar_live_result_signal(
-                    {
-                        **item_salvo,
-                        "id": item_id,
-                        "scan_date": scan_date,
-                        "payload": payload,
-                    },
-                    signal_minute=signal_minute,
-                    signal_note=leitura.get("mensagem"),
-                )
-                self.db.salvar_live_market_notification(scan_date, fixture_id, mercado, "sinal_live")
-
-                alertas.append(
-                    f"🟢 <b>Entrada live liberada</b>\n"
-                    f"<code>{home_name}</code> <b>x</b> <code>{away_name}</code>\n"
-                    f"• {nomes_mercado.get(mercado, mercado)}"
-                    + (f" | {self._meta_live_contexto({'payload': payload, **item_salvo})}" if self._meta_live_contexto({'payload': payload, **item_salvo}) else "")
-                    + "\n"
-                    f"• Minuto {leitura.get('elapsed') or '?'}\n"
-                    f"• {leitura.get('mensagem', 'Sem leitura adicional.')}"
-                )
-                sinais.append({
+            self._limpar_estado_preco_live(payload)
+            payload["training_snapshot"] = self._snapshot_leitura_live(leitura)
+            self.db.atualizar_live_watch_item(item_id, payload=payload, prob_modelo=prob_modelo)
+            try:
+                signal_minute = int(leitura.get("elapsed") or 0) or None
+            except Exception:
+                signal_minute = None
+            self.db.salvar_live_result_signal(
+                {
                     **item_salvo,
                     "id": item_id,
+                    "scan_date": scan_date,
                     "payload": payload,
-                    "elapsed": leitura.get("elapsed") or "?",
-                })
-            else:
-                acao_preco, motivo_preco = self._acionar_janela_preco_live_inteligente(
-                    payload,
-                    item_salvo,
-                    leitura.get("elapsed"),
-                    now_local,
-                )
-                motivo_preco = self._normalizar_motivo_preco_live(payload, motivo_preco)
-                novo_status = "resolved" if acao_preco == "expired" else None
-                self.db.atualizar_live_watch_item(item_id, status=novo_status, note=motivo_preco, payload=payload)
-                if acao_preco == "started":
-                    bloco_preco = self._formatar_alerta_preco_live(
-                        {
-                            **item_salvo,
-                            "id": item_id,
-                            "payload": payload,
-                            "elapsed": leitura.get("elapsed") or "?",
-                            "note": motivo_preco,
-                        },
-                        titulo="🟡 <b>Janela de preço em observação</b>",
-                        contexto=f"Cenário passou, mas a odd ainda não ficou boa; vou rechecando por até {LIVE_PRICE_WATCH_WINDOW_MIN} minutos.",
-                    )
-                    alertas.append(bloco_preco)
-                elif acao_preco == "expired":
-                    alertas.append(
-                        f"🔴 <b>Leitura cancelada</b>\n"
-                        f"<code>{home_name}</code> <b>x</b> <code>{away_name}</code>\n"
-                        f"• {nomes_mercado.get(mercado, mercado)}"
-                        + (
-                            f" | {self._meta_live_contexto({'payload': payload, **item_salvo})}"
-                            if self._meta_live_contexto({'payload': payload, **item_salvo})
-                            else ""
-                        )
-                        + "\n"
-                        f"• Minuto {leitura.get('elapsed') or '?'}\n"
-                        f"• {motivo_preco}"
-                    )
+                },
+                signal_minute=signal_minute,
+                signal_note=leitura.get("mensagem"),
+            )
+            self.db.salvar_live_market_notification(scan_date, fixture_id, mercado, "sinal_live")
+
+            alertas.append(
+                f"🟢 <b>Entrada live liberada</b>\n"
+                f"<code>{home_name}</code> <b>x</b> <code>{away_name}</code>\n"
+                f"• {nomes_mercado.get(mercado, mercado)}"
+                + (f" | {self._meta_live_contexto({'payload': payload, **item_salvo})}" if self._meta_live_contexto({'payload': payload, **item_salvo}) else "")
+                + "\n"
+                f"• Minuto {leitura.get('elapsed') or '?'}\n"
+                f"• {leitura.get('mensagem', 'Sem leitura adicional.')}"
+            )
+            sinais.append({
+                **item_salvo,
+                "id": item_id,
+                "payload": payload,
+                "elapsed": leitura.get("elapsed") or "?",
+            })
             categorias_existentes.add(categoria)
 
         return alertas, sinais
@@ -2342,34 +2385,19 @@ class Scheduler:
         odd = cls._odd_live_contexto(item)
         if odd and odd > 1:
             partes.append(f"Odd {odd:.2f}")
-        payload = item.get("payload") or {}
-        ev = item.get("ev_percent")
-        if ev in (None, ""):
-            ev = payload.get("ev_percent")
-        if ev not in (None, ""):
-            try:
-                partes.append(f"EV {float(ev):+.1f}%")
-            except (TypeError, ValueError):
-                pass
-        casa = cls._bookmaker_live_contexto(item)
-        if casa and partes:
-            partes.append(casa)
+            casa = cls._bookmaker_live_contexto(item)
+            if casa:
+                partes.append(casa)
+        else:
+            payload = item.get("payload") or {}
+            odd_status = payload.get("odd_status") or item.get("odd_status")
+            if odd_status in ("sem_odd_valida", "fixture_nao_encontrado", "acesso_live_restrito"):
+                partes.append("Odd indisponivel na 1xBet")
         return " | ".join(partes)
 
     @classmethod
     def _sinal_live_publicavel(cls, item: dict) -> bool:
-        odd = cls._odd_live_contexto(item)
-        if odd is None or odd <= 1:
-            return False
-        payload = item.get("payload") or {}
-        ev = item.get("ev_percent")
-        if ev in (None, ""):
-            ev = payload.get("ev_percent")
-        try:
-            float(ev)
-        except (TypeError, ValueError):
-            return False
-        return True
+        return item.get("watch_type") in {"approved_prelive", "live_opportunity"}
 
     @staticmethod
     def _formatar_combos_live(combos_live: list[dict]) -> str:
@@ -2381,9 +2409,6 @@ class Scheduler:
             odd_composta = combo.get("odd_composta")
             if odd_composta:
                 detalhes_combo.append(f"Odd {odd_composta:.2f}")
-            ev_composto = combo.get("ev_composto")
-            if ev_composto is not None:
-                detalhes_combo.append(f"EV {ev_composto:+.1f}%")
             linhas.append(f"\n<b>{tipo} live #{idx}</b> | {' | '.join(detalhes_combo)}")
             for item in combo.get("tips", []):
                 home = item.get("home_name", "?")
@@ -2445,6 +2470,7 @@ class Scheduler:
         try:
             import requests
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+            texto = self._sanitizar_texto_telegram(texto)
             msg = texto[:4000] + "\n\n... (truncado)" if len(texto) > 4000 else texto
             payload = {
                 "chat_id": int(chat_id),
